@@ -15,6 +15,7 @@ def client(tmp_path):
     with patch("musicmixer.config.settings") as mock_settings:
         mock_settings.data_dir = tmp_path
         mock_settings.allowed_extensions = {".mp3", ".wav"}
+        mock_settings.max_file_size_mb = 50
         mock_settings.cors_origins = ["http://localhost:5173"]
 
         # Create required directories
@@ -207,6 +208,33 @@ class TestCreateRemix:
                 data={"prompt": "test"},
             )
             assert response.status_code == 200
+        finally:
+            del sys.modules["musicmixer.services.pipeline_day1"]
+
+
+    def test_rejects_oversized_upload(self, client, tmp_path):
+        """Should return 413 when a file exceeds max_file_size_mb."""
+        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        fake_module.run_pipeline_sync = lambda *a: None
+        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
+
+        try:
+            # mock_settings.max_file_size_mb is 50, so limit is 50 * 1024 * 1024 bytes
+            # Send a file that exceeds 50MB (we'll set max_file_size_mb=0 via a nested patch)
+            with patch("musicmixer.api.remix.settings") as inner_settings:
+                inner_settings.max_file_size_mb = 0  # 0 MB limit
+                inner_settings.allowed_extensions = {".mp3", ".wav"}
+                inner_settings.data_dir = tmp_path
+
+                response = client.post(
+                    "/api/remix",
+                    files={
+                        "song_a": ("song_a.mp3", b"some data", "audio/mpeg"),
+                        "song_b": ("song_b.mp3", b"some data", "audio/mpeg"),
+                    },
+                    data={"prompt": "test"},
+                )
+            assert response.status_code == 413
         finally:
             del sys.modules["musicmixer.services.pipeline_day1"]
 

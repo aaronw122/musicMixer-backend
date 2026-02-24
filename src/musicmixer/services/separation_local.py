@@ -2,6 +2,8 @@ import logging
 from pathlib import Path
 from typing import Callable
 
+import soundfile as sf
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,7 +25,7 @@ def separate_stems_local(
         progress_callback("Running local stem separation (htdemucs_ft)...")
 
     separator = Separator(output_dir=str(output_dir))
-    separator.load_model("htdemucs_ft")
+    separator.load_model("htdemucs_ft.yaml")
     separator.separate(str(audio_path))
 
     # Map output files to stem names
@@ -37,6 +39,13 @@ def separate_stems_local(
             if stem_name in name_lower:
                 stems[stem_name] = stem_file
                 break
+
+    # Re-encode stems to float32 WAV (htdemucs_ft outputs 16-bit)
+    for stem_name, stem_path in stems.items():
+        if stem_path is None:
+            continue
+        audio_data, sr = sf.read(str(stem_path), dtype="float32")
+        sf.write(str(stem_path), audio_data, sr, subtype="FLOAT")
 
     # 4-stem model: guitar and piano are not separated
     stems.setdefault("guitar", None)

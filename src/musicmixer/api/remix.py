@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 @router.post("/remix")
-async def create_remix(
+def create_remix(
     song_a: UploadFile = File(...),
     song_b: UploadFile = File(...),
     prompt: str = Form(""),
@@ -21,6 +21,8 @@ async def create_remix(
 
     Day 1: Synchronous. Blocks until remix is complete.
     """
+    max_bytes = settings.max_file_size_mb * 1024 * 1024
+
     # Validate extensions
     for label, file in [("song_a", song_a), ("song_b", song_b)]:
         ext = Path(file.filename or "").suffix.lower()
@@ -44,8 +46,11 @@ async def create_remix(
     song_a_path = upload_dir / f"song_a{song_a_ext}"
     song_b_path = upload_dir / f"song_b{song_b_ext}"
 
-    song_a_path.write_bytes(await song_a.read())
-    song_b_path.write_bytes(await song_b.read())
+    for label, file, dest in [("song_a", song_a, song_a_path), ("song_b", song_b, song_b_path)]:
+        data = file.file.read()
+        if len(data) > max_bytes:
+            raise HTTPException(413, f"{label} exceeds {settings.max_file_size_mb}MB limit")
+        dest.write_bytes(data)
 
     logger.info(f"Session {session_id}: saved uploads ({song_a_path.name}, {song_b_path.name})")
 

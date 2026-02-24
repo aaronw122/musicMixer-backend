@@ -152,4 +152,6 @@ Coming in Day 2. Day 1 pipeline is fully synchronous (POST blocks until done).
 
 ## Lessons Learned
 
-_(Add entries here as the project evolves)_
+- **Kill background agents before `uv run dev`.** Agents writing files in the backend dir trigger `--reload` restart loops. Check: `pgrep -lf 'claude|codex'`
+- **Verify port is free before starting server.** Zombie processes hold ports after `Ctrl+C`. Check: `lsof -i :8000`
+- **No `.env` = Modal default.** Without `STEM_BACKEND=local` in `.env`, the server tries Modal (hangs if unconfigured).

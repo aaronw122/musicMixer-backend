@@ -122,3 +122,22 @@ class TestOverlayAndExport:
 
         assert output_path.exists()
         assert output_path.stat().st_size > 0
+
+    def test_all_none_stems_raises_error(self, tmp_path):
+        """All-None stems should raise ValueError, not crash on np.sum."""
+        from musicmixer.services.mixer import overlay_and_export
+
+        output_path = tmp_path / "output" / "remix.mp3"
+
+        with pytest.raises(ValueError, match="No valid stems to mix"):
+            overlay_and_export(
+                vocal_stems={"vocals": None},
+                instrumental_stems={
+                    "drums": None,
+                    "bass": None,
+                    "guitar": None,
+                    "piano": None,
+                    "other": None,
+                },
+                output_path=output_path,
+            )
