@@ -34,3 +34,14 @@ app.include_router(remix.router, prefix="/api")
 
 # Serve static HTML page -- must come LAST (after all API routes)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
+
+
+def dev():
+    import uvicorn
+    uvicorn.run(
+        "musicmixer.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=True,
+        reload_excludes=["data/*", "*.pyc", "__pycache__/*", "notes/*"],
+    )

@@ -39,8 +39,8 @@ def run_pipeline_sync(
         future_b = executor.submit(
             separate_stems, song_b_path, song_b_stems_dir
         )
-        song_a_stems = future_a.result(timeout=300)
-        song_b_stems = future_b.result(timeout=300)
+        song_a_stems = future_a.result(timeout=900)
+        song_b_stems = future_b.result(timeout=900)
 
     logger.info(
         f"[{session_id}] Separation complete. "

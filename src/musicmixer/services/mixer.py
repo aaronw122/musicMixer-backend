@@ -43,6 +43,9 @@ def overlay_and_export(
         all_audio.append((stem_name, audio))
         max_length = max(max_length, len(audio))
 
+    if not all_audio:
+        raise ValueError("No valid stems to mix")
+
     # Pad shorter stems to match longest
     padded = []
     for stem_name, audio in all_audio:
@@ -64,23 +67,23 @@ def overlay_and_export(
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_wav = Path(tmp.name)
 
-    sf.write(str(tmp_wav), mixed, target_sr, subtype="FLOAT")
+    try:
+        sf.write(str(tmp_wav), mixed, target_sr, subtype="FLOAT")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(tmp_wav),
-        "-codec:a", "libmp3lame",
-        "-b:a", "320k",
-        str(output_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True, timeout=120)
-    if result.returncode != 0:
-        logger.error(f"ffmpeg failed: {result.stderr.decode()}")
-        raise RuntimeError(f"ffmpeg export failed: {result.stderr.decode()[:500]}")
-
-    # Clean up temp WAV
-    tmp_wav.unlink(missing_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(tmp_wav),
+            "-codec:a", "libmp3lame",
+            "-b:a", "320k",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0:
+            logger.error(f"ffmpeg failed: {result.stderr.decode()}")
+            raise RuntimeError(f"ffmpeg export failed: {result.stderr.decode()[:500]}")
+    finally:
+        tmp_wav.unlink(missing_ok=True)
 
     logger.info(f"Exported remix: {output_path} ({output_path.stat().st_size / 1024:.0f} KB)")
     return output_path
