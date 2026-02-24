@@ -1,2 +1,95 @@
 <!DOCTYPE html>
-<html><body><h1>musicMixer - loading...</h1></body></html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>musicMixer - Day 1</title>
+    <style>
+        /* Minimal styling -- replaced by React + Tailwind on Day 3 */
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+        h1 { margin-bottom: 4px; }
+        .subtitle { color: #666; margin-top: 0; }
+        label { display: block; margin-top: 16px; font-weight: 600; }
+        input[type="file"], input[type="text"] { margin-top: 4px; }
+        button { margin-top: 20px; padding: 10px 24px; font-size: 16px; cursor: pointer; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #status { margin-top: 16px; color: #444; }
+        #player { margin-top: 20px; display: none; }
+        audio { width: 100%; }
+        .error { color: #c00; }
+    </style>
+</head>
+<body>
+    <h1>musicMixer</h1>
+    <p class="subtitle">Day 1: Hardcoded Frankenmix</p>
+
+    <form id="remix-form">
+        <label for="song_a">Song A (vocals source):</label>
+        <input type="file" id="song_a" name="song_a" accept=".mp3,.wav" required>
+
+        <label for="song_b">Song B (instrumentals source):</label>
+        <input type="file" id="song_b" name="song_b" accept=".mp3,.wav" required>
+
+        <label for="prompt">Prompt (not used yet):</label>
+        <input type="text" id="prompt" name="prompt" placeholder="Describe your remix..."
+               style="width: 100%; padding: 8px;">
+
+        <button type="submit" id="submit-btn">Create Remix</button>
+    </form>
+
+    <div id="status"></div>
+
+    <div id="player">
+        <h3>Your Remix</h3>
+        <audio id="audio" controls></audio>
+    </div>
+
+    <script>
+        const form = document.getElementById('remix-form');
+        const status = document.getElementById('status');
+        const player = document.getElementById('player');
+        const audio = document.getElementById('audio');
+        const submitBtn = document.getElementById('submit-btn');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            player.style.display = 'none';
+            status.className = '';
+            status.textContent = 'Uploading and processing... (this takes 1-2 minutes)';
+            submitBtn.disabled = true;
+
+            const formData = new FormData();
+            formData.append('song_a', document.getElementById('song_a').files[0]);
+            formData.append('song_b', document.getElementById('song_b').files[0]);
+            formData.append('prompt', document.getElementById('prompt').value || '');
+
+            try {
+                const response = await fetch('/api/remix', {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || `HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+                const sessionId = data.session_id;
+
+                status.textContent = 'Remix complete! Loading audio...';
+
+                // Set audio source
+                audio.src = `/api/remix/${sessionId}/audio`;
+                player.style.display = 'block';
+                status.textContent = 'Press play to hear your remix.';
+            } catch (err) {
+                status.textContent = `Error: ${err.message}`;
+                status.className = 'error';
+            } finally {
+                submitBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
