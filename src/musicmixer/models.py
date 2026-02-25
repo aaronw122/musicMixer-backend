@@ -74,7 +74,7 @@ class RemixPlan:
     start_time_instrumental: float
     end_time_instrumental: float
     sections: list[Section]                     # Beat-aligned arrangement
-    tempo_source: str                           # "song_a" | "song_b" | "average"
+    tempo_source: str                           # "song_a" | "song_b" | "average" | "weighted_midpoint"
     key_source: str                             # "song_a" | "song_b" | "none"
     explanation: str
     warnings: list[str] = field(default_factory=list)

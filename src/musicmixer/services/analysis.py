@@ -121,6 +121,56 @@ def reconcile_bpm(
         best_score,
     )
 
-    new_a = replace(meta_a, bpm=best_pair[0])
-    new_b = replace(meta_b, bpm=best_pair[1])
+    new_a = replace(
+        meta_a,
+        bpm=best_pair[0],
+        beat_frames=_transform_beat_frames(meta_a.beat_frames, best_labels[0]),
+        total_beats=_transform_total_beats(meta_a.total_beats, best_labels[0]),
+    )
+    new_b = replace(
+        meta_b,
+        bpm=best_pair[1],
+        beat_frames=_transform_beat_frames(meta_b.beat_frames, best_labels[1]),
+        total_beats=_transform_total_beats(meta_b.total_beats, best_labels[1]),
+    )
     return new_a, new_b
+
+
+def _transform_beat_frames(
+    beat_frames: np.ndarray, interpretation: str
+) -> np.ndarray:
+    """Transform beat_frames to match a reconciled BPM interpretation.
+
+    When BPM is halved, the beat grid has twice as many entries as the
+    reconciled BPM implies -- take every other beat.
+    When BPM is doubled, interpolate midpoints between consecutive beats.
+    For 3/2 and 2/3 multipliers, leave as-is (re-detected post-stretch).
+    """
+    if interpretation == "original" or len(beat_frames) < 2:
+        return beat_frames
+
+    if interpretation == "halved":
+        # BPM halved -> half as many beats -> take every other frame
+        return beat_frames[::2]
+
+    if interpretation == "doubled":
+        # BPM doubled -> twice as many beats -> interpolate midpoints
+        midpoints = (beat_frames[:-1] + beat_frames[1:]) // 2
+        # Interleave: original[0], mid[0], original[1], mid[1], ...
+        interleaved = np.empty(len(beat_frames) + len(midpoints), dtype=beat_frames.dtype)
+        interleaved[0::2] = beat_frames
+        interleaved[1::2] = midpoints
+        return interleaved
+
+    # "3/2" or "2/3": leave beat_frames as-is (re-detected post-stretch)
+    return beat_frames
+
+
+def _transform_total_beats(total_beats: int, interpretation: str) -> int:
+    """Adjust total_beats count to match the reconciled BPM interpretation."""
+    if interpretation == "halved":
+        return max(total_beats // 2, 4)  # At least 1 bar
+    if interpretation == "doubled":
+        return total_beats * 2
+    # "original", "3/2", "2/3": unchanged
+    return total_beats

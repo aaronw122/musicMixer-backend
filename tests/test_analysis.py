@@ -12,7 +12,12 @@ import pytest
 import soundfile as sf
 
 from musicmixer.models import AudioMetadata
-from musicmixer.services.analysis import analyze_audio, reconcile_bpm
+from musicmixer.services.analysis import (
+    analyze_audio,
+    reconcile_bpm,
+    _transform_beat_frames,
+    _transform_total_beats,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +137,54 @@ class TestReconcileBpm:
         b = _make_metadata(bpm=120.0)
         original_a_bpm = a.bpm
         original_b_bpm = b.bpm
+        original_a_frames = a.beat_frames.copy()
 
         reconcile_bpm(a, b)
 
         assert a.bpm == original_a_bpm
         assert b.bpm == original_b_bpm
+        np.testing.assert_array_equal(a.beat_frames, original_a_frames)
+
+    def test_doubled_transforms_beat_frames(self) -> None:
+        """When BPM is doubled, beat_frames should have interpolated midpoints."""
+        a = _make_metadata(bpm=60.0)  # Will be doubled to 120
+        b = _make_metadata(bpm=120.0)
+        new_a, new_b = reconcile_bpm(a, b)
+
+        # A was doubled: original frames [0, 100, 200] -> [0, 50, 100, 150, 200]
+        expected_a = np.array([0, 50, 100, 150, 200], dtype=np.intp)
+        np.testing.assert_array_equal(new_a.beat_frames, expected_a)
+        # B was original: frames unchanged
+        np.testing.assert_array_equal(new_b.beat_frames, b.beat_frames)
+
+    def test_halved_transforms_beat_frames(self) -> None:
+        """_transform_beat_frames with 'halved' takes every other beat."""
+        frames = np.array([0, 50, 100, 150, 200, 250], dtype=np.intp)
+        result = _transform_beat_frames(frames, "halved")
+        expected = np.array([0, 100, 200], dtype=np.intp)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_doubled_transforms_total_beats(self) -> None:
+        """When BPM is doubled, total_beats should double."""
+        a = _make_metadata(bpm=60.0)  # Will be doubled to 120
+        b = _make_metadata(bpm=120.0)
+        new_a, _ = reconcile_bpm(a, b)
+
+        assert new_a.total_beats == a.total_beats * 2
+
+    def test_halved_transforms_total_beats(self) -> None:
+        """_transform_total_beats with 'halved' halves beat count (min 4)."""
+        assert _transform_total_beats(80, "halved") == 40
+        assert _transform_total_beats(6, "halved") == 4  # min 4
+
+    def test_original_leaves_beat_frames_unchanged(self) -> None:
+        """_transform_beat_frames with 'original' returns frames as-is."""
+        frames = np.array([0, 100, 200], dtype=np.intp)
+        result = _transform_beat_frames(frames, "original")
+        np.testing.assert_array_equal(result, frames)
+
+    def test_triplet_leaves_beat_frames_unchanged(self) -> None:
+        """_transform_beat_frames with '3/2' or '2/3' returns frames as-is."""
+        frames = np.array([0, 100, 200], dtype=np.intp)
+        np.testing.assert_array_equal(_transform_beat_frames(frames, "3/2"), frames)
+        np.testing.assert_array_equal(_transform_beat_frames(frames, "2/3"), frames)
