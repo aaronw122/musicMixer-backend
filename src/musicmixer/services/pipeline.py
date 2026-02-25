@@ -387,10 +387,11 @@ def run_pipeline(
     mixed = auto_level(
         mixed, sr,
         window_sec=2.0,       # 2-second analysis window (slow)
-        max_boost_db=5.0,     # Up to 5dB boost for quiet sections
+        max_boost_db=2.0,     # Conservative boost to avoid lifting tail artifacts
         max_cut_db=3.0,       # Up to 3dB cut for loud sections
         target_percentile=50, # Target the median level
         detector_audio=instrumental_bus,  # Drive detection from stable instrumental
+        active_floor_db=-40.0,  # Treat lower-level tail/noise windows as inactive
     )
     logger.info("Session %s: Auto-leveler applied", session_id)
 
@@ -408,12 +409,16 @@ def run_pipeline(
     mixed = lufs_normalize(mixed, sr, target_lufs=-10.0)
 
     # === STEP 16: Re-check peaks after LUFS normalization ===
+    # Use transparent gain trim here instead of a second saturation stage.
+    # This preserves timbre in late/quiet sections where extra clipping can
+    # expose graininess from separated/time-stretched vocals.
     peak = true_peak(mixed)
     if peak > ceiling:
-        mixed = soft_clip(mixed, ceiling)
+        trim = ceiling / peak
+        mixed = mixed * trim
         logger.info(
-            "Session %s: Post-normalize peak limiter (peak was %.3f, ceiling %.3f)",
-            session_id, peak, ceiling,
+            "Session %s: Post-normalize transparent trim (peak was %.3f, ceiling %.3f, trim %.3f)",
+            session_id, peak, ceiling, trim,
         )
 
     # === STEP 17: Fades ===
