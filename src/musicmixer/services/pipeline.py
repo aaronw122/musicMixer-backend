@@ -64,10 +64,11 @@ def run_pipeline(
      11. Cross-song level matching
      12. Render arrangement into vocal + instrumental buses
      13. Sum buses into final mix
-     14. LUFS normalize final mix
-     15. Peak limiter
-     16. Fade-in / fade-out
-     17. Export to MP3
+     14. Peak limit (bring peaks under control before normalization)
+     15. LUFS normalize final mix
+     16. Re-check peaks after normalization
+     17. Fade-in / fade-out
+     18. Export to MP3
     """
     from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
@@ -341,25 +342,34 @@ def run_pipeline(
 
     mixed = vocal_bus + instrumental_bus
 
-    # === STEP 14: LUFS normalize final mix ===
-    mixed = lufs_normalize(mixed, sr, target_lufs=-14.0)
-
-    # === STEP 15: Peak limiter ===
+    # === STEP 14: Peak limit first (bring peaks under control) ===
     ceiling = 10 ** (-1.0 / 20.0)  # -1.0 dBTP ~ 0.891
     peak = true_peak(mixed)
     if peak > ceiling:
         mixed = soft_clip(mixed, ceiling)
         logger.info(
-            "Session %s: Applied peak limiter (peak was %.3f, ceiling %.3f)",
+            "Session %s: Pre-normalize peak limiter (peak was %.3f, ceiling %.3f)",
             session_id, peak, ceiling,
         )
 
-    # === STEP 16: Fades ===
+    # === STEP 15: LUFS normalize final mix ===
+    mixed = lufs_normalize(mixed, sr, target_lufs=-14.0)
+
+    # === STEP 16: Re-check peaks after LUFS normalization ===
+    peak = true_peak(mixed)
+    if peak > ceiling:
+        mixed = soft_clip(mixed, ceiling)
+        logger.info(
+            "Session %s: Post-normalize peak limiter (peak was %.3f, ceiling %.3f)",
+            session_id, peak, ceiling,
+        )
+
+    # === STEP 17: Fades ===
     skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
     skip_fade_out = plan.sections[-1].label == "outro" if plan.sections else False
     mixed = apply_fades(mixed, sr, skip_fade_in=skip_fade_in, skip_fade_out=skip_fade_out)
 
-    # === STEP 17: Export to MP3 ===
+    # === STEP 18: Export to MP3 ===
     emit_progress(event_queue, {
         "step": "rendering",
         "detail": "Rendering final mix...",

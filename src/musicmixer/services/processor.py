@@ -157,8 +157,8 @@ def rubberband_process(
         else:
             cmd += ["--crisp", "5"]  # Best R2 equivalent
 
-        # Formant preservation only when pitch-shifting vocals
-        if is_vocal and abs(semitones) >= 0.01:
+        # Always preserve formants for vocals (tempo stretch also shifts formants)
+        if is_vocal:
             cmd += ["--formant"]
 
         cmd += [str(in_path), str(out_path)]
@@ -260,10 +260,9 @@ def cross_song_level_match(
     instrumental_sum: np.ndarray,
     sr: int,
 ) -> np.ndarray:
-    """Match vocal loudness to instrumental level with a +3 dB vocal offset.
+    """Match vocal loudness to instrumental level.
 
     Measures LUFS of vocal and instrumental via pyloudnorm.
-    Fixed +3 dB vocal offset for Day 2 (spectral-density-adaptive deferred).
     Safety cap: clip gain to [-12, +12] dB.
     """
     meter = pyloudnorm.Meter(sr)
@@ -278,7 +277,10 @@ def cross_song_level_match(
         )
         return vocal_audio
 
-    vocal_offset_db = 3.0  # Fixed for Day 2
+    # Vocals and instrumentals at equal LUFS. Per-section stem_gains in the
+    # arrangement handle the artistic balance (vocals forward in chorus, etc.).
+    # Professional mashups sit vocals at +0 to +1 dB relative to instrumental.
+    vocal_offset_db = 0.0
     target_vocal_lufs = instrumental_lufs + vocal_offset_db
     gain_db = target_vocal_lufs - vocal_lufs
     gain_db = float(np.clip(gain_db, -12.0, 12.0))
@@ -341,7 +343,7 @@ def true_peak(signal: np.ndarray) -> float:
 def soft_clip(
     signal: np.ndarray,
     ceiling: float,
-    knee_db: float = 6.0,
+    knee_db: float = 2.0,
 ) -> np.ndarray:
     """Soft-knee clipper at given ceiling.
 
