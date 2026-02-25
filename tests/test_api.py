@@ -160,8 +160,12 @@ class TestCreateRemix:
         finally:
             del sys.modules["musicmixer.services.pipeline_day1"]
 
-    def test_pipeline_failure_returns_500(self, client, tmp_path):
-        """Should return 500 when pipeline raises an exception."""
+    def test_pipeline_failure_sets_error_status(self, client, tmp_path):
+        """Pipeline failure should set session status to 'error' (Day 2: async).
+
+        POST now returns 200 immediately; errors are reported via /status endpoint.
+        """
+        import time
         fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
 
         def failing_pipeline(session_id, song_a_path, song_b_path):
@@ -179,8 +183,17 @@ class TestCreateRemix:
                 },
                 data={"prompt": "test"},
             )
-            assert response.status_code == 500
-            assert "Pipeline exploded" in response.json()["detail"]
+            # Day 2: POST returns 200 immediately (pipeline runs in background)
+            assert response.status_code == 200
+            session_id = response.json()["session_id"]
+
+            # Give the background thread a moment to fail
+            time.sleep(0.5)
+
+            # Check session status via /status endpoint
+            status_resp = client.get(f"/api/remix/{session_id}/status")
+            assert status_resp.status_code == 200
+            assert status_resp.json()["status"] == "error"
         finally:
             del sys.modules["musicmixer.services.pipeline_day1"]
 
