@@ -21,13 +21,25 @@ def beats_to_samples(
     beat_frames: np.ndarray,
     sr: int,
     hop_length: int = 512,
+    analysis_sr: int = 22050,
 ) -> int:
     """Convert a beat index to a sample position using the actual beat grid.
 
     Uses beat_frames from librosa (NOT constant-BPM math, which drifts).
     If beat_index exceeds the detected beats, extrapolate using the average
     interval of the last 8 beats.
+
+    Args:
+        beat_index: Index into beat_frames (or beyond for extrapolation).
+        beat_frames: Frame indices from librosa beat detection.
+        sr: Target sample rate of the stem audio (e.g. 44100).
+        hop_length: Hop length used during beat detection (default 512).
+        analysis_sr: Sample rate used during beat analysis (default 22050).
+            Beat frames are in units of this rate. When sr != analysis_sr,
+            positions are scaled accordingly.
     """
+    sr_scale = sr / analysis_sr  # e.g. 44100 / 22050 = 2.0
+
     if len(beat_frames) < 2:
         # Degenerate case: no usable beat grid
         return beat_index * sr
@@ -35,11 +47,11 @@ def beats_to_samples(
     if beat_index >= len(beat_frames):
         # Extrapolate beyond last detected beat
         last_n = beat_frames[-8:] if len(beat_frames) >= 8 else beat_frames
-        avg_beat_len = float(np.mean(np.diff(last_n))) * hop_length
+        avg_beat_len = float(np.mean(np.diff(last_n))) * hop_length * sr_scale
         overshoot = beat_index - len(beat_frames) + 1
-        return int(beat_frames[-1] * hop_length + overshoot * avg_beat_len)
+        return int(beat_frames[-1] * hop_length * sr_scale + overshoot * avg_beat_len)
 
-    return int(beat_frames[beat_index] * hop_length)
+    return int(beat_frames[beat_index] * hop_length * sr_scale)
 
 
 def make_transition_envelope(
@@ -61,8 +73,9 @@ def make_transition_envelope(
         return np.array([], dtype=np.float32)
 
     if transition_type in ("fade", "crossfade"):
-        # Cosine-squared fade-in: 0 -> 1
-        return (np.cos(np.linspace(np.pi / 2, 0, n_samples)) ** 2).astype(np.float32)
+        # Sine fade-in: paired with cos fade-out for equal-power crossfade
+        # (sin² + cos² = 1.0 → constant power at all points)
+        return np.sin(np.linspace(0, np.pi / 2, n_samples)).astype(np.float32)
 
     if transition_type == "cut":
         # Micro-crossfade (~2 ms = 88 samples at 44.1 kHz) to prevent clicks
@@ -132,7 +145,9 @@ def render_arrangement(
 
         # For crossfade: fade out the previous section's tail in the overlap region
         if section.transition_in == "crossfade" and i > 0 and trans_samples > 0:
-            fade_out = (np.cos(np.linspace(0, np.pi / 2, trans_samples)) ** 2).astype(
+            # cos fade-out: paired with sin fade-in for equal-power crossfade
+            # (sin² + cos² = 1.0 → constant power at all points)
+            fade_out = np.cos(np.linspace(0, np.pi / 2, trans_samples)).astype(
                 np.float32
             )
             vocal_bus[start_sample : start_sample + trans_samples] *= fade_out[
@@ -186,6 +201,16 @@ def render_arrangement(
                 vocal_bus[start_sample:end_sample] += stem_section
             else:
                 instrumental_bus[start_sample:end_sample] += stem_section
+
+    # Apply fade-out to final section to prevent abrupt ending
+    fade_out_sec = 3.0  # 3-second fade-out
+    fade_out_samples = min(int(fade_out_sec * sr), total_samples // 4)
+    if fade_out_samples > 0:
+        fade_out_curve = np.cos(np.linspace(0, np.pi / 2, fade_out_samples)).astype(
+            np.float32
+        )
+        vocal_bus[-fade_out_samples:] *= fade_out_curve[:, np.newaxis]
+        instrumental_bus[-fade_out_samples:] *= fade_out_curve[:, np.newaxis]
 
     return vocal_bus, instrumental_bus
 

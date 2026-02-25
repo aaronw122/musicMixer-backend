@@ -32,7 +32,7 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
     i_start = inst_meta.duration_seconds * 0.15
     i_end = min(i_start + 90.0, inst_meta.duration_seconds)
 
-    tempo_src = "song_b"  # Match to instrumental's tempo
+    tempo_src = "weighted_midpoint"  # Split stretch burden between both songs
     total_beats = int(inst_meta.bpm * 90 / 60)  # Beats in 90 seconds
 
     logger.info(
@@ -86,10 +86,10 @@ def default_arrangement(total_beats: int) -> list[Section]:
                 "bass": 0.7,
                 "guitar": 0.6,
                 "piano": 0.5,
-                "other": 1.0,
+                "other": 0.8,
             },
             transition_in="fade",
-            transition_beats=4,
+            transition_beats=8,  # Long fade-in for smooth intro
         ),
         Section(
             label="build",
@@ -97,14 +97,14 @@ def default_arrangement(total_beats: int) -> list[Section]:
             end_beat=quarter,
             stem_gains={
                 "vocals": 0.6,
-                "drums": 0.7,
+                "drums": 0.75,
                 "bass": 0.8,
                 "guitar": 0.5,
                 "piano": 0.4,
                 "other": 0.5,
             },
             transition_in="crossfade",
-            transition_beats=4,
+            transition_beats=16,  # Vocals entering -- needs long smooth transition
         ),
         Section(
             label="main",
@@ -119,36 +119,36 @@ def default_arrangement(total_beats: int) -> list[Section]:
                 "other": 0.5,
             },
             transition_in="crossfade",
-            transition_beats=2,
+            transition_beats=8,  # Decisive energy increase, not abrupt
         ),
         Section(
             label="breakdown",
             start_beat=three_quarter,
             end_beat=seven_eighth,
             stem_gains={
-                "vocals": 0.8,
-                "drums": 0.0,
-                "bass": 0.6,
+                "vocals": 0.9,
+                "drums": 0.2,  # Reduced but NOT silent -- avoids "song stopped" feel
+                "bass": 0.5,
                 "guitar": 0.7,
                 "piano": 0.8,
-                "other": 0.7,
+                "other": 0.6,
             },
             transition_in="crossfade",
-            transition_beats=4,
+            transition_beats=16,  # Gradual energy reduction
         ),
         Section(
             label="outro",
             start_beat=seven_eighth,
             end_beat=total_beats,
             stem_gains={
-                "vocals": 0.0,
+                "vocals": 0.3,  # Faint vocal echo, not a silent cut
                 "drums": 0.6,
                 "bass": 0.5,
                 "guitar": 0.5,
-                "piano": 0.6,
-                "other": 0.8,
+                "piano": 0.5,
+                "other": 0.7,
             },
             transition_in="crossfade",
-            transition_beats=4,
+            transition_beats=8,  # Smooth transition to final fade
         ),
     ]

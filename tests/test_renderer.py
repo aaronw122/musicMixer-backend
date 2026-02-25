@@ -18,8 +18,10 @@ from musicmixer.services.renderer import (
 
 BPM = 120
 SR = 44100
+ANALYSIS_SR = 22050  # librosa default analysis sample rate
 HOP_LENGTH = 512
-BEAT_INTERVAL_FRAMES = int(60 / BPM * SR / HOP_LENGTH)
+# Beat frames are in analysis_sr space (22050 Hz), matching real librosa output
+BEAT_INTERVAL_FRAMES = int(60 / BPM * ANALYSIS_SR / HOP_LENGTH)
 # 200 beats at 120 BPM
 BEAT_FRAMES = np.arange(0, 200) * BEAT_INTERVAL_FRAMES
 
@@ -85,29 +87,34 @@ class TestBeatsToSamples:
 
     def test_basic(self):
         """Known beat_frames produce correct sample positions."""
-        # Beat 0 should be at frame 0 * hop_length = 0
+        sr_scale = SR / ANALYSIS_SR  # 2.0
+
+        # Beat 0 should be at frame 0 * hop_length * sr_scale = 0
         assert beats_to_samples(0, BEAT_FRAMES, SR, HOP_LENGTH) == 0
 
-        # Beat 1 should be at BEAT_INTERVAL_FRAMES * hop_length
-        expected = BEAT_INTERVAL_FRAMES * HOP_LENGTH
+        # Beat 1 should be at BEAT_INTERVAL_FRAMES * hop_length * sr_scale
+        expected = int(BEAT_INTERVAL_FRAMES * HOP_LENGTH * sr_scale)
         assert beats_to_samples(1, BEAT_FRAMES, SR, HOP_LENGTH) == expected
 
     def test_mid_range(self):
         """Beat index in middle of array returns correct position."""
+        sr_scale = SR / ANALYSIS_SR
         idx = 50
-        expected = int(BEAT_FRAMES[idx] * HOP_LENGTH)
+        expected = int(BEAT_FRAMES[idx] * HOP_LENGTH * sr_scale)
         assert beats_to_samples(idx, BEAT_FRAMES, SR, HOP_LENGTH) == expected
 
     def test_extrapolation(self):
         """Beat index beyond array length extrapolates using average of last 8 intervals."""
+        sr_scale = SR / ANALYSIS_SR
+
         # Ask for beat 210 when we only have 200 beats (0..199)
         result = beats_to_samples(210, BEAT_FRAMES, SR, HOP_LENGTH)
 
         # With uniform spacing, extrapolation should be accurate
         last_8 = BEAT_FRAMES[-8:]
-        avg_beat_len = float(np.mean(np.diff(last_8))) * HOP_LENGTH
+        avg_beat_len = float(np.mean(np.diff(last_8))) * HOP_LENGTH * sr_scale
         overshoot = 210 - 200 + 1  # 11
-        expected = int(BEAT_FRAMES[-1] * HOP_LENGTH + overshoot * avg_beat_len)
+        expected = int(BEAT_FRAMES[-1] * HOP_LENGTH * sr_scale + overshoot * avg_beat_len)
         assert result == expected
 
     def test_degenerate_case(self):
