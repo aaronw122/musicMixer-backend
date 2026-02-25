@@ -11,6 +11,7 @@ dependencies = [
     "onnxruntime>=1.24.2",
     "pydantic-settings>=2.13.1",
     "pydub>=0.25.1",
+    "pyloudnorm>=0.2.0",
     "python-multipart>=0.0.22",
     "soundfile>=0.13.1",
     "uvicorn[standard]>=0.41.0",
