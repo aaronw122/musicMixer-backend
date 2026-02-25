@@ -69,7 +69,18 @@ def create_remix(
 @router.get("/remix/{session_id}/audio")
 async def get_audio(session_id: str):
     """Serve the rendered remix MP3."""
-    remix_path = settings.data_dir / "remixes" / session_id / "remix.mp3"
+    # Validate session_id is a real UUID (prevents path traversal via crafted IDs)
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session ID")
+
+    remix_path = (settings.data_dir / "remixes" / session_id / "remix.mp3").resolve()
+
+    # Belt-and-suspenders: ensure resolved path is still inside data_dir
+    if not remix_path.is_relative_to(settings.data_dir.resolve()):
+        raise HTTPException(400, "Invalid session ID")
+
     if not remix_path.exists():
         raise HTTPException(404, "Remix not found")
     return FileResponse(remix_path, media_type="audio/mpeg", filename="remix.mp3")

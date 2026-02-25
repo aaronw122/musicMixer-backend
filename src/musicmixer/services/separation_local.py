@@ -1,10 +1,18 @@
 import logging
+import re
 from pathlib import Path
 from typing import Callable
 
 import soundfile as sf
 
 logger = logging.getLogger(__name__)
+
+_STEM_TOKEN_RE = re.compile(r"[_\-.\s]+")
+
+
+def _tokenize_stem_filename(filename_stem: str) -> list[str]:
+    """Split a filename stem into lowercase tokens on common delimiters."""
+    return [t for t in _STEM_TOKEN_RE.split(filename_stem.lower()) if t]
 
 
 def separate_stems_local(
@@ -28,17 +36,23 @@ def separate_stems_local(
     separator.load_model("htdemucs_ft.yaml")
     separator.separate(str(audio_path))
 
-    # Map output files to stem names
+    # Map output files to stem names using whole-token matching
     stems = {}
     expected_4stem = ["vocals", "drums", "bass", "other"]
     for stem_file in output_dir.iterdir():
         if not stem_file.suffix == ".wav":
             continue
-        name_lower = stem_file.stem.lower()
-        for stem_name in expected_4stem:
-            if stem_name in name_lower:
+        tokens = _tokenize_stem_filename(stem_file.stem)
+        matched = [s for s in expected_4stem if s in tokens]
+        if len(matched) > 1:
+            logger.warning(
+                "File %s matched multiple stems: %s; using first: %s",
+                stem_file.name, matched, matched[0],
+            )
+        if matched:
+            stem_name = matched[0]
+            if stem_name not in stems:
                 stems[stem_name] = stem_file
-                break
 
     # Re-encode stems to float32 WAV (htdemucs_ft outputs 16-bit)
     for stem_name, stem_path in stems.items():

@@ -30,7 +30,7 @@ def _separate_modal(
     progress_callback: Callable | None = None,
 ) -> dict[str, Path]:
     """Separate stems via Modal cloud GPU (BS-RoFormer SW, 6-stem)."""
-    from musicmixer.services.separation_modal import separate_stems_remote
+    import modal
 
     if progress_callback:
         progress_callback("Uploading to cloud GPU...")
@@ -38,8 +38,11 @@ def _separate_modal(
     # Read audio file as bytes
     audio_bytes = audio_path.read_bytes()
 
-    # Call Modal function
-    stem_bytes_map = separate_stems_remote.remote(
+    # Look up the deployed function by name
+    separate_fn = modal.Function.from_name(
+        "musicmixer-separation", "separate_stems_remote"
+    )
+    stem_bytes_map = separate_fn.remote(
         audio_bytes=audio_bytes,
         filename=audio_path.name,
     )

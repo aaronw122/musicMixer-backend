@@ -103,6 +103,49 @@ All config lives in `config.py` via Pydantic `BaseSettings`. Override any settin
 - **No auth** -- single-user proof of concept
 - **Day 1 is synchronous** -- POST blocks until remix completes. Day 2 adds async + SSE progress.
 
+## Stem Separation Models
+
+Two backends, two models. Controlled by `STEM_BACKEND` in `.env`:
+
+| | Modal (cloud GPU) | Local (CPU) |
+|---|---|---|
+| **Env var** | `STEM_BACKEND=modal` (default) | `STEM_BACKEND=local` |
+| **Model** | BS-Roformer-SW (`BS-Roformer-SW.ckpt` by jarredou) | htdemucs_ft |
+| **Stems** | 6: vocals, drums, bass, guitar, piano, other | 4: vocals, drums, bass, other |
+| **Speed** | ~1 min/song (~2 min for 2 songs in parallel) | 10-20 min/song |
+| **Requires** | Modal account + token (`uv run modal setup`) | Just CPU + RAM |
+
+Day 1 separates **both songs sequentially**, so double the single-song time.
+
+**Switching:** Set `STEM_BACKEND=local` in `backend/.env` for local fallback. No code changes needed — `separation.py` dispatches automatically.
+
+**Important:** These are *stem separation* models (splitting a song into parts). Audio *analysis* (BPM, key, energy) uses different libraries (librosa/essentia) and is not implemented until Day 2+.
+
+## Expected Processing Times
+
+| Operation | Modal | Local CPU | Notes |
+|-----------|-------|-----------|-------|
+| Stem separation (1 song) | 3-5 min | 10-20 min | First Modal run adds 60-90s cold start |
+| Stem separation (2 songs) | 6-10 min | 20-40 min | Sequential in Day 1 |
+| Mixing + export | <10 sec | <10 sec | CPU-bound, fast |
+| Full pipeline (Day 1) | ~7-12 min | ~20-40 min | Upload → stems → mix → MP3 |
+
+If processing seems stuck, check logs for progress. Stem separation produces no output until complete — long silences are normal.
+
+## LLM Integration Status
+
+**Day 1: No LLM.** The `prompt` field is accepted by the API but ignored. Stem selection is hardcoded: vocals from Song A, instrumentals from Song B. LLM-driven mix decisions come in Day 3.
+
+## Modal Setup
+
+1. Create a Modal account at modal.com
+2. `uv add modal` (already in dependencies)
+3. `uv run modal setup` (authenticates via browser)
+4. Verify: `uv run modal token list`
+5. Ensure `STEM_BACKEND=modal` in `.env` (or remove the line — modal is default)
+
+**Fallback:** If Modal is not configured, set `STEM_BACKEND=local` in `.env` to use local CPU separation.
+
 ## Key Conventions
 
 - All audio processing uses **float32** throughout. Never convert to int16 mid-pipeline.
@@ -132,13 +175,23 @@ curl http://localhost:8000/api/remix/<session_id>/audio --output remix.mp3
 
 Coming in Day 2. Day 1 pipeline is fully synchronous (POST blocks until done).
 
+## File Watcher (--reload)
+
+`uv run dev` starts uvicorn with `--reload`, which restarts the server on any file change in `backend/`. This is useful for development but dangerous when agents are editing files:
+
+- Agent edits trigger restarts mid-request, dropping active connections
+- Multiple rapid edits cause restart loops
+- This is the root cause of the "zombie agent" problem
+
+**When agents are working on backend files:** Use `uv run uvicorn musicmixer.main:app --port 8000` (without `--reload`) for stable operation. Or run `/dev --stop` first, let agents finish, then restart.
+
 ## Common Gotchas
 
 1. **Do NOT use pydub for mixing or export.** Pydub quantizes to 16-bit integers internally, destroying float32 headroom. Sum stems in numpy, export via ffmpeg subprocess.
 
 2. **StaticFiles mount must come LAST in `main.py`.** If mounted before API routes, it swallows `/api/*` requests. The mount order in `main.py` is: include routers first, then `app.mount("/", StaticFiles(...))`.
 
-3. **BS-RoFormer checkpoint matters.** The `Viperx-1297` checkpoint produces 6 stems (vocals, drums, bass, guitar, piano, other). The `12.9755` checkpoint is 2-stem only -- wrong one.
+3. **BS-RoFormer checkpoint matters.** Use `BS-Roformer-SW.ckpt` (by jarredou) for 6-stem separation. The `Viperx-1297` / `12.9755` checkpoints are 2-stem only (vocals + instrumental).
 
 4. **Validate float32 WAV from separation.** Use `subtype='FLOAT'` when writing with soundfile. Default may produce PCM_16.
 
@@ -152,6 +205,8 @@ Coming in Day 2. Day 1 pipeline is fully synchronous (POST blocks until done).
 
 ## Lessons Learned
 
-- **Kill background agents before `uv run dev`.** Agents writing files in the backend dir trigger `--reload` restart loops. Check: `pgrep -lf 'claude|codex'`
-- **Verify port is free before starting server.** Zombie processes hold ports after `Ctrl+C`. Check: `lsof -i :8000`
+- **Kill background agents before `uv run dev`.** Agents writing files in the backend dir trigger `--reload` restart loops. See "File Watcher" section above. Quick check: `pgrep -lf 'claude -p|codex exec'`
+- **Verify port is free before starting server.** Zombie processes hold ports after `Ctrl+C`. Check: `lsof -i :8000`. Kill: `kill $(lsof -i :8000 -t)`
 - **No `.env` = Modal default.** Without `STEM_BACKEND=local` in `.env`, the server tries Modal (hangs if unconfigured).
+- **Long silences during separation are normal.** Stem separation produces no intermediate output. Don't assume it's stuck until you've exceeded the expected times (see "Expected Processing Times" above).
+- **Each session produces ~500MB of stem data.** Clean between test runs: `rm -rf data/stems/* data/uploads/* data/remixes/*`

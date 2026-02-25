@@ -241,12 +241,15 @@ class TestCreateRemix:
 
 class TestGetAudio:
     def test_returns_404_for_missing_remix(self, client):
-        response = client.get("/api/remix/nonexistent-id/audio")
+        import uuid as _uuid
+        fake_id = str(_uuid.uuid4())
+        response = client.get(f"/api/remix/{fake_id}/audio")
         assert response.status_code == 404
 
     def test_returns_mp3_for_existing_remix(self, client, tmp_path):
         """Should serve MP3 file for valid session."""
-        session_id = "test-session"
+        import uuid as _uuid
+        session_id = str(_uuid.uuid4())
         remix_dir = tmp_path / "remixes" / session_id
         remix_dir.mkdir(parents=True, exist_ok=True)
         (remix_dir / "remix.mp3").write_bytes(b"fake mp3 content")
@@ -255,3 +258,16 @@ class TestGetAudio:
         assert response.status_code == 200
         assert response.headers["content-type"] == "audio/mpeg"
         assert response.content == b"fake mp3 content"
+
+    @pytest.mark.parametrize("bad_id", [
+        "not-a-uuid",
+        "hello world",
+        "....etc....passwd",
+        "DROP TABLE remixes",
+        "00000000-0000-0000-0000-00000000000g",  # almost-UUID, invalid hex char
+    ])
+    def test_rejects_path_traversal_session_id(self, client, bad_id):
+        """Should return 400 for session IDs that are not valid UUIDs."""
+        response = client.get(f"/api/remix/{bad_id}/audio")
+        assert response.status_code == 400
+        assert "Invalid session ID" in response.json()["detail"]

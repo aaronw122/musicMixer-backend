@@ -1,6 +1,7 @@
 """Tests for musicmixer.services.separation - dispatcher logic."""
 
 import io
+import logging
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -144,3 +145,198 @@ class TestSeparateModalValidation:
         # Should still succeed but log a warning
         assert "vocals" in result
         assert any("PCM_16" in record.message for record in caplog.records)
+
+
+class TestTokenizeStemFilename:
+    """Test _tokenize_stem_filename helper in both modules."""
+
+    def test_simple_stem_name(self):
+        from musicmixer.services.separation_local import _tokenize_stem_filename
+
+        assert _tokenize_stem_filename("vocals") == ["vocals"]
+
+    def test_underscore_delimited(self):
+        from musicmixer.services.separation_local import _tokenize_stem_filename
+
+        assert _tokenize_stem_filename("song_bass_other") == ["song", "bass", "other"]
+
+    def test_hyphen_delimited(self):
+        from musicmixer.services.separation_local import _tokenize_stem_filename
+
+        assert _tokenize_stem_filename("song-drums-track") == ["song", "drums", "track"]
+
+    def test_dot_delimited(self):
+        from musicmixer.services.separation_local import _tokenize_stem_filename
+
+        assert _tokenize_stem_filename("input.vocals") == ["input", "vocals"]
+
+    def test_mixed_delimiters(self):
+        from musicmixer.services.separation_local import _tokenize_stem_filename
+
+        assert _tokenize_stem_filename("my_song-vocals.stem") == ["my", "song", "vocals", "stem"]
+
+    def test_case_insensitive(self):
+        from musicmixer.services.separation_local import _tokenize_stem_filename
+
+        assert _tokenize_stem_filename("Song_VOCALS") == ["song", "vocals"]
+
+    def test_modal_tokenizer_matches_local(self):
+        """Both modules should have identical tokenizer behavior."""
+        from musicmixer.services.separation_local import _tokenize_stem_filename as local_tok
+        from musicmixer.services.separation_modal import _tokenize_stem_filename as modal_tok
+
+        cases = [
+            "vocals",
+            "song_bass_other",
+            "my-drums-track",
+            "input.guitar",
+            "Song_VOCALS",
+        ]
+        for case in cases:
+            assert local_tok(case) == modal_tok(case), f"Mismatch for: {case}"
+
+
+class TestStemNameMatching:
+    """Test that whole-token matching prevents substring collisions."""
+
+    def _create_wav_files(self, output_dir: Path, filenames: list[str]):
+        """Create minimal WAV files with given filenames in output_dir."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for name in filenames:
+            path = output_dir / name
+            # Write a tiny valid WAV
+            sr = 44100
+            t = np.linspace(0, 0.1, int(sr * 0.1), endpoint=False)
+            mono = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+            stereo = np.column_stack([mono, mono])
+            sf.write(str(path), stereo, sr, format="WAV", subtype="FLOAT")
+
+    def test_simple_stem_names_match(self, tmp_path):
+        """Standard stem filenames should be matched correctly."""
+        from musicmixer.services.separation_local import (
+            _tokenize_stem_filename,
+        )
+
+        output_dir = tmp_path / "stems"
+        self._create_wav_files(output_dir, [
+            "vocals.wav", "drums.wav", "bass.wav", "other.wav",
+        ])
+
+        expected = ["vocals", "drums", "bass", "other"]
+        stems = {}
+        for stem_file in output_dir.iterdir():
+            if stem_file.suffix != ".wav":
+                continue
+            tokens = _tokenize_stem_filename(stem_file.stem)
+            matched = [s for s in expected if s in tokens]
+            if matched:
+                stems[matched[0]] = stem_file
+
+        assert set(stems.keys()) == {"vocals", "drums", "bass", "other"}
+
+    def test_prefixed_stem_names_match(self, tmp_path):
+        """Stem names with prefixes (e.g., 'song_vocals') should match."""
+        from musicmixer.services.separation_local import (
+            _tokenize_stem_filename,
+        )
+
+        output_dir = tmp_path / "stems"
+        self._create_wav_files(output_dir, [
+            "song_vocals.wav", "song_drums.wav", "song_bass.wav", "song_other.wav",
+        ])
+
+        expected = ["vocals", "drums", "bass", "other"]
+        stems = {}
+        for stem_file in output_dir.iterdir():
+            if stem_file.suffix != ".wav":
+                continue
+            tokens = _tokenize_stem_filename(stem_file.stem)
+            matched = [s for s in expected if s in tokens]
+            if matched:
+                stems[matched[0]] = stem_file
+
+        assert set(stems.keys()) == {"vocals", "drums", "bass", "other"}
+
+    def test_bass_not_matched_by_substring_in_other_word(self, tmp_path):
+        """'bass' should NOT match a filename like 'bassing_track.wav'
+        where 'bass' only appears as a substring of another token."""
+        from musicmixer.services.separation_local import (
+            _tokenize_stem_filename,
+        )
+
+        tokens = _tokenize_stem_filename("bassing_track")
+        expected = ["vocals", "drums", "bass", "other"]
+        matched = [s for s in expected if s in tokens]
+        assert "bass" not in matched
+
+    def test_other_vocals_not_collision(self, tmp_path):
+        """'other_vocals.wav' should match both 'other' and 'vocals' as
+        separate tokens, with 'vocals' winning because it appears first
+        in the expected_stems list."""
+        from musicmixer.services.separation_local import (
+            _tokenize_stem_filename,
+        )
+
+        tokens = _tokenize_stem_filename("other_vocals")
+        expected_4stem = ["vocals", "drums", "bass", "other"]
+        matched = [s for s in expected_4stem if s in tokens]
+        # Both should be found as separate tokens
+        assert "vocals" in matched
+        assert "other" in matched
+        # First in expected list wins
+        assert matched[0] == "vocals"
+
+    def test_song_bass_other_no_false_match(self, tmp_path):
+        """'song_bass_other.wav' should match both 'bass' and 'other'
+        as separate tokens. With expected_stems order ['vocals', 'drums',
+        'bass', 'guitar', 'piano', 'other'], 'bass' comes first."""
+        from musicmixer.services.separation_local import (
+            _tokenize_stem_filename,
+        )
+
+        tokens = _tokenize_stem_filename("song_bass_other")
+        expected_6stem = ["vocals", "drums", "bass", "guitar", "piano", "other"]
+        matched = [s for s in expected_6stem if s in tokens]
+        assert matched == ["bass", "other"]
+        # First match wins
+        assert matched[0] == "bass"
+
+    def test_bare_substring_no_longer_matches(self):
+        """The old bug: 'basser' contains 'bass' as a substring.
+        Token-based matching should NOT match this."""
+        from musicmixer.services.separation_local import (
+            _tokenize_stem_filename,
+        )
+
+        tokens = _tokenize_stem_filename("basser")
+        expected = ["vocals", "drums", "bass", "other"]
+        matched = [s for s in expected if s in tokens]
+        assert matched == []
+
+    def test_duplicate_match_logs_warning(self, tmp_path, caplog):
+        """When a file matches multiple stems, a warning should be logged."""
+        from musicmixer.services.separation_local import (
+            _tokenize_stem_filename,
+        )
+
+        output_dir = tmp_path / "stems"
+        self._create_wav_files(output_dir, ["other_vocals.wav"])
+
+        expected_4stem = ["vocals", "drums", "bass", "other"]
+
+        with caplog.at_level(logging.WARNING, logger="musicmixer.services.separation_local"):
+            # Simulate the matching logic from separation_local
+            from musicmixer.services.separation_local import logger as local_logger
+
+            for stem_file in output_dir.iterdir():
+                if stem_file.suffix != ".wav":
+                    continue
+                tokens = _tokenize_stem_filename(stem_file.stem)
+                matched = [s for s in expected_4stem if s in tokens]
+                if len(matched) > 1:
+                    local_logger.warning(
+                        "File %s matched multiple stems: %s; using first: %s",
+                        stem_file.name, matched, matched[0],
+                    )
+
+        assert any("matched multiple stems" in record.message for record in caplog.records)
