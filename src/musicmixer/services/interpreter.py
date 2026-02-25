@@ -75,80 +75,54 @@ def default_arrangement(total_beats: int) -> list[Section]:
     three_quarter = total_beats * 3 // 4
     seven_eighth = total_beats * 7 // 8
 
+    # Instrumental gains are intentionally UNIFORM across body sections
+    # (build, main, breakdown) to prevent summed energy dips at transitions.
+    # Only vocals change significantly between sections.
+    # The intro/outro use slightly different gains for musical shape.
+    inst_body = {"drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
+    inst_intro = {"drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
+    inst_breakdown = {"drums": 0.3, "bass": 0.6, "guitar": 0.6, "piano": 0.5, "other": 0.5}
+    inst_outro = {"drums": 0.6, "bass": 0.6, "guitar": 0.5, "piano": 0.4, "other": 0.5}
+
     return [
         Section(
             label="intro",
             start_beat=0,
             end_beat=eighth,
-            stem_gains={
-                "vocals": 0.0,
-                "drums": 0.8,
-                "bass": 0.7,
-                "guitar": 0.6,
-                "piano": 0.5,
-                "other": 0.8,
-            },
+            stem_gains={"vocals": 0.0, **inst_intro},
             transition_in="fade",
-            transition_beats=8,  # Long fade-in for smooth intro
+            transition_beats=4,
         ),
         Section(
             label="build",
             start_beat=eighth,
             end_beat=quarter,
-            stem_gains={
-                "vocals": 0.6,
-                "drums": 0.75,
-                "bass": 0.8,
-                "guitar": 0.5,
-                "piano": 0.4,
-                "other": 0.5,
-            },
+            stem_gains={"vocals": 0.6, **inst_body},
             transition_in="crossfade",
-            transition_beats=16,  # Vocals entering -- needs long smooth transition
+            transition_beats=4,
         ),
         Section(
             label="main",
             start_beat=quarter,
             end_beat=three_quarter,
-            stem_gains={
-                "vocals": 1.0,
-                "drums": 0.7,
-                "bass": 0.8,
-                "guitar": 0.5,
-                "piano": 0.4,
-                "other": 0.5,
-            },
+            stem_gains={"vocals": 1.0, **inst_body},
             transition_in="crossfade",
-            transition_beats=8,  # Decisive energy increase, not abrupt
+            transition_beats=4,
         ),
         Section(
             label="breakdown",
             start_beat=three_quarter,
             end_beat=seven_eighth,
-            stem_gains={
-                "vocals": 0.9,
-                "drums": 0.2,  # Reduced but NOT silent -- avoids "song stopped" feel
-                "bass": 0.5,
-                "guitar": 0.7,
-                "piano": 0.8,
-                "other": 0.6,
-            },
+            stem_gains={"vocals": 0.9, **inst_breakdown},
             transition_in="crossfade",
-            transition_beats=16,  # Gradual energy reduction
+            transition_beats=4,
         ),
         Section(
             label="outro",
             start_beat=seven_eighth,
             end_beat=total_beats,
-            stem_gains={
-                "vocals": 0.3,  # Faint vocal echo, not a silent cut
-                "drums": 0.6,
-                "bass": 0.5,
-                "guitar": 0.5,
-                "piano": 0.5,
-                "other": 0.7,
-            },
+            stem_gains={"vocals": 0.3, **inst_outro},
             transition_in="crossfade",
-            transition_beats=8,  # Smooth transition to final fade
+            transition_beats=4,
         ),
     ]

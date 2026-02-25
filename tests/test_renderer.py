@@ -6,7 +6,6 @@ import pytest
 from musicmixer.models import Section
 from musicmixer.services.renderer import (
     beats_to_samples,
-    make_transition_envelope,
     render_arrangement,
     snap_to_bar,
 )
@@ -125,48 +124,6 @@ class TestBeatsToSamples:
 
 
 # ---------------------------------------------------------------------------
-# make_transition_envelope tests
-# ---------------------------------------------------------------------------
-
-class TestMakeTransitionEnvelope:
-    """Tests for make_transition_envelope()."""
-
-    def test_fade_starts_at_zero_ends_at_one(self):
-        """Fade envelope starts near 0 and ends near 1."""
-        env = make_transition_envelope(1000, "fade", SR)
-        assert len(env) == 1000
-        assert env[0] == pytest.approx(0.0, abs=1e-5)
-        assert env[-1] == pytest.approx(1.0, abs=1e-5)
-
-    def test_crossfade_same_as_fade(self):
-        """Crossfade in-curve is the same shape as fade."""
-        fade = make_transition_envelope(500, "fade", SR)
-        crossfade = make_transition_envelope(500, "crossfade", SR)
-        np.testing.assert_array_almost_equal(fade, crossfade)
-
-    def test_cut_has_micro_crossfade(self):
-        """Cut transition has a short ramp at the start, then 1.0."""
-        env = make_transition_envelope(1000, "cut", SR)
-        assert len(env) == 1000
-        # First sample should be 0 (or near 0)
-        assert env[0] == pytest.approx(0.0, abs=0.02)
-        # After micro-crossfade (~88 samples at 44100), should be 1.0
-        assert env[100] == pytest.approx(1.0, abs=1e-5)
-        # Last sample should be 1.0
-        assert env[-1] == pytest.approx(1.0, abs=1e-5)
-
-    def test_unknown_type_returns_ones(self):
-        """Unknown transition type returns an envelope of all ones."""
-        env = make_transition_envelope(500, "unknown_type", SR)
-        np.testing.assert_array_equal(env, np.ones(500, dtype=np.float32))
-
-    def test_zero_length(self):
-        """Zero-length request returns empty array."""
-        env = make_transition_envelope(0, "fade", SR)
-        assert len(env) == 0
-
-
-# ---------------------------------------------------------------------------
 # render_arrangement tests
 # ---------------------------------------------------------------------------
 
@@ -250,7 +207,7 @@ class TestRenderArrangement:
         assert inst_bus.shape[0] == beats_to_samples(100, BEAT_FRAMES, SR, HOP_LENGTH)
 
     def test_section_isolation_intro_no_vocals(self):
-        """Intro section has vocal gain 0.0, so no vocal energy in that region."""
+        """Intro section body (before transition zone) has zero vocal energy."""
         sections = _make_sections(200)
         total = _total_samples()
         vocal_stems, inst_stems = self._make_stems(total)
@@ -259,10 +216,11 @@ class TestRenderArrangement:
             sections, vocal_stems, inst_stems, BEAT_FRAMES, SR, HOP_LENGTH,
         )
 
-        # Intro ends at beat 200 // 8 = 25
-        intro_end = beats_to_samples(25, BEAT_FRAMES, SR, HOP_LENGTH)
-        intro_region = vocal_bus[:intro_end]
-        assert np.allclose(intro_region, 0.0), "Intro region should have zero vocal energy"
+        # Intro ends at beat 25. The build section's transition_beats=4,
+        # so half_beats=2 bleeds backward. Check up to beat 23 (safe zone).
+        safe_end = beats_to_samples(23, BEAT_FRAMES, SR, HOP_LENGTH)
+        intro_body = vocal_bus[:safe_end]
+        assert np.allclose(intro_body, 0.0), "Intro body should have zero vocal energy"
 
     def test_short_stems_padded(self):
         """Stems shorter than arrangement are padded with silence."""

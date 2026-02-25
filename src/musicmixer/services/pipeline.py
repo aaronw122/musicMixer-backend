@@ -81,6 +81,8 @@ def run_pipeline(
     from musicmixer.services.interpreter import generate_fallback_plan
     from musicmixer.services.processor import (
         apply_fades,
+        auto_level,
+        compress_dynamic_range,
         cross_song_level_match,
         compute_tempo_plan,
         export_mp3,
@@ -297,13 +299,30 @@ def run_pipeline(
             session_id, e,
         )
 
-    # === STEP 11: Cross-song level matching ===
+    # === STEP 11: Compress vocal dynamic range ===
+    # Compress BEFORE level matching so the LUFS measurement reflects
+    # post-compression loudness (otherwise level match is wasted).
     emit_progress(event_queue, {
         "step": "processing",
         "detail": "Normalizing loudness...",
         "progress": 0.80,
     }, session=session)
 
+    if "vocals" in vocal_audio:
+        vocal_audio["vocals"] = compress_dynamic_range(
+            vocal_audio["vocals"],
+            sr,
+            threshold_db=-20.0,  # Moderate: only compress loud phrases
+            ratio=3.0,           # Standard vocal ratio, preserves natural dynamics
+            attack_ms=10.0,      # Preserve plosive transients
+            release_ms=80.0,     # Fast release: recover quickly between phrases
+            makeup_db=4.0,       # Proportional to reduced compression
+            gate_floor_db=-50.0, # Low gate: only ignore true silence
+        )
+        logger.info("Session %s: Vocal compression applied", session_id)
+
+    # === STEP 11.5: Cross-song level matching ===
+    # Runs AFTER compression so LUFS measurement reflects actual vocal loudness.
     vocal_audio_main = vocal_audio.get("vocals")
     if vocal_audio_main is not None and inst_audio:
         # Sum instrumental stems for LUFS measurement
@@ -342,6 +361,39 @@ def run_pipeline(
 
     mixed = vocal_bus + instrumental_bus
 
+    # === STEP 13.5: Mix bus compression ===
+    # Keeps the overall mix volume consistent. Between vocal phrases, the total
+    # energy drops because there's no vocal contribution. This compression
+    # smooths that out at the mix level.
+    mixed = compress_dynamic_range(
+        mixed,
+        sr,
+        threshold_db=-20.0,  # Catch most of the mix
+        ratio=3.0,           # Moderate: tighten dynamics without crushing
+        attack_ms=10.0,      # Medium attack preserves some transients
+        release_ms=200.0,    # Smooth release
+        makeup_db=3.0,       # Restore volume
+    )
+    logger.info("Session %s: Mix bus compression applied", session_id)
+
+    # === STEP 13.7: Slow auto-leveler ===
+    # Maintains consistent overall volume over 2-second windows.
+    # Gently boosts instrumental-only moments (between vocal phrases)
+    # and slightly reduces the loudest peaks. Uses long window so
+    # gain changes are imperceptible (no pumping).
+    # Detects from the INSTRUMENTAL bus so vocal gain transitions at
+    # section boundaries don't trigger pre-emptive cuts via the
+    # windowed look-ahead effect (which caused volume dips at ~11s/~22s).
+    mixed = auto_level(
+        mixed, sr,
+        window_sec=2.0,       # 2-second analysis window (slow)
+        max_boost_db=5.0,     # Up to 5dB boost for quiet sections
+        max_cut_db=3.0,       # Up to 3dB cut for loud sections
+        target_percentile=50, # Target the median level
+        detector_audio=instrumental_bus,  # Drive detection from stable instrumental
+    )
+    logger.info("Session %s: Auto-leveler applied", session_id)
+
     # === STEP 14: Peak limit first (bring peaks under control) ===
     ceiling = 10 ** (-1.0 / 20.0)  # -1.0 dBTP ~ 0.891
     peak = true_peak(mixed)
@@ -353,7 +405,7 @@ def run_pipeline(
         )
 
     # === STEP 15: LUFS normalize final mix ===
-    mixed = lufs_normalize(mixed, sr, target_lufs=-14.0)
+    mixed = lufs_normalize(mixed, sr, target_lufs=-10.0)
 
     # === STEP 16: Re-check peaks after LUFS normalization ===
     peak = true_peak(mixed)
@@ -366,7 +418,9 @@ def run_pipeline(
 
     # === STEP 17: Fades ===
     skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
-    skip_fade_out = plan.sections[-1].label == "outro" if plan.sections else False
+    # Renderer no longer applies a terminal fade-out; keep one authoritative
+    # final fade stage here in the pipeline for every remix.
+    skip_fade_out = False
     mixed = apply_fades(mixed, sr, skip_fade_in=skip_fade_in, skip_fade_out=skip_fade_out)
 
     # === STEP 18: Export to MP3 ===
