@@ -1351,7 +1351,9 @@ dependencies = [
     { name = "pydub" },
     { name = "pyloudnorm" },
     { name = "python-multipart" },
+    { name = "scipy" },
     { name = "soundfile" },
+    { name = "soxr" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1374,7 +1376,9 @@ requires-dist = [
     { name = "pydub", specifier = ">=0.25.1" },
     { name = "pyloudnorm", specifier = ">=0.2.0" },
     { name = "python-multipart", specifier = ">=0.0.22" },
+    { name = "scipy", specifier = ">=1.17.1" },
     { name = "soundfile", specifier = ">=0.13.1" },
+    { name = "soxr", specifier = ">=1.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.41.0" },
 ]
 

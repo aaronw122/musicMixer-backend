@@ -14,7 +14,9 @@ dependencies = [
     "pydub>=0.25.1",
     "pyloudnorm>=0.2.0",
     "python-multipart>=0.0.22",
+    "scipy>=1.17.1",
     "soundfile>=0.13.1",
+    "soxr>=1.0.0",
     "uvicorn[standard]>=0.41.0",
 ]
 
