@@ -65,10 +65,9 @@ def run_pipeline(
      12. Render arrangement into vocal + instrumental buses
      13. Sum buses into final mix
      14. Peak limit (bring peaks under control before normalization)
-     15. LUFS normalize final mix
-     16. Re-check peaks after normalization
-     17. Fade-in / fade-out
-     18. Export to MP3
+     15. Peak-constrained LUFS normalization
+     16. Fade-in / fade-out
+     17. Export to MP3
     """
     from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
@@ -87,7 +86,7 @@ def run_pipeline(
         compute_tempo_plan,
         export_mp3,
         highpass_filter,
-        lufs_normalize,
+        lufs_normalize_constrained,
         rubberband_process,
         soft_clip,
         trim_audio,
@@ -401,30 +400,21 @@ def run_pipeline(
             session_id, peak, ceiling,
         )
 
-    # === STEP 15: LUFS normalize final mix ===
-    mixed = lufs_normalize(mixed, sr, target_lufs=-12.0)
+    # === STEP 15: Peak-constrained LUFS normalization ===
+    # Applies the minimum of (LUFS gain, peak-safe gain) so we never boost
+    # past the ceiling. Eliminates the old normalize-then-trim loop that was
+    # undoing LUFS gains entirely.
+    mixed = lufs_normalize_constrained(mixed, sr, target_lufs=-12.0, ceiling_dbtp=-1.0)
+    logger.info("Session %s: Peak-constrained LUFS normalization applied", session_id)
 
-    # === STEP 16: Re-check peaks after LUFS normalization ===
-    # Use transparent gain trim here instead of a second saturation stage.
-    # This preserves timbre in late/quiet sections where extra clipping can
-    # expose graininess from separated/time-stretched vocals.
-    peak = true_peak(mixed)
-    if peak > ceiling:
-        trim = ceiling / peak
-        mixed = mixed * trim
-        logger.info(
-            "Session %s: Post-normalize transparent trim (peak was %.3f, ceiling %.3f, trim %.3f)",
-            session_id, peak, ceiling, trim,
-        )
-
-    # === STEP 17: Fades ===
+    # === STEP 16: Fades ===
     skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
     # Renderer no longer applies a terminal fade-out; keep one authoritative
     # final fade stage here in the pipeline for every remix.
     skip_fade_out = False
     mixed = apply_fades(mixed, sr, skip_fade_in=skip_fade_in, skip_fade_out=skip_fade_out)
 
-    # === STEP 18: Export to MP3 ===
+    # === STEP 17: Export to MP3 ===
     emit_progress(event_queue, {
         "step": "rendering",
         "detail": "Rendering final mix...",

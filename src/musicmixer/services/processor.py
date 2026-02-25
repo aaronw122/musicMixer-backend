@@ -532,6 +532,57 @@ def lufs_normalize(
     return mixed * (10 ** (gain_db / 20.0))
 
 
+def lufs_normalize_constrained(
+    audio: np.ndarray,
+    sr: int,
+    target_lufs: float = -12.0,
+    ceiling_dbtp: float = -1.0,
+) -> np.ndarray:
+    """LUFS normalize with peak constraint — never applies gain it can't keep.
+
+    Computes both the LUFS gain needed and the maximum gain allowed by the
+    peak ceiling, then applies whichever is smaller. This prevents the
+    normalize-then-trim loop where LUFS boost is undone by peak limiting.
+
+    Returns the gained signal. Logs a warning when peak-constrained.
+    """
+    import pyloudnorm as pyln
+
+    meter = pyln.Meter(sr)
+    current_lufs = meter.integrated_loudness(audio)
+
+    if current_lufs == float("-inf"):
+        logger.warning("Cannot normalize silent audio")
+        return audio
+
+    ceiling = 10 ** (ceiling_dbtp / 20.0)
+    current_peak = true_peak(audio)
+
+    lufs_gain_db = target_lufs - current_lufs
+    # Maximum gain before peak exceeds ceiling
+    peak_gain_db = 20 * np.log10(ceiling / max(current_peak, 1e-12))
+
+    applied_gain_db = min(lufs_gain_db, peak_gain_db)
+    applied_gain_db = float(np.clip(applied_gain_db, -12.0, 12.0))
+
+    shortfall_db = lufs_gain_db - applied_gain_db
+    if shortfall_db > 0.5:
+        logger.warning(
+            "LUFS constrained by peak ceiling: wanted %.1f dB, applied %.1f dB (%.1f dB shortfall). "
+            "Output will be ~%.1f LUFS instead of %.1f LUFS",
+            lufs_gain_db, applied_gain_db, shortfall_db,
+            current_lufs + applied_gain_db, target_lufs,
+        )
+    else:
+        logger.info(
+            "LUFS normalize (constrained): current=%.1f LUFS, target=%.1f LUFS, gain=%.1f dB",
+            current_lufs, target_lufs, applied_gain_db,
+        )
+
+    gain_linear = 10 ** (applied_gain_db / 20.0)
+    return audio * gain_linear
+
+
 def true_peak(signal: np.ndarray) -> float:
     """4x oversampled true-peak measurement (practical ITU-R BS.1770-4 approximation).
 
