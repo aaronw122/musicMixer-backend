@@ -1,25 +1,77 @@
-import uuid
-import logging
-from pathlib import Path
+"""Remix API endpoints.
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse
+Day 2: Async pipeline with SSE progress events.
+- POST /api/remix          -- Accept uploads, start pipeline in background, return session_id
+- GET  /api/remix/{id}/progress -- SSE stream of pipeline progress events
+- GET  /api/remix/{id}/status   -- JSON snapshot of current session state
+- GET  /api/remix/{id}/audio    -- Serve the rendered remix MP3
+"""
+
+import asyncio
+import functools
+import json
+import logging
+import queue
+import time
+import uuid
+from pathlib import Path
+from typing import AsyncGenerator
+
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 
 from musicmixer.config import settings
+from musicmixer.models import SessionState
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _pipeline_wrapper(
+    session_id: str,
+    song_a_path: Path,
+    song_b_path: Path,
+    prompt: str,
+    session: SessionState,
+    processing_lock,
+) -> None:
+    """Runs the pipeline in a background thread. Releases processing_lock on exit."""
+    try:
+        session.status = "processing"
+        from musicmixer.services.pipeline import run_pipeline
+
+        run_pipeline(
+            session_id=session_id,
+            song_a_path=str(song_a_path),
+            song_b_path=str(song_b_path),
+            prompt=prompt,
+            event_queue=session.events,
+            session=session,
+        )
+    except BaseException as exc:
+        logger.exception("Session %s: pipeline failed", session_id)
+        session.status = "error"
+        from musicmixer.services.pipeline import emit_progress
+
+        emit_progress(session.events, {
+            "step": "error",
+            "detail": str(exc),
+            "progress": 0,
+        }, session=session)
+    finally:
+        processing_lock.release()
+
+
 @router.post("/remix")
 def create_remix(
+    request: Request,
     song_a: UploadFile = File(...),
     song_b: UploadFile = File(...),
     prompt: str = Form(""),
 ):
-    """Accept two songs, separate stems, overlay, return session ID.
+    """Accept two songs, start async pipeline, return session ID immediately.
 
-    Day 1: Synchronous. Blocks until remix is complete.
+    Only one remix can be processed at a time. Returns 409 if another is in progress.
     """
     max_bytes = settings.max_file_size_mb * 1024 * 1024
 
@@ -30,50 +82,166 @@ def create_remix(
             raise HTTPException(
                 422,
                 f"Invalid file type for {label}: '{ext}'. "
-                f"Allowed: {settings.allowed_extensions}"
+                f"Allowed: {settings.allowed_extensions}",
             )
 
-    # Generate session ID
-    session_id = str(uuid.uuid4())
+    # Acquire processing lock (non-blocking) -- authoritative single-remix gate
+    processing_lock = request.app.state.processing_lock
+    if not processing_lock.acquire(blocking=False):
+        raise HTTPException(409, "Another remix is being processed")
 
-    # Save uploaded files
-    upload_dir = settings.data_dir / "uploads" / session_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    song_a_ext = Path(song_a.filename or "song_a.mp3").suffix.lower()
-    song_b_ext = Path(song_b.filename or "song_b.mp3").suffix.lower()
-
-    song_a_path = upload_dir / f"song_a{song_a_ext}"
-    song_b_path = upload_dir / f"song_b{song_b_ext}"
-
-    for label, file, dest in [("song_a", song_a, song_a_path), ("song_b", song_b, song_b_path)]:
-        data = file.file.read()
-        if len(data) > max_bytes:
-            raise HTTPException(413, f"{label} exceeds {settings.max_file_size_mb}MB limit")
-        dest.write_bytes(data)
-
-    logger.info(f"Session {session_id}: saved uploads ({song_a_path.name}, {song_b_path.name})")
-
-    # Run pipeline synchronously (Day 1 -- no background processing)
     try:
-        from musicmixer.services.pipeline_day1 import run_pipeline_sync
-        remix_path = run_pipeline_sync(session_id, song_a_path, song_b_path)
-        logger.info(f"Session {session_id}: remix complete at {remix_path}")
-    except Exception as e:
-        logger.exception(f"Session {session_id}: pipeline failed")
-        raise HTTPException(500, f"Remix failed: {str(e)}")
+        # Generate session ID
+        session_id = str(uuid.uuid4())
 
-    return {"session_id": session_id}
+        # Save uploaded files
+        upload_dir = settings.data_dir / "uploads" / session_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        song_a_ext = Path(song_a.filename or "song_a.mp3").suffix.lower()
+        song_b_ext = Path(song_b.filename or "song_b.mp3").suffix.lower()
+
+        song_a_path = upload_dir / f"song_a{song_a_ext}"
+        song_b_path = upload_dir / f"song_b{song_b_ext}"
+
+        for label, file, dest in [
+            ("song_a", song_a, song_a_path),
+            ("song_b", song_b, song_b_path),
+        ]:
+            data = file.file.read()
+            if len(data) > max_bytes:
+                processing_lock.release()
+                raise HTTPException(
+                    413, f"{label} exceeds {settings.max_file_size_mb}MB limit"
+                )
+            dest.write_bytes(data)
+
+        logger.info(
+            "Session %s: saved uploads (%s, %s)",
+            session_id,
+            song_a_path.name,
+            song_b_path.name,
+        )
+
+        # Create session state
+        session = SessionState()
+        with request.app.state.sessions_lock:
+            request.app.state.sessions[session_id] = session
+
+        # Submit pipeline to background executor
+        request.app.state.executor.submit(
+            _pipeline_wrapper,
+            session_id,
+            song_a_path,
+            song_b_path,
+            prompt,
+            session,
+            processing_lock,
+        )
+
+        return {"session_id": session_id}
+
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 413) without double-releasing the lock
+        raise
+    except Exception:
+        # If anything unexpected fails before submit, release the lock
+        processing_lock.release()
+        raise
+
+
+@router.get("/remix/{session_id}/progress")
+async def get_progress(session_id: str, request: Request):
+    """SSE endpoint streaming pipeline progress events."""
+    _validate_uuid(session_id)
+
+    with request.app.state.sessions_lock:
+        session = request.app.state.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+
+    sse_executor = request.app.state.sse_executor
+
+    return StreamingResponse(
+        _event_stream(session, sse_executor),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+async def _event_stream(
+    session: SessionState,
+    sse_executor,
+) -> AsyncGenerator[str, None]:
+    """Generate SSE data events from the session's event queue."""
+    loop = asyncio.get_running_loop()
+    start = time.monotonic()
+
+    # On connect: send current state so reconnecting clients catch up
+    if session.last_event:
+        yield f"data: {json.dumps(session.last_event)}\n\n"
+        if session.last_event.get("step") in ("complete", "error"):
+            return
+
+    # Drain stale events that arrived before the client connected
+    while not session.events.empty():
+        try:
+            session.events.get_nowait()
+        except queue.Empty:
+            break
+
+    while True:
+        # 20-minute safety cap
+        if time.monotonic() - start > 1200:
+            yield 'data: {"step":"error","detail":"Processing timed out","progress":0}\n\n'
+            break
+
+        try:
+            event = await loop.run_in_executor(
+                sse_executor,
+                functools.partial(session.events.get, timeout=5),
+            )
+        except queue.Empty:
+            # Send keepalive as a data event (not SSE comment) so EventSource.onmessage fires
+            yield 'data: {"step":"keepalive","detail":"","progress":-1}\n\n'
+            continue
+        except asyncio.CancelledError:
+            break
+
+        session.last_event = event
+        yield f"data: {json.dumps(event)}\n\n"
+
+        if event.get("step") in ("complete", "error"):
+            break
+
+
+@router.get("/remix/{session_id}/status")
+async def get_status(session_id: str, request: Request):
+    """Return JSON snapshot of session state."""
+    _validate_uuid(session_id)
+
+    with request.app.state.sessions_lock:
+        session = request.app.state.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+
+    return {
+        "session_id": session_id,
+        "status": session.status,
+        "remix_path": session.remix_path,
+        "explanation": session.explanation,
+        "last_event": session.last_event,
+    }
 
 
 @router.get("/remix/{session_id}/audio")
 async def get_audio(session_id: str):
     """Serve the rendered remix MP3."""
-    # Validate session_id is a real UUID (prevents path traversal via crafted IDs)
-    try:
-        uuid.UUID(session_id)
-    except ValueError:
-        raise HTTPException(400, "Invalid session ID")
+    _validate_uuid(session_id)
 
     remix_path = (settings.data_dir / "remixes" / session_id / "remix.mp3").resolve()
 
@@ -84,3 +252,11 @@ async def get_audio(session_id: str):
     if not remix_path.exists():
         raise HTTPException(404, "Remix not found")
     return FileResponse(remix_path, media_type="audio/mpeg", filename="remix.mp3")
+
+
+def _validate_uuid(session_id: str) -> None:
+    """Validate that session_id is a well-formed UUID. Raises 400 if not."""
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session ID")
