@@ -158,8 +158,8 @@ def rubberband_process(
         else:
             cmd += ["--crisp", "5"]  # Best R2 equivalent
 
-        # Always preserve formants for vocals (tempo stretch also shifts formants)
-        if is_vocal:
+        # Formant preservation only when pitch-shifting vocals (not tempo-only)
+        if is_vocal and abs(semitones) >= 0.01:
             cmd += ["--formant"]
 
         cmd += [str(in_path), str(out_path)]
@@ -306,8 +306,8 @@ def cross_song_level_match(
 
     # Vocals and instrumentals at equal LUFS. Per-section stem_gains in the
     # arrangement handle the artistic balance (vocals forward in chorus, etc.).
-    # Professional mashups sit vocals at +0 to +1 dB relative to instrumental.
-    vocal_offset_db = 0.0
+    # +2 dB compromise: +3 clipped with compressor makeup, 0 buried vocals. Revisit with spectral ducking (Day 4).
+    vocal_offset_db = 2.0
     target_vocal_lufs = instrumental_lufs + vocal_offset_db
     gain_db = target_vocal_lufs - vocal_lufs
     gain_db = float(np.clip(gain_db, -12.0, 12.0))
@@ -502,7 +502,7 @@ def auto_level(
 def lufs_normalize(
     mixed: np.ndarray,
     sr: int,
-    target_lufs: float = -10.0,
+    target_lufs: float = -12.0,
 ) -> np.ndarray:
     """Normalize the FINAL MIX to target LUFS (not individual stems!).
 
@@ -549,36 +549,45 @@ def true_peak(signal: np.ndarray) -> float:
 def soft_clip(
     signal: np.ndarray,
     ceiling: float,
-    knee_db: float = 2.0,
+    knee_db: float = 4.0,
 ) -> np.ndarray:
-    """Soft-knee clipper at given ceiling.
+    """Soft-knee clipper at given ceiling using tanh waveshaper.
 
-    Below threshold: UNCHANGED (bit-identical).
-    Knee region: quadratic compression (C1 continuous at both boundaries).
-    Above ceiling: hard limit.
-
-    ceiling = 10**(-1.0/20.0) ~ 0.891 for -1.0 dBTP
+    Below knee onset: UNCHANGED (bit-identical).
+    Knee region: tanh-shaped saturation curve — smooth, monotonic, C1 continuous.
     """
     knee_linear = 10 ** (knee_db / 20.0)
-    threshold = ceiling / knee_linear
+    threshold = ceiling / knee_linear  # knee onset
 
     result = signal.copy()
     abs_signal = np.abs(signal)
 
-    # Knee region: parabolic compression
-    knee_mask = (abs_signal > threshold) & (abs_signal <= ceiling)
-    if np.any(knee_mask):
-        x = abs_signal[knee_mask]
-        knee_width = ceiling - threshold
-        t = (x - threshold) / knee_width  # 0 to 1
-        compressed = threshold + knee_width * (2 * t - t * t)
-        result[knee_mask] = np.sign(signal[knee_mask]) * compressed
+    # Mask: everything above threshold needs processing
+    active = abs_signal > threshold
+    if not np.any(active):
+        return result
 
-    # Hard limit above ceiling
-    over_mask = abs_signal > ceiling
-    result[over_mask] = np.sign(signal[over_mask]) * ceiling
+    x = abs_signal[active]
+    # Map [threshold, inf) -> [0, inf), apply tanh saturation, map back
+    knee_width = ceiling - threshold
+    normalized = (x - threshold) / knee_width  # 0 at threshold, 1 at ceiling
+    # tanh maps [0, inf) -> [0, 1) with smooth saturation
+    compressed = threshold + knee_width * np.tanh(normalized)
+    result[active] = np.sign(signal[active]) * compressed
 
     return result
+
+
+def highpass_filter(audio: np.ndarray, sr: int, cutoff_hz: float = 100.0, order: int = 2) -> np.ndarray:
+    """Apply a Butterworth high-pass filter.
+
+    Removes low-frequency bleed (bass rumble, kick drum artifacts) from
+    separated vocal stems. Standard practice before layering vocals over
+    different instrumentals.
+    """
+    from scipy.signal import butter, sosfiltfilt
+    sos = butter(order, cutoff_hz, btype='high', fs=sr, output='sos')
+    return sosfiltfilt(sos, audio, axis=0).astype(np.float32)
 
 
 def apply_fades(

@@ -104,12 +104,13 @@ def _build_gain_curves(
             # to prevent transitions from consuming entire short sections.
             # The arrangement's transition_beats is treated as a hint but
             # capped here to avoid compounding energy dips.
-            trans_beats = min(section.transition_beats, 4)
+            section_beats = section.end_beat - section.start_beat
+            trans_beats = min(section.transition_beats, 8, section_beats // 3)
             if trans_beats <= 0:
                 continue
 
             # Split: 1 beat before boundary, rest after (quick out, smooth in)
-            before_beats = 1
+            before_beats = trans_beats // 2
             after_beats = trans_beats - before_beats
             trans_start = beats_to_samples(
                 max(0, section.start_beat - before_beats), beat_frames, sr, hop_length
