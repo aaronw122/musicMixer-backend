@@ -1,7 +1,7 @@
 """Day 2 pipeline orchestrator.
 
 Runs the remix pipeline in a background thread, emitting SSE progress events.
-Steps will be wired in by Step 7; for now wraps the Day 1 pipeline with progress events.
+Complete 15-step chain: separation -> analysis -> plan -> processing -> render -> export.
 """
 
 import logging
@@ -48,55 +48,338 @@ def run_pipeline(
     event_queue: queue.Queue,
     session: SessionState,
 ) -> None:
-    """Day 2 pipeline skeleton. Steps will be filled in by the wiring agent (Step 7).
+    """Complete Day 2 pipeline: separation, analysis, tempo matching, arrangement, export.
 
-    For now: runs the Day 1 separation + overlay logic, emitting progress events.
-
-    Pipeline steps (to be wired in Step 7):
-      1. Separate stems (existing Day 1 Modal/local code)
-      2. Analyze both songs (BPM, beat_frames, duration)
+    Pipeline steps:
+      1. Separate stems (concurrent for both songs)
+      2. Analyze both original songs (BPM, beat grid, duration)
       3. Reconcile BPM between songs
       4. Generate deterministic fallback plan
-      5. Standardize stems (44.1kHz, stereo, float32)
-      6. Trim stems to source time ranges
-      7. Tempo match vocals via rubberband
-      8. Re-run beat detection on stretched audio
-      9. Cross-song level match
-     10. Render arrangement
-     11. Sum buses into final mix
-     12. LUFS normalize
-     13. Peak limiter
-     14. Fade-in/fade-out
-     15. Export to MP3
+      5. Determine vocal/instrumental sources from plan
+      6. Load and standardize all stems (44.1kHz, stereo, float32)
+      7. Trim stems to source time ranges
+      8. Compute tempo plan (target BPM, which stems to stretch)
+      9. Tempo match via rubberband
+     10. Post-stretch beat grid re-detection
+     11. Cross-song level matching
+     12. Render arrangement into vocal + instrumental buses
+     13. Sum buses into final mix
+     14. LUFS normalize final mix
+     15. Peak limiter
+     16. Fade-in / fade-out
+     17. Export to MP3
     """
+    from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
 
+    import librosa
+    import numpy as np
+
+    from musicmixer.config import settings
+    from musicmixer.services.analysis import analyze_audio, reconcile_bpm
+    from musicmixer.services.interpreter import generate_fallback_plan
+    from musicmixer.services.processor import (
+        apply_fades,
+        cross_song_level_match,
+        compute_tempo_plan,
+        export_mp3,
+        lufs_normalize,
+        rubberband_process,
+        soft_clip,
+        trim_audio,
+        true_peak,
+        validate_stem,
+    )
+    from musicmixer.services.renderer import render_arrangement
+    from musicmixer.services.separation import separate_stems
+
+    song_a_path = Path(song_a_path)
+    song_b_path = Path(song_b_path)
+    stems_dir = settings.data_dir / "stems" / session_id
+    remix_dir = settings.data_dir / "remixes" / session_id
+    remix_dir.mkdir(parents=True, exist_ok=True)
+    output_path = remix_dir / "remix.mp3"
+
+    # === STEP 1: Separate stems (50% of total time) ===
     emit_progress(event_queue, {
         "step": "separating",
         "detail": "Extracting stems from both songs...",
         "progress": 0.10,
     }, session=session)
 
-    # For now, delegate to Day 1 pipeline as a placeholder
-    from musicmixer.services.pipeline_day1 import run_pipeline_sync
+    song_a_stems_dir = stems_dir / "song_a"
+    song_b_stems_dir = stems_dir / "song_b"
 
-    remix_path = run_pipeline_sync(session_id, Path(song_a_path), Path(song_b_path))
+    # Run both separations concurrently
+    with ThreadPoolExecutor(max_workers=2) as sep_executor:
+        future_a = sep_executor.submit(separate_stems, song_a_path, song_a_stems_dir)
+        future_b = sep_executor.submit(separate_stems, song_b_path, song_b_stems_dir)
+        song_a_stems = future_a.result(timeout=900)
+        song_b_stems = future_b.result(timeout=900)
 
     emit_progress(event_queue, {
-        "step": "mixing",
-        "detail": "Building the remix...",
+        "step": "separating",
+        "detail": "Stems extracted!",
+        "progress": 0.50,
+    }, session=session)
+
+    # === STEP 2: Analyze both original songs ===
+    emit_progress(event_queue, {
+        "step": "analyzing",
+        "detail": "Detecting tempo and key...",
+        "progress": 0.52,
+    }, session=session)
+
+    meta_a = analyze_audio(song_a_path)
+    meta_b = analyze_audio(song_b_path)
+    logger.info(
+        "Session %s: Song A BPM=%.1f, Song B BPM=%.1f",
+        session_id, meta_a.bpm, meta_b.bpm,
+    )
+
+    # === STEP 3: Reconcile BPM between songs ===
+    meta_a, meta_b = reconcile_bpm(meta_a, meta_b)
+    logger.info(
+        "Session %s: Reconciled BPM: A=%.1f, B=%.1f",
+        session_id, meta_a.bpm, meta_b.bpm,
+    )
+
+    emit_progress(event_queue, {
+        "step": "analyzing",
+        "detail": f"Song A: {meta_a.bpm:.0f} BPM, Song B: {meta_b.bpm:.0f} BPM",
+        "progress": 0.55,
+    }, session=session)
+
+    # === STEP 4: Generate deterministic fallback plan ===
+    plan = generate_fallback_plan(meta_a, meta_b)
+    logger.info(
+        "Session %s: Plan -- vocals from %s, tempo from %s",
+        session_id, plan.vocal_source, plan.tempo_source,
+    )
+
+    # === STEP 5: Determine vocal/instrumental sources ===
+    if plan.vocal_source == "song_a":
+        vocal_stems_paths = song_a_stems
+        inst_stems_paths = song_b_stems
+        vocal_meta = meta_a
+        inst_meta = meta_b
+    else:
+        vocal_stems_paths = song_b_stems
+        inst_stems_paths = song_a_stems
+        vocal_meta = meta_b
+        inst_meta = meta_a
+
+    emit_progress(event_queue, {
+        "step": "processing",
+        "detail": "Standardizing audio...",
+        "progress": 0.58,
+    }, session=session)
+
+    # === STEP 6: Load and standardize all stems ===
+    vocal_audio: dict[str, np.ndarray] = {}
+    inst_audio: dict[str, np.ndarray] = {}
+
+    # Load vocal stems (just "vocals" for now)
+    for stem_name in ["vocals"]:
+        path = vocal_stems_paths.get(stem_name)
+        if path is not None:
+            audio, _sr = validate_stem(path)
+            vocal_audio[stem_name] = audio
+
+    # Load instrumental stems (filter out None paths from 4-stem fallback)
+    for stem_name in ["drums", "bass", "guitar", "piano", "other"]:
+        path = inst_stems_paths.get(stem_name)
+        if path is not None:
+            audio, _sr = validate_stem(path)
+            inst_audio[stem_name] = audio
+
+    sr = 44100  # All stems standardized to this by validate_stem
+
+    # === STEP 7: Trim stems to source time ranges ===
+    for stem_name, audio in vocal_audio.items():
+        vocal_audio[stem_name] = trim_audio(
+            audio, sr, plan.start_time_vocal, plan.end_time_vocal,
+        )
+    for stem_name, audio in inst_audio.items():
+        inst_audio[stem_name] = trim_audio(
+            audio, sr, plan.start_time_instrumental, plan.end_time_instrumental,
+        )
+
+    # === STEP 8: Compute tempo plan ===
+    target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings = compute_tempo_plan(
+        vocal_meta.bpm, inst_meta.bpm, plan.tempo_source,
+    )
+    plan.warnings.extend(tempo_warnings)
+    logger.info(
+        "Session %s: Target BPM=%.1f, stretch_vocals=%s, stretch_inst=%s",
+        session_id, target_bpm, stretch_vocals, stretch_instrumentals,
+    )
+
+    # === STEP 9: Tempo match via rubberband ===
+    emit_progress(event_queue, {
+        "step": "processing",
+        "detail": "Matching tempo...",
+        "progress": 0.62,
+    }, session=session)
+
+    total_stems_to_stretch = 0
+    if stretch_vocals:
+        total_stems_to_stretch += len(vocal_audio)
+    if stretch_instrumentals:
+        total_stems_to_stretch += len(inst_audio)
+
+    stretched_count = 0
+
+    if stretch_vocals:
+        for stem_name in list(vocal_audio.keys()):
+            stretched_count += 1
+            emit_progress(event_queue, {
+                "step": "processing",
+                "detail": f"Matching tempo ({stretched_count}/{total_stems_to_stretch} stems)...",
+                "progress": 0.62 + (stretched_count / max(total_stems_to_stretch, 1)) * 0.13,
+            }, session=session)
+            vocal_audio[stem_name] = rubberband_process(
+                vocal_audio[stem_name], sr, vocal_meta.bpm, target_bpm,
+                is_vocal=(stem_name == "vocals"),
+            )
+
+    if stretch_instrumentals:
+        for stem_name in list(inst_audio.keys()):
+            stretched_count += 1
+            emit_progress(event_queue, {
+                "step": "processing",
+                "detail": f"Matching tempo ({stretched_count}/{total_stems_to_stretch} stems)...",
+                "progress": 0.62 + (stretched_count / max(total_stems_to_stretch, 1)) * 0.13,
+            }, session=session)
+            inst_audio[stem_name] = rubberband_process(
+                inst_audio[stem_name], sr, inst_meta.bpm, target_bpm,
+            )
+
+    # === STEP 10: Post-stretch beat grid ===
+    # Scale the instrumental's original beat grid proportionally as fallback
+    beat_scale = inst_meta.bpm / target_bpm if abs(inst_meta.bpm - target_bpm) > 0.001 else 1.0
+    # beat_frames are at 22050 Hz analysis rate with hop_length=512 (default).
+    # Scale for tempo change. The renderer uses these frames directly with hop_length=512.
+    post_stretch_beat_frames = (inst_meta.beat_frames * beat_scale).astype(int)
+
+    # Try re-detecting beats on the summed stretched instrumental (more accurate)
+    try:
+        if inst_audio:
+            inst_arrays = list(inst_audio.values())
+            # Sum instrumental stems for beat detection
+            inst_sum = inst_arrays[0].copy()
+            for arr in inst_arrays[1:]:
+                min_len = min(len(inst_sum), len(arr))
+                inst_sum = inst_sum[:min_len] + arr[:min_len]
+
+            # Convert to mono for librosa
+            mono = np.mean(inst_sum, axis=1) if inst_sum.ndim == 2 else inst_sum
+            # Downsample for analysis (librosa beat_track expects 22050)
+            mono_22k = librosa.resample(mono, orig_sr=sr, target_sr=22050)
+            _, new_beat_frames = librosa.beat.beat_track(
+                y=mono_22k, sr=22050, units="frames", start_bpm=target_bpm,
+            )
+            if len(new_beat_frames) > 10:
+                post_stretch_beat_frames = new_beat_frames
+                logger.info(
+                    "Session %s: Re-detected %d beats post-stretch",
+                    session_id, len(new_beat_frames),
+                )
+            else:
+                logger.warning(
+                    "Session %s: Post-stretch beat detection found only %d beats, using scaled grid",
+                    session_id, len(new_beat_frames),
+                )
+    except Exception as e:
+        logger.warning(
+            "Session %s: Post-stretch beat detection failed, using scaled grid: %s",
+            session_id, e,
+        )
+
+    # === STEP 11: Cross-song level matching ===
+    emit_progress(event_queue, {
+        "step": "processing",
+        "detail": "Normalizing loudness...",
         "progress": 0.80,
     }, session=session)
 
-    session.remix_path = str(remix_path)
-    session.explanation = "Remix created using Day 1 pipeline (Day 2 wiring pending)."
+    vocal_audio_main = vocal_audio.get("vocals")
+    if vocal_audio_main is not None and inst_audio:
+        # Sum instrumental stems for LUFS measurement
+        inst_arrays = list(inst_audio.values())
+        inst_sum_for_lufs = inst_arrays[0].copy()
+        for arr in inst_arrays[1:]:
+            min_len = min(len(inst_sum_for_lufs), len(arr))
+            inst_sum_for_lufs = inst_sum_for_lufs[:min_len] + arr[:min_len]
+
+        vocal_audio["vocals"] = cross_song_level_match(
+            vocal_audio_main, inst_sum_for_lufs, sr,
+        )
+
+    # === STEP 12: Render arrangement ===
+    emit_progress(event_queue, {
+        "step": "rendering",
+        "detail": "Building your remix...",
+        "progress": 0.85,
+    }, session=session)
+
+    vocal_bus, instrumental_bus = render_arrangement(
+        sections=plan.sections,
+        vocal_stems=vocal_audio,
+        instrumental_stems=inst_audio,
+        beat_frames=post_stretch_beat_frames,
+        sr=sr,
+    )
+
+    # === STEP 13: Sum buses into final mix ===
+    # Ensure buses are the same length (pad shorter one)
+    max_len = max(len(vocal_bus), len(instrumental_bus))
+    if len(vocal_bus) < max_len:
+        vocal_bus = np.pad(vocal_bus, ((0, max_len - len(vocal_bus)), (0, 0)))
+    if len(instrumental_bus) < max_len:
+        instrumental_bus = np.pad(instrumental_bus, ((0, max_len - len(instrumental_bus)), (0, 0)))
+
+    mixed = vocal_bus + instrumental_bus
+
+    # === STEP 14: LUFS normalize final mix ===
+    mixed = lufs_normalize(mixed, sr, target_lufs=-14.0)
+
+    # === STEP 15: Peak limiter ===
+    ceiling = 10 ** (-1.0 / 20.0)  # -1.0 dBTP ~ 0.891
+    peak = true_peak(mixed)
+    if peak > ceiling:
+        mixed = soft_clip(mixed, ceiling)
+        logger.info(
+            "Session %s: Applied peak limiter (peak was %.3f, ceiling %.3f)",
+            session_id, peak, ceiling,
+        )
+
+    # === STEP 16: Fades ===
+    skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
+    skip_fade_out = plan.sections[-1].label == "outro" if plan.sections else False
+    mixed = apply_fades(mixed, sr, skip_fade_in=skip_fade_in, skip_fade_out=skip_fade_out)
+
+    # === STEP 17: Export to MP3 ===
+    emit_progress(event_queue, {
+        "step": "rendering",
+        "detail": "Rendering final mix...",
+        "progress": 0.95,
+    }, session=session)
+
+    export_mp3(mixed, sr, output_path)
+
+    # === DONE ===
+    session.remix_path = str(output_path)
+    session.explanation = plan.explanation
     session.status = "complete"
 
     emit_progress(event_queue, {
         "step": "complete",
         "detail": "Remix ready!",
         "progress": 1.0,
-        "explanation": session.explanation,
-        "warnings": [],
-        "usedFallback": True,
+        "explanation": plan.explanation,
+        "warnings": plan.warnings,
+        "usedFallback": plan.used_fallback,
     }, session=session)
+
+    logger.info("Session %s: Pipeline complete. Output: %s", session_id, output_path)
