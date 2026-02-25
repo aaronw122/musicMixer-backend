@@ -6,7 +6,6 @@ import pytest
 from musicmixer.models import Section
 from musicmixer.services.renderer import (
     beats_to_samples,
-    make_transition_envelope,
     render_arrangement,
     snap_to_bar,
 )
@@ -18,8 +17,10 @@ from musicmixer.services.renderer import (
 
 BPM = 120
 SR = 44100
+ANALYSIS_SR = 22050  # librosa default analysis sample rate
 HOP_LENGTH = 512
-BEAT_INTERVAL_FRAMES = int(60 / BPM * SR / HOP_LENGTH)
+# Beat frames are in analysis_sr space (22050 Hz), matching real librosa output
+BEAT_INTERVAL_FRAMES = int(60 / BPM * ANALYSIS_SR / HOP_LENGTH)
 # 200 beats at 120 BPM
 BEAT_FRAMES = np.arange(0, 200) * BEAT_INTERVAL_FRAMES
 
@@ -85,29 +86,34 @@ class TestBeatsToSamples:
 
     def test_basic(self):
         """Known beat_frames produce correct sample positions."""
-        # Beat 0 should be at frame 0 * hop_length = 0
+        sr_scale = SR / ANALYSIS_SR  # 2.0
+
+        # Beat 0 should be at frame 0 * hop_length * sr_scale = 0
         assert beats_to_samples(0, BEAT_FRAMES, SR, HOP_LENGTH) == 0
 
-        # Beat 1 should be at BEAT_INTERVAL_FRAMES * hop_length
-        expected = BEAT_INTERVAL_FRAMES * HOP_LENGTH
+        # Beat 1 should be at BEAT_INTERVAL_FRAMES * hop_length * sr_scale
+        expected = int(BEAT_INTERVAL_FRAMES * HOP_LENGTH * sr_scale)
         assert beats_to_samples(1, BEAT_FRAMES, SR, HOP_LENGTH) == expected
 
     def test_mid_range(self):
         """Beat index in middle of array returns correct position."""
+        sr_scale = SR / ANALYSIS_SR
         idx = 50
-        expected = int(BEAT_FRAMES[idx] * HOP_LENGTH)
+        expected = int(BEAT_FRAMES[idx] * HOP_LENGTH * sr_scale)
         assert beats_to_samples(idx, BEAT_FRAMES, SR, HOP_LENGTH) == expected
 
     def test_extrapolation(self):
         """Beat index beyond array length extrapolates using average of last 8 intervals."""
+        sr_scale = SR / ANALYSIS_SR
+
         # Ask for beat 210 when we only have 200 beats (0..199)
         result = beats_to_samples(210, BEAT_FRAMES, SR, HOP_LENGTH)
 
         # With uniform spacing, extrapolation should be accurate
         last_8 = BEAT_FRAMES[-8:]
-        avg_beat_len = float(np.mean(np.diff(last_8))) * HOP_LENGTH
+        avg_beat_len = float(np.mean(np.diff(last_8))) * HOP_LENGTH * sr_scale
         overshoot = 210 - 200 + 1  # 11
-        expected = int(BEAT_FRAMES[-1] * HOP_LENGTH + overshoot * avg_beat_len)
+        expected = int(BEAT_FRAMES[-1] * HOP_LENGTH * sr_scale + overshoot * avg_beat_len)
         assert result == expected
 
     def test_degenerate_case(self):
@@ -115,48 +121,6 @@ class TestBeatsToSamples:
         single = np.array([0])
         result = beats_to_samples(5, single, SR, HOP_LENGTH)
         assert result == 5 * SR
-
-
-# ---------------------------------------------------------------------------
-# make_transition_envelope tests
-# ---------------------------------------------------------------------------
-
-class TestMakeTransitionEnvelope:
-    """Tests for make_transition_envelope()."""
-
-    def test_fade_starts_at_zero_ends_at_one(self):
-        """Fade envelope starts near 0 and ends near 1."""
-        env = make_transition_envelope(1000, "fade", SR)
-        assert len(env) == 1000
-        assert env[0] == pytest.approx(0.0, abs=1e-5)
-        assert env[-1] == pytest.approx(1.0, abs=1e-5)
-
-    def test_crossfade_same_as_fade(self):
-        """Crossfade in-curve is the same shape as fade."""
-        fade = make_transition_envelope(500, "fade", SR)
-        crossfade = make_transition_envelope(500, "crossfade", SR)
-        np.testing.assert_array_almost_equal(fade, crossfade)
-
-    def test_cut_has_micro_crossfade(self):
-        """Cut transition has a short ramp at the start, then 1.0."""
-        env = make_transition_envelope(1000, "cut", SR)
-        assert len(env) == 1000
-        # First sample should be 0 (or near 0)
-        assert env[0] == pytest.approx(0.0, abs=0.02)
-        # After micro-crossfade (~88 samples at 44100), should be 1.0
-        assert env[100] == pytest.approx(1.0, abs=1e-5)
-        # Last sample should be 1.0
-        assert env[-1] == pytest.approx(1.0, abs=1e-5)
-
-    def test_unknown_type_returns_ones(self):
-        """Unknown transition type returns an envelope of all ones."""
-        env = make_transition_envelope(500, "unknown_type", SR)
-        np.testing.assert_array_equal(env, np.ones(500, dtype=np.float32))
-
-    def test_zero_length(self):
-        """Zero-length request returns empty array."""
-        env = make_transition_envelope(0, "fade", SR)
-        assert len(env) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +207,7 @@ class TestRenderArrangement:
         assert inst_bus.shape[0] == beats_to_samples(100, BEAT_FRAMES, SR, HOP_LENGTH)
 
     def test_section_isolation_intro_no_vocals(self):
-        """Intro section has vocal gain 0.0, so no vocal energy in that region."""
+        """Intro section body (before transition zone) has zero vocal energy."""
         sections = _make_sections(200)
         total = _total_samples()
         vocal_stems, inst_stems = self._make_stems(total)
@@ -252,10 +216,11 @@ class TestRenderArrangement:
             sections, vocal_stems, inst_stems, BEAT_FRAMES, SR, HOP_LENGTH,
         )
 
-        # Intro ends at beat 200 // 8 = 25
-        intro_end = beats_to_samples(25, BEAT_FRAMES, SR, HOP_LENGTH)
-        intro_region = vocal_bus[:intro_end]
-        assert np.allclose(intro_region, 0.0), "Intro region should have zero vocal energy"
+        # Intro ends at beat 25. The build section's transition_beats=4,
+        # so half_beats=2 bleeds backward. Check up to beat 23 (safe zone).
+        safe_end = beats_to_samples(23, BEAT_FRAMES, SR, HOP_LENGTH)
+        intro_body = vocal_bus[:safe_end]
+        assert np.allclose(intro_body, 0.0), "Intro body should have zero vocal energy"
 
     def test_short_stems_padded(self):
         """Stems shorter than arrangement are padded with silence."""

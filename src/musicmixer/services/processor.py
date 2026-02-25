@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 LUFS_FLOOR = -40.0  # Below this, audio is effectively silence/noise
+GATE_FLOOR_DB = -45.0  # Below this RMS, assume silence (don't compress)
 
 # Module-level cache for rubberband version
 _rubberband_version: int | None = None
@@ -157,8 +158,8 @@ def rubberband_process(
         else:
             cmd += ["--crisp", "5"]  # Best R2 equivalent
 
-        # Formant preservation only when pitch-shifting vocals
-        if is_vocal and abs(semitones) >= 0.01:
+        # Always preserve formants for vocals (tempo stretch also shifts formants)
+        if is_vocal:
             cmd += ["--formant"]
 
         cmd += [str(in_path), str(out_path)]
@@ -177,11 +178,14 @@ def rubberband_process(
 def compute_tempo_plan(
     vocal_bpm: float,
     instrumental_bpm: float,
-    tempo_source: str = "song_b",
+    tempo_source: str = "weighted_midpoint",
 ) -> tuple[float, bool, bool, list[str]]:
     """Decide target BPM and which stems to stretch.
 
     Returns: (target_bpm, stretch_vocals, stretch_instrumentals, warnings)
+
+    Adaptive weighted midpoint splits the tempo stretch burden between
+    vocals and instrumentals instead of forcing 100% onto vocals.
 
     Tiered stretch limits (asymmetric for slowdown vs speedup):
       < 10%: stretch either/both silently
@@ -190,13 +194,36 @@ def compute_tempo_plan(
       30-45% speedup / 25-35% slowdown: vocals-only stretch, warn
       > 45% speedup / > 35% slowdown: skip stretching entirely
     """
-    target_bpm = instrumental_bpm  # Default: match to instrumental
+    gap_pct = abs(vocal_bpm - instrumental_bpm) / max(vocal_bpm, instrumental_bpm)
 
-    if tempo_source == "average":
-        gap_pct = abs(vocal_bpm - instrumental_bpm) / max(vocal_bpm, instrumental_bpm)
-        if gap_pct < 0.15:
-            target_bpm = (vocal_bpm + instrumental_bpm) / 2
-        # else: keep instrumental as target
+    if tempo_source == "weighted_midpoint" or tempo_source == "average":
+        if gap_pct <= 0.04:
+            # Within DJ-transparent range -- match to instrumental
+            target_bpm = instrumental_bpm
+        elif gap_pct <= 0.10:
+            # Safe mashup range -- 65/35 instrumental bias
+            target_bpm = instrumental_bpm * 0.65 + vocal_bpm * 0.35
+        elif gap_pct <= 0.20:
+            # Extended range -- 70/30 bias, cap each side at 12%
+            target_bpm = instrumental_bpm * 0.70 + vocal_bpm * 0.30
+        else:
+            # Beyond practical range -- clamp so neither side exceeds 12%
+            # Bias toward instrumental
+            target_bpm = instrumental_bpm * 0.70 + vocal_bpm * 0.30
+            # Clamp: if vocal stretch > 12%, pull target toward vocal
+            vocal_stretch = abs(vocal_bpm - target_bpm) / vocal_bpm
+            if vocal_stretch > 0.12:
+                # Solve: |vocal_bpm - target| / vocal_bpm = 0.12
+                if vocal_bpm > target_bpm:
+                    target_bpm = vocal_bpm * 0.88  # Max 12% slowdown
+                else:
+                    target_bpm = vocal_bpm * 1.12  # Max 12% speedup
+    elif tempo_source == "song_a":
+        target_bpm = vocal_bpm
+    elif tempo_source == "song_b":
+        target_bpm = instrumental_bpm
+    else:
+        target_bpm = instrumental_bpm
 
     # time_ratio for rubberband: source_bpm / target_bpm
     vocal_ratio = vocal_bpm / target_bpm
@@ -260,10 +287,9 @@ def cross_song_level_match(
     instrumental_sum: np.ndarray,
     sr: int,
 ) -> np.ndarray:
-    """Match vocal loudness to instrumental level with a +3 dB vocal offset.
+    """Match vocal loudness to instrumental level.
 
     Measures LUFS of vocal and instrumental via pyloudnorm.
-    Fixed +3 dB vocal offset for Day 2 (spectral-density-adaptive deferred).
     Safety cap: clip gain to [-12, +12] dB.
     """
     meter = pyloudnorm.Meter(sr)
@@ -278,7 +304,10 @@ def cross_song_level_match(
         )
         return vocal_audio
 
-    vocal_offset_db = 3.0  # Fixed for Day 2
+    # Vocals and instrumentals at equal LUFS. Per-section stem_gains in the
+    # arrangement handle the artistic balance (vocals forward in chorus, etc.).
+    # Professional mashups sit vocals at +0 to +1 dB relative to instrumental.
+    vocal_offset_db = 0.0
     target_vocal_lufs = instrumental_lufs + vocal_offset_db
     gain_db = target_vocal_lufs - vocal_lufs
     gain_db = float(np.clip(gain_db, -12.0, 12.0))
@@ -291,10 +320,189 @@ def cross_song_level_match(
     return vocal_audio * (10 ** (gain_db / 20.0))
 
 
+def compress_dynamic_range(
+    audio: np.ndarray,
+    sr: int,
+    threshold_db: float = -22.0,
+    ratio: float = 3.0,
+    attack_ms: float = 10.0,
+    release_ms: float = 150.0,
+    makeup_db: float = 0.0,
+    gate_floor_db: float = GATE_FLOOR_DB,
+) -> np.ndarray:
+    """RMS-based feed-forward compressor with noise gate.
+
+    Smooths out dynamic range so that loud passages are tamed and (with makeup
+    gain) quiet active passages become more audible.  A noise gate prevents
+    boosting silence between phrases.
+
+    Parameters:
+        threshold_db: RMS level above which compression kicks in (dBFS).
+        ratio: Compression ratio (e.g. 3.0 means 3:1).
+        attack_ms: How fast the compressor reacts to louder signal.
+        release_ms: How fast the compressor releases after signal drops.
+        makeup_db: Static gain added after compression to restore loudness.
+        gate_floor_db: RMS below this is treated as silence (no gain change).
+    """
+    if audio.ndim == 2:
+        mono = np.mean(audio, axis=1)
+    else:
+        mono = audio
+
+    # Frame-based RMS analysis (10ms frames for responsive tracking)
+    frame_ms = 10
+    frame_len = max(1, int(frame_ms * sr / 1000))
+    n_frames = len(mono) // frame_len
+    if n_frames == 0:
+        return audio
+
+    # Compute RMS per frame
+    frames = mono[: n_frames * frame_len].reshape(n_frames, frame_len)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-20)
+    rms_db = 20 * np.log10(rms + 1e-20)
+
+    # Compute gain reduction per frame
+    gain_reduction_db = np.zeros(n_frames, dtype=np.float32)
+    for i in range(n_frames):
+        if rms_db[i] < gate_floor_db:
+            # Below noise gate: no gain change (don't boost silence)
+            gain_reduction_db[i] = 0.0
+        elif rms_db[i] > threshold_db:
+            over_db = rms_db[i] - threshold_db
+            gain_reduction_db[i] = -over_db * (1.0 - 1.0 / ratio)
+
+    # Smooth with attack/release envelope (leaky integrator)
+    attack_frames = max(1, attack_ms / frame_ms)
+    release_frames = max(1, release_ms / frame_ms)
+    attack_coeff = np.exp(-1.0 / attack_frames)
+    release_coeff = np.exp(-1.0 / release_frames)
+
+    smoothed = np.zeros(n_frames, dtype=np.float32)
+    smoothed[0] = gain_reduction_db[0]
+    for i in range(1, n_frames):
+        if gain_reduction_db[i] < smoothed[i - 1]:
+            # Signal getting louder -> compress (fast attack)
+            coeff = attack_coeff
+        else:
+            # Signal getting quieter -> release (slow release)
+            coeff = release_coeff
+        smoothed[i] = coeff * smoothed[i - 1] + (1.0 - coeff) * gain_reduction_db[i]
+
+    # Apply makeup gain only to active (non-gated) frames.
+    # Smooth the gate mask with attack/release to avoid clicks at boundaries.
+    gate_mask = (rms_db >= gate_floor_db).astype(np.float32)
+    smoothed_mask = np.zeros(n_frames, dtype=np.float32)
+    smoothed_mask[0] = gate_mask[0]
+    for i in range(1, n_frames):
+        if gate_mask[i] > smoothed_mask[i - 1]:
+            smoothed_mask[i] = attack_coeff * smoothed_mask[i - 1] + (1.0 - attack_coeff) * gate_mask[i]
+        else:
+            smoothed_mask[i] = release_coeff * smoothed_mask[i - 1] + (1.0 - release_coeff) * gate_mask[i]
+    smoothed += makeup_db * smoothed_mask
+
+    # Convert to linear gain
+    gain_linear = 10.0 ** (smoothed / 20.0)
+
+    # Interpolate frame-level gain to sample-level
+    frame_centers = np.arange(n_frames) * frame_len + frame_len // 2
+    sample_indices = np.arange(len(audio))
+    sample_gain = np.interp(sample_indices, frame_centers, gain_linear).astype(np.float32)
+
+    if audio.ndim == 2:
+        return audio * sample_gain[:, np.newaxis]
+    return audio * sample_gain
+
+
+def auto_level(
+    audio: np.ndarray,
+    sr: int,
+    window_sec: float = 2.0,
+    max_boost_db: float = 6.0,
+    max_cut_db: float = 4.0,
+    target_percentile: float = 50.0,
+    detector_audio: np.ndarray | None = None,
+    active_floor_db: float = -45.0,
+) -> np.ndarray:
+    """Slow automatic gain control that maintains consistent RMS level.
+
+    Unlike compression (which only reduces peaks), this can BOOST quiet
+    sections to maintain overall consistency.  Uses a long analysis window
+    (2s default) so gain changes are imperceptible — no "pumping".
+
+    This specifically addresses the gap between vocal phrases: when the
+    vocal drops to silence between bars, the instrumental-only mix is
+    quieter.  The leveler gently boosts those moments so the overall
+    volume feels consistent.
+
+    active_floor_db: RMS floor in dBFS below which a window is considered
+        inactive (tail/silence). Inactive windows are never boosted —
+        only cuts are applied if they exceed threshold. Default -45 dBFS.
+    """
+    # Use a separate detector signal for RMS analysis if provided.
+    # This lets the caller drive leveling from the instrumental bus so
+    # vocal gain transitions don't trigger reactive cuts/boosts.
+    det = detector_audio if detector_audio is not None else audio
+    if det.ndim == 2:
+        mono = np.mean(det, axis=1)
+    else:
+        mono = det
+
+    # Convert dBFS floor to linear RMS threshold
+    active_floor_linear = 10.0 ** (active_floor_db / 20.0)
+
+    window = int(window_sec * sr)
+    hop = window // 4  # 75% overlap for smooth gain curve
+    n_windows = max(1, (len(mono) - window) // hop + 1)
+
+    # Compute windowed RMS
+    rms_values = np.empty(n_windows, dtype=np.float64)
+    for i in range(n_windows):
+        start = i * hop
+        chunk = mono[start : start + window]
+        rms_values[i] = np.sqrt(np.mean(chunk ** 2) + 1e-20)
+
+    # Target level = median of active windows (above the floor)
+    active = rms_values[rms_values > active_floor_linear]
+    if len(active) == 0:
+        return audio
+    target_rms = float(np.percentile(active, target_percentile))
+
+    # Compute gain per window
+    gains_db = np.zeros(n_windows, dtype=np.float32)
+    for i in range(n_windows):
+        if rms_values[i] < active_floor_linear:
+            # Below activity floor: allow cuts but never boost.
+            # This prevents near-silent tails/noise from being amplified.
+            desired_db = 20.0 * np.log10(target_rms / max(rms_values[i], 1e-20))
+            gains_db[i] = float(min(0.0, np.clip(desired_db, -max_cut_db, 0.0)))
+        else:
+            desired_db = 20.0 * np.log10(target_rms / rms_values[i])
+            gains_db[i] = float(np.clip(desired_db, -max_cut_db, max_boost_db))
+
+    gains_linear = (10.0 ** (gains_db / 20.0)).astype(np.float32)
+
+    # Interpolate to sample rate (smooth transitions between windows)
+    centers = np.arange(n_windows) * hop + window // 2
+    sample_gain = np.interp(
+        np.arange(len(audio)), centers, gains_linear
+    ).astype(np.float32)
+
+    logger.info(
+        "Auto-level: target_rms=%.4f, gain_range=[%.1f, %.1f] dB",
+        target_rms,
+        float(np.min(gains_db)),
+        float(np.max(gains_db)),
+    )
+
+    if audio.ndim == 2:
+        return audio * sample_gain[:, np.newaxis]
+    return audio * sample_gain
+
+
 def lufs_normalize(
     mixed: np.ndarray,
     sr: int,
-    target_lufs: float = -14.0,
+    target_lufs: float = -10.0,
 ) -> np.ndarray:
     """Normalize the FINAL MIX to target LUFS (not individual stems!).
 
@@ -341,7 +549,7 @@ def true_peak(signal: np.ndarray) -> float:
 def soft_clip(
     signal: np.ndarray,
     ceiling: float,
-    knee_db: float = 6.0,
+    knee_db: float = 2.0,
 ) -> np.ndarray:
     """Soft-knee clipper at given ceiling.
 

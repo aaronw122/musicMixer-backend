@@ -155,47 +155,80 @@ class TestRubberband:
 
 
 class TestComputeTempoPlan:
-    def test_small_gap(self):
-        """118 vs 122 BPM (3.3% gap): stretches both."""
+    def test_small_gap_dj_transparent(self):
+        """118 vs 122 BPM (3.3% gap, <= 4%): matches instrumental exactly."""
         target, stretch_v, stretch_i, warnings = compute_tempo_plan(118.0, 122.0)
-        assert target == 122.0  # Default: instrumental's tempo
+        assert target == 122.0  # Within DJ-transparent range
         assert stretch_v is True
-        # Instrumental stretch: inst_ratio = 122/122 = 1.0, so no stretch needed
+        assert stretch_i is False  # inst_ratio = 122/122 = 1.0
+        assert len(warnings) == 0
+
+    def test_safe_mashup_range(self):
+        """110 vs 120 BPM (8.3% gap, 4-10%): 65/35 weighted midpoint."""
+        target, stretch_v, stretch_i, warnings = compute_tempo_plan(110.0, 120.0)
+        # 120 * 0.65 + 110 * 0.35 = 78 + 38.5 = 116.5
+        assert target == 120.0 * 0.65 + 110.0 * 0.35
+        assert stretch_v is True
+        assert stretch_i is True  # Instrumental also stretches
+        assert len(warnings) == 0
+
+    def test_extended_range(self):
+        """100 vs 120 BPM (16.7% gap, 10-20%): 70/30 weighted midpoint."""
+        target, stretch_v, stretch_i, warnings = compute_tempo_plan(100.0, 120.0)
+        # 120 * 0.70 + 100 * 0.30 = 84 + 30 = 114
+        assert target == 120.0 * 0.70 + 100.0 * 0.30
+        assert stretch_v is True
+        # vocal_stretch_pct = abs(1 - 100/114) = 12.3% > 10%: tiered limits
+        # disable instrumental stretch (vocals-only in 10-25% speedup range)
         assert stretch_i is False
         assert len(warnings) == 0
 
-    def test_large_gap(self):
-        """85 vs 130 BPM (34.6% gap, speedup): skips stretching."""
+    def test_large_gap_clamps_vocal_stretch(self):
+        """85 vs 130 BPM (34.6% gap, > 20%): clamps so vocal stretch <= 12%."""
         target, stretch_v, stretch_i, warnings = compute_tempo_plan(85.0, 130.0)
-        # 85->130 is a speedup: stretch_pct = abs(1 - 85/130) = 0.346
-        # 34.6% speedup is in the 30-45% range: vocals-only stretch with warn
+        # Weighted: 130*0.70 + 85*0.30 = 116.5. Vocal stretch = |85-116.5|/85 = 37% > 12%
+        # Clamp: vocal_bpm < target_bpm, so target = 85 * 1.12 = 95.2
+        assert target == 85.0 * 1.12
         assert stretch_v is True
+        # Vocal stretch at 95.2 BPM: ratio=85/95.2=0.893, pct=10.7% speedup
+        # Tiered limits: 10-25% speedup -> vocals-only, no instrumental stretch
         assert stretch_i is False
-        assert len(warnings) > 0
 
-    def test_large_gap_skip(self):
-        """70 vs 140 BPM (50% gap): skips stretching entirely."""
-        target, stretch_v, stretch_i, warnings = compute_tempo_plan(70.0, 140.0)
+    def test_very_large_gap_explicit_song_b(self):
+        """70 vs 140 BPM with song_b: skips stretching entirely."""
+        target, stretch_v, stretch_i, warnings = compute_tempo_plan(
+            70.0, 140.0, tempo_source="song_b"
+        )
+        # 70->140 is 50% speedup, > 45%: skip all stretching
         assert stretch_v is False
         assert stretch_i is False
         assert any("too large" in w.lower() for w in warnings)
 
-    def test_moderate_gap(self):
-        """100 vs 120 BPM (16.7% gap): stretches vocals only."""
-        target, stretch_v, stretch_i, warnings = compute_tempo_plan(100.0, 120.0)
+    def test_weighted_midpoint_is_default(self):
+        """Default tempo_source is weighted_midpoint, not song_b."""
+        target_wm, _, _, _ = compute_tempo_plan(100.0, 120.0)
+        target_explicit, _, _, _ = compute_tempo_plan(
+            100.0, 120.0, tempo_source="weighted_midpoint"
+        )
+        assert target_wm == target_explicit
+
+    def test_song_b_source(self):
+        """Explicit song_b source uses instrumental BPM as target."""
+        target, _, _, _ = compute_tempo_plan(100.0, 120.0, tempo_source="song_b")
         assert target == 120.0
-        assert stretch_v is True
-        assert stretch_i is False
 
-    def test_average_tempo_source_close(self):
-        """Average tempo source with gap < 15%: uses midpoint."""
-        target, _, _, _ = compute_tempo_plan(115.0, 125.0, tempo_source="average")
-        assert target == 120.0  # Midpoint
+    def test_song_a_source(self):
+        """Explicit song_a source uses vocal BPM as target."""
+        target, _, _, _ = compute_tempo_plan(100.0, 120.0, tempo_source="song_a")
+        assert target == 100.0
 
-    def test_average_tempo_source_far(self):
-        """Average tempo source with gap > 15%: keeps instrumental."""
-        target, _, _, _ = compute_tempo_plan(90.0, 130.0, tempo_source="average")
-        assert target == 130.0  # Gap too large, keep instrumental
+    def test_average_treated_as_weighted_midpoint(self):
+        """Average tempo source uses same weighted midpoint logic."""
+        target_avg, _, _, _ = compute_tempo_plan(110.0, 120.0, tempo_source="average")
+        target_wm, _, _, _ = compute_tempo_plan(
+            110.0, 120.0, tempo_source="weighted_midpoint"
+        )
+        assert target_avg == target_wm
 
 
 # ---------------------------------------------------------------------------

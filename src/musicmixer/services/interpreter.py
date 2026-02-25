@@ -32,7 +32,7 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
     i_start = inst_meta.duration_seconds * 0.15
     i_end = min(i_start + 90.0, inst_meta.duration_seconds)
 
-    tempo_src = "song_b"  # Match to instrumental's tempo
+    tempo_src = "weighted_midpoint"  # Split stretch burden between both songs
     total_beats = int(inst_meta.bpm * 90 / 60)  # Beats in 90 seconds
 
     logger.info(
@@ -75,19 +75,21 @@ def default_arrangement(total_beats: int) -> list[Section]:
     three_quarter = total_beats * 3 // 4
     seven_eighth = total_beats * 7 // 8
 
+    # Instrumental gains are intentionally UNIFORM across body sections
+    # (build, main, breakdown) to prevent summed energy dips at transitions.
+    # Only vocals change significantly between sections.
+    # The intro/outro use slightly different gains for musical shape.
+    inst_body = {"drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
+    inst_intro = {"drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
+    inst_breakdown = {"drums": 0.3, "bass": 0.6, "guitar": 0.6, "piano": 0.5, "other": 0.5}
+    inst_outro = {"drums": 0.6, "bass": 0.6, "guitar": 0.5, "piano": 0.4, "other": 0.5}
+
     return [
         Section(
             label="intro",
             start_beat=0,
             end_beat=eighth,
-            stem_gains={
-                "vocals": 0.0,
-                "drums": 0.8,
-                "bass": 0.7,
-                "guitar": 0.6,
-                "piano": 0.5,
-                "other": 1.0,
-            },
+            stem_gains={"vocals": 0.0, **inst_intro},
             transition_in="fade",
             transition_beats=4,
         ),
@@ -95,14 +97,7 @@ def default_arrangement(total_beats: int) -> list[Section]:
             label="build",
             start_beat=eighth,
             end_beat=quarter,
-            stem_gains={
-                "vocals": 0.6,
-                "drums": 0.7,
-                "bass": 0.8,
-                "guitar": 0.5,
-                "piano": 0.4,
-                "other": 0.5,
-            },
+            stem_gains={"vocals": 0.6, **inst_body},
             transition_in="crossfade",
             transition_beats=4,
         ),
@@ -110,29 +105,15 @@ def default_arrangement(total_beats: int) -> list[Section]:
             label="main",
             start_beat=quarter,
             end_beat=three_quarter,
-            stem_gains={
-                "vocals": 1.0,
-                "drums": 0.7,
-                "bass": 0.8,
-                "guitar": 0.5,
-                "piano": 0.4,
-                "other": 0.5,
-            },
+            stem_gains={"vocals": 1.0, **inst_body},
             transition_in="crossfade",
-            transition_beats=2,
+            transition_beats=4,
         ),
         Section(
             label="breakdown",
             start_beat=three_quarter,
             end_beat=seven_eighth,
-            stem_gains={
-                "vocals": 0.8,
-                "drums": 0.0,
-                "bass": 0.6,
-                "guitar": 0.7,
-                "piano": 0.8,
-                "other": 0.7,
-            },
+            stem_gains={"vocals": 0.9, **inst_breakdown},
             transition_in="crossfade",
             transition_beats=4,
         ),
@@ -140,14 +121,7 @@ def default_arrangement(total_beats: int) -> list[Section]:
             label="outro",
             start_beat=seven_eighth,
             end_beat=total_beats,
-            stem_gains={
-                "vocals": 0.0,
-                "drums": 0.6,
-                "bass": 0.5,
-                "guitar": 0.5,
-                "piano": 0.6,
-                "other": 0.8,
-            },
+            stem_gains={"vocals": 0.3, **inst_outro},
             transition_in="crossfade",
             transition_beats=4,
         ),

@@ -78,7 +78,7 @@ class TestGenerateFallbackPlan:
         plan = generate_fallback_plan(meta_a, meta_b)
 
         assert plan.vocal_source == "song_a"
-        assert plan.tempo_source == "song_b"
+        assert plan.tempo_source == "weighted_midpoint"
         assert plan.key_source == "none"
 
     def test_fallback_plan_time_ranges(self):
@@ -146,14 +146,14 @@ class TestDefaultArrangement:
         intro = sections[0]
         assert intro.stem_gains["vocals"] == 0.0
 
-    def test_default_arrangement_outro_no_vocals(self):
-        """Outro section has vocal gain of 0.0."""
+    def test_default_arrangement_outro_low_vocals(self):
+        """Outro section has low but non-zero vocal gain (faint echo, not silent cut)."""
         sections = default_arrangement(200)
         outro = sections[-1]
-        assert outro.stem_gains["vocals"] == 0.0
+        assert 0.0 < outro.stem_gains["vocals"] <= 0.5
 
-    def test_default_arrangement_breakdown_no_drums(self):
-        """Breakdown section has drum gain of 0.0."""
+    def test_default_arrangement_breakdown_low_drums(self):
+        """Breakdown section has reduced but non-zero drum gain (avoids 'song stopped' feel)."""
         sections = default_arrangement(200)
         breakdown = [s for s in sections if s.label == "breakdown"][0]
-        assert breakdown.stem_gains["drums"] == 0.0
+        assert 0.0 < breakdown.stem_gains["drums"] <= 0.3
