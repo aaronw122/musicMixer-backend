@@ -33,11 +33,16 @@ class TestTempoSourceVariants:
         wm = estimate_target_bpm(100.0, 120.0, "weighted_midpoint")
         assert avg == wm
 
-    def test_unknown_source_uses_weighted_midpoint(self):
-        """Unrecognized tempo_source should fall through to weighted_midpoint logic."""
+    def test_unknown_source_returns_instrumental_bpm(self):
+        """Unrecognized tempo_source should return instrumental_bpm (original behavior)."""
         unknown = estimate_target_bpm(100.0, 120.0, "something_random")
-        wm = estimate_target_bpm(100.0, 120.0, "weighted_midpoint")
-        assert unknown == wm
+        assert unknown == 120.0
+
+    def test_unknown_source_various_values_return_instrumental(self):
+        """Multiple unrecognized tempo_source values all return instrumental_bpm."""
+        for bad_source in ("bad", "auto", "custom", "", "WEIGHTED_MIDPOINT"):
+            result = estimate_target_bpm(95.0, 130.0, bad_source)
+            assert result == 130.0, f"Expected instrumental_bpm for tempo_source={bad_source!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +334,8 @@ class TestConsistencyWithProcessor:
             (95.0, 130.0, "song_b"),
             (120.0, 100.0, "song_a"),
             (120.0, 100.0, "song_b"),
+            (100.0, 120.0, "unknown_source"),
+            (95.0, 130.0, "bad"),
         ],
     )
     def test_matches_old_inline_logic(

@@ -29,8 +29,8 @@ def estimate_target_bpm(
     Args:
         vocal_bpm: BPM of the vocal source song.
         instrumental_bpm: BPM of the instrumental source song.
-        tempo_source: One of "song_a", "song_b", "weighted_midpoint", "average",
-                      or any other value (treated as weighted_midpoint).
+        tempo_source: One of "song_a", "song_b", "weighted_midpoint", "average".
+                      Any unrecognized value returns instrumental_bpm directly.
 
     Returns:
         The estimated target BPM for the remix.
@@ -47,8 +47,10 @@ def estimate_target_bpm(
         return vocal_bpm
     if tempo_source == "song_b":
         return instrumental_bpm
+    if tempo_source not in ("weighted_midpoint", "average"):
+        return instrumental_bpm
 
-    # weighted_midpoint, average, or any unrecognized value
+    # weighted_midpoint or average
     gap_pct = abs(vocal_bpm - instrumental_bpm) / max(vocal_bpm, instrumental_bpm)
 
     if gap_pct <= 0.04:
