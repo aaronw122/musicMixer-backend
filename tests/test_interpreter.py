@@ -48,13 +48,13 @@ class TestGenerateFallbackPlan:
         assert plan.used_fallback is True
 
     def test_fallback_plan_sections_count(self):
-        """Produces 5 or 6 sections depending on total beat budget."""
+        """Produces 5, 6, or 8 sections depending on total beat budget."""
         meta_a = _make_metadata(bpm=95.0, duration=210.0)
         meta_b = _make_metadata(bpm=120.0, duration=240.0)
 
         plan = generate_fallback_plan(meta_a, meta_b)
 
-        assert len(plan.sections) in (5, 6)
+        assert len(plan.sections) in (5, 6, 8)
 
     def test_fallback_plan_sections_contiguous(self):
         """Each section's start_beat equals the previous section's end_beat."""
@@ -101,7 +101,7 @@ class TestGenerateFallbackPlan:
         )
 
     def test_fallback_plan_time_ranges_short_song(self):
-        """When a song is shorter than 90s, end time is capped at duration."""
+        """When a song is shorter than target duration, end time is capped at song duration."""
         meta_a = _make_metadata(bpm=120.0, duration=60.0)
         meta_b = _make_metadata(bpm=120.0, duration=60.0)
 
@@ -122,23 +122,38 @@ class TestDefaultArrangement:
         assert sections[0].start_beat == 0
         assert sections[-1].end_beat == total_beats
 
-    def test_default_arrangement_five_sections(self):
-        """Returns 6 sections for longer arrangements, otherwise 5."""
-        for total_beats in [100, 180, 200, 360]:
+    def test_default_arrangement_section_count(self):
+        """Returns 8 sections for >= 192 beats, 6 for 96-191, otherwise 5."""
+        for total_beats in [40, 80, 100, 180, 200, 360]:
             sections = default_arrangement(total_beats)
-            expected = 6 if total_beats >= 96 else 5
+            if total_beats >= 192:
+                expected = 8
+            elif total_beats >= 96:
+                expected = 6
+            else:
+                expected = 5
             assert len(sections) == expected, (
                 f"Expected {expected} sections for total_beats={total_beats}"
             )
 
     def test_default_arrangement_labels(self):
-        """Sections have expected labels for 5- or 6-section layouts."""
-        sections = default_arrangement(200)
-        labels = [s.label for s in sections]
-        assert labels in (
-            ["intro", "build", "main", "breakdown", "outro"],
-            ["intro", "build", "main", "breakdown", "drop", "outro"],
-        )
+        """Sections have expected labels for 5-, 6-, or 8-section layouts."""
+        # 6-section (96-191 beats)
+        sections_6 = default_arrangement(150)
+        labels_6 = [s.label for s in sections_6]
+        assert labels_6 == ["intro", "build", "main", "breakdown", "drop", "outro"]
+
+        # 8-section (>= 192 beats)
+        sections_8 = default_arrangement(200)
+        labels_8 = [s.label for s in sections_8]
+        assert labels_8 == [
+            "intro", "verse", "drop", "breakdown", "verse", "drop", "breakdown", "outro",
+        ]
+
+        # 5-section (< 96 beats)
+        sections_5 = default_arrangement(80)
+        labels_5 = [s.label for s in sections_5]
+        assert labels_5 == ["intro", "build", "main", "breakdown", "outro"]
 
     def test_default_arrangement_contiguous(self):
         """Sections are contiguous (no gaps or overlaps)."""
