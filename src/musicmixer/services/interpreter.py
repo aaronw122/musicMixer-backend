@@ -783,7 +783,7 @@ def _build_few_shot_messages() -> list[dict]:
                     "input": {
                         "vocal_source": "song_b",
                         "start_time_vocal": 0.0,
-                        "end_time_vocal": 220.0,
+                        "end_time_vocal": 210.0,
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 225.0,
                         "sections": [
@@ -934,7 +934,7 @@ def _build_few_shot_messages_4stem() -> list[dict]:
                     "input": {
                         "vocal_source": "song_b",
                         "start_time_vocal": 0.0,
-                        "end_time_vocal": 220.0,
+                        "end_time_vocal": 210.0,
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 225.0,
                         "sections": [
@@ -1391,7 +1391,7 @@ def interpret_prompt(
         except _DurationTooShortError as e:
             if attempt < max_duration_attempts - 1:
                 needed_beats = int(
-                    TARGET_REMIX_DURATION_SECONDS * target_bpm / 60
+                    TARGET_REMIX_DURATION_SECONDS * e.target_bpm / 60
                 )
                 actual_beats = e.plan.sections[-1].end_beat if e.plan.sections else 0
                 beat_delta = needed_beats - actual_beats
@@ -1422,7 +1422,7 @@ def interpret_prompt(
                             "content": (
                                 f"REJECTED: Your arrangement is too short. "
                                 f"You produced {actual_beats} beats = "
-                                f"{actual_beats * 60 / target_bpm:.0f}s at {target_bpm:.0f} BPM. "
+                                f"{actual_beats * 60 / e.target_bpm:.0f}s at {e.target_bpm:.0f} BPM. "
                                 f"Target: {TARGET_REMIX_DURATION_SECONDS}s = ~{needed_beats} beats. "
                                 f"You need {beat_delta} more beats. "
                                 f"Create at least {suggested_sections} sections of 16-64 beats each. "

@@ -270,7 +270,11 @@ def run_pipeline(
     if plan.sections:
         _pi_total_beats = plan.sections[-1].end_beat
         from musicmixer.services.tempo import estimate_target_bpm as _est_bpm
-        _pi_approx_bpm = _est_bpm(meta_a.bpm, meta_b.bpm)
+        if plan.vocal_source == "song_b":
+            _v_bpm, _i_bpm = meta_b.bpm, meta_a.bpm
+        else:
+            _v_bpm, _i_bpm = meta_a.bpm, meta_b.bpm
+        _pi_approx_bpm = _est_bpm(_v_bpm, _i_bpm)
         _pi_est_duration = _pi_total_beats * 60 / _pi_approx_bpm if _pi_approx_bpm > 0 else 0
         logger.info(
             "Session %s: Arrangement: %d sections, %d beats, est %.0fs at %.0f BPM",
