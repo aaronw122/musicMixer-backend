@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     output_format: str = "mp3"
     output_bitrate: str = "320k"
 
+    # Day 3.5 audio-quality A/B flags (default-off)
+    ab_control_day3: bool = True
+    ab_autolvl_tune_v1: bool = False
+    ab_vocal_makeup_v1: bool = False
+    ab_mp3_export_path_v1: bool = False
+
     model_config = SettingsConfigDict(env_file=".env")
 
 

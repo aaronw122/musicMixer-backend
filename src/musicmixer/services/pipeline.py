@@ -401,7 +401,7 @@ def run_pipeline(
         pre_drum_peak = true_peak(inst_audio["drums"])
         inst_audio["drums"] = true_peak_limit(
             inst_audio["drums"], sr,
-            ceiling_dbtp=-3.0,
+            ceiling_dbtp=-6.0,    # Below typical drum peak (~-3 dBTP) to actually engage
             lookahead_ms=3.0,
             release_ms=30.0,
         )
@@ -493,12 +493,16 @@ def run_pipeline(
     logger.info("Session %s: LUFS after auto-level: %.1f", session_id, _lufs_post_autolevel)
 
     # === STEP 14: Look-ahead peak limiter (replaces memoryless soft clip) ===
-    # Look-ahead limiter anticipates peaks and reduces gain smoothly,
-    # preserving waveform shape and reducing crest factor. This is the
-    # key fix for the 6 dB loudness shortfall — by properly taming peaks,
-    # the LUFS normalizer in step 15 has headroom to boost.
+    # Key insight: limit to a LOWER ceiling than the final -1.0 dBTP target.
+    # This creates headroom for the LUFS normalizer to boost in step 15.
+    # Without this gap, the limiter brings peaks to ceiling and the normalizer
+    # has zero headroom (the original 6 dB loudness shortfall).
+    #
+    # -7 dBTP ceiling provides ~6 dB of headroom for normalization.
+    # The normalizer in step 15 then boosts by up to 6 dB (constrained by
+    # the final -1.0 dBTP ceiling), and the safety clip catches any residual.
     pre_limit_peak = true_peak(mixed)
-    mixed = true_peak_limit(mixed, sr, ceiling_dbtp=-1.0, lookahead_ms=5.0, release_ms=50.0)
+    mixed = true_peak_limit(mixed, sr, ceiling_dbtp=-7.0, lookahead_ms=5.0, release_ms=50.0)
     post_limit_peak = true_peak(mixed)
     logger.info(
         "Session %s: Mix-bus limiter: peak %.3f -> %.3f",

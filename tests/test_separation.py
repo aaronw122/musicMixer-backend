@@ -74,7 +74,7 @@ class TestSeparateModalValidation:
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
-        with patch("musicmixer.services.separation_modal.separate_stems_remote", mock_remote):
+        with patch("modal.Function.from_name", return_value=mock_remote):
             with pytest.raises(RuntimeError, match="Expected 6 stems"):
                 _separate_modal(input_path, tmp_path / "out")
 
@@ -99,7 +99,7 @@ class TestSeparateModalValidation:
 
         output_dir = tmp_path / "out"
 
-        with patch("musicmixer.services.separation_modal.separate_stems_remote", mock_remote):
+        with patch("modal.Function.from_name", return_value=mock_remote):
             result = _separate_modal(input_path, output_dir)
 
         assert set(result.keys()) == {"vocals", "drums", "bass", "guitar", "piano", "other"}
@@ -138,7 +138,7 @@ class TestSeparateModalValidation:
 
         output_dir = tmp_path / "out"
 
-        with patch("musicmixer.services.separation_modal.separate_stems_remote", mock_remote):
+        with patch("modal.Function.from_name", return_value=mock_remote):
             with caplog.at_level(logging.WARNING, logger="musicmixer.services.separation"):
                 result = _separate_modal(input_path, output_dir)
 

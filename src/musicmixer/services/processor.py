@@ -682,8 +682,12 @@ def true_peak_limit(
         shifted_gains[i] = np.min(block_gains[i:end_idx])
 
     # --- Step 3: smooth the envelope with attack/release ---
-    alpha_a = exp(-1.0 / (attack_ms * sr / 1000)) if attack_ms > 0 else 0.0
-    alpha_r = exp(-1.0 / (release_ms * sr / 1000)) if release_ms > 0 else 0.0
+    # Coefficients must be computed for BLOCK-RATE processing (every block_size
+    # samples), not sample-rate. If we use sample-rate coefficients but apply
+    # them once per block, the attack is ~64x too slow and the limiter barely
+    # reduces gain.
+    alpha_a = exp(-block_size / (attack_ms * sr / 1000)) if attack_ms > 0 else 0.0
+    alpha_r = exp(-block_size / (release_ms * sr / 1000)) if release_ms > 0 else 0.0
 
     smoothed = np.ones(n_blocks, dtype=np.float64)
     smoothed[0] = shifted_gains[0]
