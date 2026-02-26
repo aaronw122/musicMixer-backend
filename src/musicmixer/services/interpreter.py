@@ -38,6 +38,9 @@ FOUR_STEMS = ["vocals", "drums", "bass", "other"]
 # Stems that only exist in 6-stem (Modal) mode
 EXTRA_STEMS = {"guitar", "piano"}
 
+# Target remix duration in seconds. Controls beat budget, LLM guidance, and fallback plans.
+TARGET_REMIX_DURATION_SECONDS = 210  # 3.5 minutes
+
 
 # ---------------------------------------------------------------------------
 # tool_use schema
@@ -83,7 +86,7 @@ REMIX_PLAN_TOOL: dict = {
             "sections": {
                 "type": "array",
                 "minItems": 2,
-                "maxItems": 12,
+                "maxItems": 20,
                 "description": "Ordered list of remix sections. Must be contiguous (end_beat of one = start_beat of next). First section starts at beat 0.",
                 "items": {
                     "type": "object",
@@ -102,7 +105,7 @@ REMIX_PLAN_TOOL: dict = {
                         "end_beat": {
                             "type": "integer",
                             "minimum": 4,
-                            "description": "Ending beat (exclusive). Section length = end_beat - start_beat. Should be 4, 8, or 16.",
+                            "description": "Ending beat (exclusive). Section length = end_beat - start_beat. Should be 4, 8, 16, or 32.",
                         },
                         "stem_gains": {
                             "type": "object",
@@ -271,13 +274,14 @@ Template A (Standard Mashup): intro(~15%) -> verse(~30%) -> breakdown(~15%) -> d
 Template B (DJ Set): build(~25%) -> vocals in(~25%) -> peak(~25%) -> vocals out(~12%) -> outro(~13%)
 Template C (Quick Hit): intro(~15%) -> vocal drop(~70%) -> outro(~15%)
 Template D (Chill): intro(~25%) -> vocals(~50%) -> outro(~25%)
+Template E (Extended Mix): intro(~8%) -> verse(~15%) -> chorus(~12%) -> breakdown(~8%) -> verse(~15%) -> chorus(~12%) -> bridge(~10%) -> drop(~12%) -> outro(~8%)
 
-If total beats < 48, use Template C (Quick Hit). If 48-96, use Standard Mashup. If > 96, you may use DJ Set or add a second verse.""")
+If total beats < 48, use Template C. If 48-96, use Standard Mashup. If 96-192, use DJ Set or add a second verse. If > 192, use Extended Mix.""")
 
     # Section 7: Section Rules
     stem_gains_required = stem_list
     sections.append(f"""SECTION RULES:
-- Sections should be 4, 8, or 16 beats long (max 16 beats per section)
+- Sections should be 4, 8, 16, or 32 beats long (max 32 beats per section)
 - Default: start with instrumental only (establishes the beat before vocals enter), unless the prompt suggests otherwise
 - Always end with instrumental only or a fade
 - section labels: "intro", "verse", "breakdown", "drop", "outro"
@@ -313,7 +317,7 @@ PITCH LIMIT:
 - Genre jargon ("trap", "lo-fi"): Translate to volume/structure decisions. "Trap" = heavy bass, sparse hi-hats. "Lo-fi" = reduce other, gentle, Template D.
 - Time references ("guitar solo at 2:30"): Cross-reference with the section map to find the right region. Add a warning if unsure.
 
-DURATION: Target remix duration 60-120 seconds. Minimum 30s, maximum 180s.""")
+DURATION: Target remix duration 180-240 seconds. Minimum 60s, maximum 300s.""")
 
     # Section 11: Stem Artifact Awareness
     sections.append("""STEM SEPARATION ARTIFACTS:
@@ -1048,7 +1052,7 @@ def _validate_remix_plan(
     sections = [s for s in sections if s.end_beat - s.start_beat >= 4]
     if not sections:
         # Completely unrecoverable -- use default arrangement
-        total_beats = int(inst_meta.bpm * 90 / 60)
+        total_beats = int(inst_meta.bpm * TARGET_REMIX_DURATION_SECONDS / 60)
         plan.sections = default_arrangement(total_beats)
         plan.used_fallback = True
         plan.warnings.append("Section arrangement was regenerated automatically.")
@@ -1110,21 +1114,24 @@ def _validate_remix_plan(
 
 
 def _validate_duration(plan: RemixPlan, target_bpm: float) -> RemixPlan:
-    """Clamp total duration to 30-180 seconds."""
+    """Clamp total duration to 60-300 seconds."""
     if not plan.sections:
         return plan
 
     total_beats = plan.sections[-1].end_beat
     total_seconds = total_beats * 60 / target_bpm
 
-    if total_seconds < 30:
+    min_duration = 60
+    max_duration = 300
+
+    if total_seconds < min_duration:
         # Extend last section
-        needed_beats = int(30 * target_bpm / 60) - total_beats
+        needed_beats = int(min_duration * target_bpm / 60) - total_beats
         plan.sections[-1].end_beat += max(needed_beats, 8)
         plan.warnings.append("Remix was extended to meet minimum duration.")
-    elif total_seconds > 180:
+    elif total_seconds > max_duration:
         # Truncate
-        max_beats = int(180 * target_bpm / 60)
+        max_beats = int(max_duration * target_bpm / 60)
         plan.sections[-1].end_beat = min(plan.sections[-1].end_beat, max_beats)
         plan.sections = [s for s in plan.sections if s.start_beat < max_beats]
         plan.warnings.append("Remix was shortened to fit maximum duration.")
@@ -1219,7 +1226,7 @@ def interpret_prompt(
 
     # Compute total available beats (from instrumental source, approximated)
     target_bpm = max(song_a_meta.bpm, song_b_meta.bpm)
-    total_available_beats = int(target_bpm * 90 / 60)  # ~90 seconds worth
+    total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
 
     # Compute stretch percentage for advisory context
     stretch_pct = _compute_stretch_pct(song_a_meta.bpm, song_b_meta.bpm)
@@ -1328,7 +1335,7 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
     """Generate a deterministic remix plan from audio analysis metadata.
 
     Defaults: vocals from song_a, instrumentals from song_b.
-    Uses the region starting at 25% into each song, capped at 90 seconds.
+    Uses the region starting at 25% into each song, capped at TARGET_REMIX_DURATION_SECONDS.
     Tempo target is the instrumental song's BPM.
     """
     # Vocal source defaults to song_a (Day 2 -- no vocal_prominence_db yet)
@@ -1336,14 +1343,14 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
     vocal_meta = meta_a
     inst_meta = meta_b
 
-    # Use region starting at 25% into each song, up to 90 seconds
+    # Use region starting at 25% into each song, up to TARGET_REMIX_DURATION_SECONDS
     v_start = vocal_meta.duration_seconds * 0.25
-    v_end = min(v_start + 90.0, vocal_meta.duration_seconds)
+    v_end = min(v_start + TARGET_REMIX_DURATION_SECONDS, vocal_meta.duration_seconds)
     i_start = inst_meta.duration_seconds * 0.25
-    i_end = min(i_start + 90.0, inst_meta.duration_seconds)
+    i_end = min(i_start + TARGET_REMIX_DURATION_SECONDS, inst_meta.duration_seconds)
 
     tempo_src = "average"  # Split stretch burden between both songs
-    total_beats = int(inst_meta.bpm * 90 / 60)  # Beats in 90 seconds
+    total_beats = int(inst_meta.bpm * TARGET_REMIX_DURATION_SECONDS / 60)
 
     logger.info(
         "Generated fallback plan: vocals=%s, tempo=%s, total_beats=%d",
@@ -1371,10 +1378,11 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
 
 
 def default_arrangement(total_beats: int) -> list[Section]:
-    """Build a 5- or 6-section fallback arrangement.
+    """Build a 5-, 6-, or 8-section fallback arrangement.
 
-    6-section (>= 96 beats): intro -> build -> main -> breakdown -> drop -> outro
-    5-section (< 96 beats):  intro -> build -> main -> breakdown -> outro
+    8-section (>= 192 beats): intro -> verse -> chorus -> breakdown -> verse -> chorus -> drop -> outro
+    6-section (96-191 beats): intro -> build -> main -> breakdown -> drop -> outro
+    5-section (< 96 beats):   intro -> build -> main -> breakdown -> outro
 
     Beat boundaries are snapped to 4-bar (16-beat) phrase boundaries for
     musically coherent transitions.
@@ -1422,6 +1430,58 @@ def default_arrangement(total_beats: int) -> list[Section]:
     inst_intro =     {"drums": 0.6, "bass": 0.5, "guitar": 0.3, "piano": 0.2, "other": 0.3}
     inst_breakdown = {"drums": 0.1, "bass": 0.4, "guitar": 0.6, "piano": 0.7, "other": 0.5}
     inst_outro =     {"drums": 0.5, "bass": 0.5, "guitar": 0.3, "piano": 0.3, "other": 0.4}
+
+    # 8-section extended: intro -> verse -> chorus -> breakdown -> verse -> chorus -> drop -> outro
+    if total_beats >= 192:
+        # Proportions: intro(~8%) verse(~15%) chorus(~12%) breakdown(~8%) verse(~15%) chorus(~12%) drop(~12%) outro(~8%)
+        # ~90% allocated, rounding handled by snap
+        b1 = snap_to_phrase(int(total_beats * 0.08))                    # end intro
+        b2 = snap_to_phrase(int(total_beats * 0.23))                    # end verse 1
+        b3 = snap_to_phrase(int(total_beats * 0.35))                    # end chorus 1
+        b4 = snap_to_phrase(int(total_beats * 0.43))                    # end breakdown
+        b5 = snap_to_phrase(int(total_beats * 0.58))                    # end verse 2
+        b6 = snap_to_phrase(int(total_beats * 0.70))                    # end chorus 2
+        b7 = snap_to_phrase(int(total_beats * 0.82))                    # end drop (outro starts)
+
+        # Guard: ensure monotonically increasing boundaries with minimum section size
+        boundaries = [b1, b2, b3, b4, b5, b6, b7]
+        for idx in range(len(boundaries)):
+            prev = boundaries[idx - 1] if idx > 0 else 0
+            if boundaries[idx] <= prev:
+                boundaries[idx] = prev + MIN_SECTION_BEATS
+        # Ensure last boundary leaves room for outro
+        if boundaries[-1] >= total_beats - MIN_SECTION_BEATS:
+            boundaries[-1] = total_beats - MIN_SECTION_BEATS
+        b1, b2, b3, b4, b5, b6, b7 = boundaries
+
+        inst_bridge = {"drums": 0.3, "bass": 0.5, "guitar": 0.7, "piano": 0.6, "other": 0.5}
+
+        return [
+            Section(label="intro", start_beat=0, end_beat=b1,
+                    stem_gains={"vocals": 0.0, **inst_intro},
+                    transition_in="fade", transition_beats=4),
+            Section(label="verse", start_beat=b1, end_beat=b2,
+                    stem_gains={"vocals": 0.9, **inst_body},
+                    transition_in="crossfade", transition_beats=min(8, (b2 - b1) // 3)),
+            Section(label="drop", start_beat=b2, end_beat=b3,
+                    stem_gains={"vocals": 1.0, **inst_body},
+                    transition_in="crossfade", transition_beats=4),
+            Section(label="breakdown", start_beat=b3, end_beat=b4,
+                    stem_gains={"vocals": 0.3, **inst_breakdown},
+                    transition_in="crossfade", transition_beats=min(8, (b4 - b3) // 3)),
+            Section(label="verse", start_beat=b4, end_beat=b5,
+                    stem_gains={"vocals": 0.9, **inst_body},
+                    transition_in="crossfade", transition_beats=4),
+            Section(label="drop", start_beat=b5, end_beat=b6,
+                    stem_gains={"vocals": 1.0, **inst_body},
+                    transition_in="crossfade", transition_beats=4),
+            Section(label="breakdown", start_beat=b6, end_beat=b7,
+                    stem_gains={"vocals": 0.5, **inst_bridge},
+                    transition_in="crossfade", transition_beats=min(8, (b7 - b6) // 3)),
+            Section(label="outro", start_beat=b7, end_beat=total_beats,
+                    stem_gains={"vocals": 0.0, **inst_outro},
+                    transition_in="crossfade", transition_beats=min(8, (total_beats - b7) // 2)),
+        ]
 
     # 6-section: if enough beats, add a "drop" section between breakdown and outro
     if total_beats >= 96:
