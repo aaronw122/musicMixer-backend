@@ -874,7 +874,10 @@ def interpret_prompt(
         logger.warning("No ANTHROPIC_API_KEY configured, using fallback plan")
         return generate_fallback_plan(song_a_meta, song_b_meta)
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.Anthropic(
+        api_key=settings.anthropic_api_key,
+        timeout=settings.llm_timeout_seconds,
+    )
 
     # Pre-compute key matching decision
     _key_available, key_matching_detail = _compute_key_guidance(
@@ -917,7 +920,6 @@ def interpret_prompt(
             messages=messages,
             tools=[tool_schema],
             tool_choice={"type": "tool", "name": "create_remix_plan"},
-            timeout=settings.llm_timeout_seconds,
         )
     except anthropic.APIStatusError as e:
         if e.status_code in (429, 500, 529) and settings.llm_max_retries > 0:
@@ -932,7 +934,6 @@ def interpret_prompt(
                     messages=messages,
                     tools=[tool_schema],
                     tool_choice={"type": "tool", "name": "create_remix_plan"},
-                    timeout=30,
                 )
             except Exception:
                 logger.exception("LLM retry failed, using fallback")

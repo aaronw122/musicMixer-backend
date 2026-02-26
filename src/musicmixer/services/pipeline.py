@@ -107,7 +107,10 @@ def run_pipeline(
     remix_dir.mkdir(parents=True, exist_ok=True)
     output_path = remix_dir / "remix.mp3"
 
+    logger.info("Session %s: pipeline started (prompt=%r)", session_id, prompt[:80])
+
     # === STEP 1: Separate stems (50% of total time) ===
+    logger.info("Session %s: [1/17] separating stems...", session_id)
     emit_progress(event_queue, {
         "step": "separating",
         "detail": "Extracting stems from both songs...",
@@ -130,7 +133,10 @@ def run_pipeline(
         "progress": 0.50,
     }, session=session)
 
+    logger.info("Session %s: [1/17] stems done (%d song_a, %d song_b)", session_id, len(song_a_stems), len(song_b_stems))
+
     # === STEP 2: Analyze both original songs ===
+    logger.info("Session %s: [2/17] analyzing audio...", session_id)
     emit_progress(event_queue, {
         "step": "analyzing",
         "detail": "Detecting tempo and key...",
@@ -144,7 +150,10 @@ def run_pipeline(
         session_id, meta_a.bpm, meta_b.bpm,
     )
 
+    logger.info("Session %s: [2/17] analysis done (A=%.1f BPM, B=%.1f BPM)", session_id, meta_a.bpm, meta_b.bpm)
+
     # === STEP 3: Reconcile BPM between songs ===
+    logger.info("Session %s: [3/17] reconciling BPM...", session_id)
     meta_a, meta_b = reconcile_bpm(meta_a, meta_b)
     logger.info(
         "Session %s: Reconciled BPM: A=%.1f, B=%.1f",
@@ -158,6 +167,7 @@ def run_pipeline(
     }, session=session)
 
     # === STEP 4: Interpret prompt via LLM (fallback to deterministic plan) ===
+    logger.info("Session %s: [4/17] interpreting prompt via LLM...", session_id)
     emit_progress(event_queue, {
         "step": "interpreting",
         "detail": "Planning your remix...",
@@ -176,6 +186,8 @@ def run_pipeline(
         "Session %s: Plan -- vocals from %s, tempo from %s, used_fallback=%s",
         session_id, plan.vocal_source, plan.tempo_source, plan.used_fallback,
     )
+
+    logger.info("Session %s: [4/17] plan ready (vocals=%s, %d sections, fallback=%s)", session_id, plan.vocal_source, len(plan.sections), plan.used_fallback)
 
     # === STEP 5: Determine vocal/instrumental sources ===
     if plan.vocal_source == "song_a":
@@ -276,6 +288,7 @@ def run_pipeline(
     )
 
     # === STEP 9: Tempo match via rubberband ===
+    logger.info("Session %s: [9/17] tempo matching via rubberband...", session_id)
     emit_progress(event_queue, {
         "step": "processing",
         "detail": "Matching tempo...",
@@ -439,6 +452,7 @@ def run_pipeline(
         )
 
     # === STEP 12: Render arrangement ===
+    logger.info("Session %s: [12/17] rendering arrangement...", session_id)
     emit_progress(event_queue, {
         "step": "rendering",
         "detail": "Building your remix...",
@@ -552,6 +566,7 @@ def run_pipeline(
     mixed = apply_fades(mixed, sr, skip_fade_in=skip_fade_in, skip_fade_out=skip_fade_out)
 
     # === STEP 17: Export to MP3 ===
+    logger.info("Session %s: [17/17] exporting MP3...", session_id)
     emit_progress(event_queue, {
         "step": "rendering",
         "detail": "Rendering final mix...",
