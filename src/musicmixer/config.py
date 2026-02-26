@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     output_format: str = "mp3"
     output_bitrate: str = "320k"
 
-    # LLM
-    anthropic_api_key: str = ""
+    # LLM (Day 3)
+    anthropic_api_key: str = ""  # ANTHROPIC_API_KEY env var
     llm_model: str = "claude-sonnet-4-20250514"
     llm_timeout_seconds: int = 20
     llm_max_retries: int = 1
