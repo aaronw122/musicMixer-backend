@@ -80,7 +80,7 @@ def run_pipeline(
 
     from musicmixer.config import settings
     from musicmixer.services.analysis import analyze_audio, reconcile_bpm
-    from musicmixer.services.interpreter import generate_fallback_plan
+    from musicmixer.services.interpreter import interpret_prompt
     from musicmixer.services.processor import (
         apply_fades,
         auto_level,
@@ -157,11 +157,24 @@ def run_pipeline(
         "progress": 0.55,
     }, session=session)
 
-    # === STEP 4: Generate deterministic fallback plan ===
-    plan = generate_fallback_plan(meta_a, meta_b)
+    # === STEP 4: Interpret prompt via LLM (fallback to deterministic plan) ===
+    emit_progress(event_queue, {
+        "step": "interpreting",
+        "detail": "Planning your remix...",
+        "progress": 0.58,
+    }, session=session)
+
+    plan = interpret_prompt(prompt, meta_a, meta_b)
+
+    if plan.used_fallback:
+        logger.warning(
+            "Session %s: LLM failed, using deterministic fallback",
+            session_id,
+        )
+
     logger.info(
-        "Session %s: Plan -- vocals from %s, tempo from %s",
-        session_id, plan.vocal_source, plan.tempo_source,
+        "Session %s: Plan -- vocals from %s, tempo from %s, used_fallback=%s",
+        session_id, plan.vocal_source, plan.tempo_source, plan.used_fallback,
     )
 
     # === STEP 5: Determine vocal/instrumental sources ===
