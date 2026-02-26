@@ -61,11 +61,13 @@ def run_pipeline(
       8. Compute tempo plan (target BPM, which stems to stretch)
       9. Tempo match via rubberband
      10. Post-stretch beat grid re-detection
-     11. Cross-song level matching
+     11. Vocal compression + HPF + cross-song level matching
+    11.8. Pre-limit drum/bass transients (reduce crest factor for LUFS headroom)
      12. Render arrangement into vocal + instrumental buses
-     13. Sum buses into final mix
-     14. Peak limit (bring peaks under control before normalization)
+     13. Sum buses into final mix + auto-leveler
+     14. Look-ahead peak limiter (replaces soft clip)
      15. Peak-constrained LUFS normalization
+   15.5. Safety soft clip (catch residual inter-sample peaks)
      16. Fade-in / fade-out
      17. Export to MP3
     """
@@ -74,6 +76,7 @@ def run_pipeline(
 
     import librosa
     import numpy as np
+    import pyloudnorm as pyln
 
     from musicmixer.config import settings
     from musicmixer.services.analysis import analyze_audio, reconcile_bpm
@@ -91,6 +94,7 @@ def run_pipeline(
         soft_clip,
         trim_audio,
         true_peak,
+        true_peak_limit,
         validate_stem,
     )
     from musicmixer.services.renderer import render_arrangement
@@ -208,6 +212,46 @@ def run_pipeline(
             audio, sr, plan.start_time_instrumental, plan.end_time_instrumental,
         )
 
+    # === STEP 7.5: Detect and exclude near-silent stems ===
+    # Empty-stem guard: stems with integrated LUFS below this threshold are
+    # considered inactive and excluded from normalization/summing.
+    inactive_lufs_floor = -50.0
+    loudness_meter = pyln.Meter(sr)
+
+    def _filter_inactive(stems: dict[str, np.ndarray], stem_group: str) -> dict[str, np.ndarray]:
+        active: dict[str, np.ndarray] = {}
+        inactive: list[tuple[str, float]] = []
+        for stem_name, stem_audio in stems.items():
+            try:
+                stem_lufs = loudness_meter.integrated_loudness(stem_audio)
+            except Exception:
+                # If loudness measurement fails, keep the stem to avoid data loss.
+                logger.warning(
+                    "Session %s: Could not measure loudness for %s stem '%s'; keeping it active",
+                    session_id, stem_group, stem_name,
+                )
+                active[stem_name] = stem_audio
+                continue
+
+            if stem_lufs < inactive_lufs_floor:
+                inactive.append((stem_name, stem_lufs))
+            else:
+                active[stem_name] = stem_audio
+
+        if inactive:
+            inactive_desc = ", ".join(f"{name} ({lufs:.1f} LUFS)" for name, lufs in inactive)
+            logger.info(
+                "Session %s: Excluding near-silent %s stems: %s",
+                session_id, stem_group, inactive_desc,
+            )
+            plan.warnings.append(
+                f"Ignored near-silent {stem_group} stem(s): {', '.join(name for name, _ in inactive)}"
+            )
+        return active
+
+    vocal_audio = _filter_inactive(vocal_audio, "vocal")
+    inst_audio = _filter_inactive(inst_audio, "instrumental")
+
     # === STEP 8: Compute tempo plan ===
     target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings = compute_tempo_plan(
         vocal_meta.bpm, inst_meta.bpm, plan.tempo_source,
@@ -308,6 +352,7 @@ def run_pipeline(
         "progress": 0.80,
     }, session=session)
 
+    vocal_makeup_db = 3.0 if settings.ab_vocal_makeup_v1 else 4.0
     if "vocals" in vocal_audio:
         vocal_audio["vocals"] = compress_dynamic_range(
             vocal_audio["vocals"],
@@ -316,10 +361,15 @@ def run_pipeline(
             ratio=3.0,           # Standard vocal ratio, preserves natural dynamics
             attack_ms=10.0,      # Preserve plosive transients
             release_ms=80.0,     # Fast release: recover quickly between phrases
-            makeup_db=4.0,       # Proportional to reduced compression
+            makeup_db=vocal_makeup_db,  # AB_VOCAL_MAKEUP_V1: 4.0 -> 3.0
             gate_floor_db=-50.0, # Low gate: only ignore true silence
         )
-        logger.info("Session %s: Vocal compression applied", session_id)
+        logger.info(
+            "Session %s: Vocal compression applied (makeup_db=%.1f, AB_VOCAL_MAKEUP_V1=%s)",
+            session_id,
+            vocal_makeup_db,
+            settings.ab_vocal_makeup_v1,
+        )
 
     # === STEP 11.2: High-pass filter vocals ===
     # Remove low-frequency bleed from stem separation (bass rumble, kick artifacts).
@@ -340,6 +390,39 @@ def run_pipeline(
 
         vocal_audio["vocals"] = cross_song_level_match(
             vocal_audio_main, inst_sum_for_lufs, sr,
+        )
+
+    # === STEP 11.8: Pre-limit drum and bass transients ===
+    # Drum transients have 12-15 dB crest factor, consuming all headroom
+    # at the mix bus. Pre-limiting reduces crest factor so the LUFS
+    # normalizer can actually boost to target. Ceiling/release are tunable
+    # parameters (agent can override per-mix in Day 3+).
+    if "drums" in inst_audio:
+        pre_drum_peak = true_peak(inst_audio["drums"])
+        inst_audio["drums"] = true_peak_limit(
+            inst_audio["drums"], sr,
+            ceiling_dbtp=-3.0,
+            lookahead_ms=3.0,
+            release_ms=30.0,
+        )
+        post_drum_peak = true_peak(inst_audio["drums"])
+        logger.info(
+            "Session %s: Drum pre-limit: peak %.3f -> %.3f",
+            session_id, pre_drum_peak, post_drum_peak,
+        )
+
+    if "bass" in inst_audio:
+        pre_bass_peak = true_peak(inst_audio["bass"])
+        inst_audio["bass"] = true_peak_limit(
+            inst_audio["bass"], sr,
+            ceiling_dbtp=-4.0,
+            lookahead_ms=5.0,
+            release_ms=50.0,
+        )
+        post_bass_peak = true_peak(inst_audio["bass"])
+        logger.info(
+            "Session %s: Bass pre-limit: peak %.3f -> %.3f",
+            session_id, pre_bass_peak, post_bass_peak,
         )
 
     # === STEP 12: Render arrangement ===
@@ -367,6 +450,11 @@ def run_pipeline(
 
     mixed = vocal_bus + instrumental_bus
 
+    # LUFS checkpoint: after bus sum
+    _meter = pyln.Meter(sr)
+    _lufs_post_sum = _meter.integrated_loudness(mixed)
+    logger.info("Session %s: LUFS after bus sum: %.1f", session_id, _lufs_post_sum)
+
     # Mix bus compression REMOVED -- vocal compression (step 11) + auto-leveler
     # (step 13.7) handle dynamics. A second 3:1 compressor at the same threshold
     # produced ~9:1 effective ratio on vocals, making them flat and lifeless.
@@ -379,26 +467,47 @@ def run_pipeline(
     # Detects from the INSTRUMENTAL bus so vocal gain transitions at
     # section boundaries don't trigger pre-emptive cuts via the
     # windowed look-ahead effect (which caused volume dips at ~11s/~22s).
+    autolv_window_sec = 4.0 if settings.ab_autolvl_tune_v1 else 3.0
+    autolv_max_boost_db = 1.0 if settings.ab_autolvl_tune_v1 else 2.0
+    autolv_max_cut_db = 2.0 if settings.ab_autolvl_tune_v1 else 3.0
     mixed = auto_level(
         mixed, sr,
-        window_sec=3.0,       # 3s compromise: slower than 2s but still responsive to inter-phrase gaps
-        max_boost_db=2.0,     # Conservative boost to avoid lifting tail artifacts
-        max_cut_db=3.0,       # Up to 3dB cut for loud sections
+        window_sec=autolv_window_sec,       # AB_AUTOLVL_TUNE_V1: 3.0 -> 4.0
+        max_boost_db=autolv_max_boost_db,   # AB_AUTOLVL_TUNE_V1: 2.0 -> 1.0
+        max_cut_db=autolv_max_cut_db,       # AB_AUTOLVL_TUNE_V1: 3.0 -> 2.0
         target_percentile=50, # Target the median level
         detector_audio=instrumental_bus,  # CRITICAL: drives detection from stable instrumental bus
         active_floor_db=-40.0,  # Treat lower-level tail/noise windows as inactive
     )
-    logger.info("Session %s: Auto-leveler applied", session_id)
+    logger.info(
+        "Session %s: Auto-leveler applied (window_sec=%.1f, max_boost_db=%.1f, max_cut_db=%.1f, AB_AUTOLVL_TUNE_V1=%s)",
+        session_id,
+        autolv_window_sec,
+        autolv_max_boost_db,
+        autolv_max_cut_db,
+        settings.ab_autolvl_tune_v1,
+    )
 
-    # === STEP 14: Peak limit first (bring peaks under control) ===
-    ceiling = 10 ** (-1.0 / 20.0)  # -1.0 dBTP ~ 0.891
-    peak = true_peak(mixed)
-    if peak > ceiling:
-        mixed = soft_clip(mixed, ceiling)
-        logger.info(
-            "Session %s: Pre-normalize peak limiter (peak was %.3f, ceiling %.3f)",
-            session_id, peak, ceiling,
-        )
+    # LUFS checkpoint: after auto-level
+    _lufs_post_autolevel = _meter.integrated_loudness(mixed)
+    logger.info("Session %s: LUFS after auto-level: %.1f", session_id, _lufs_post_autolevel)
+
+    # === STEP 14: Look-ahead peak limiter (replaces memoryless soft clip) ===
+    # Look-ahead limiter anticipates peaks and reduces gain smoothly,
+    # preserving waveform shape and reducing crest factor. This is the
+    # key fix for the 6 dB loudness shortfall — by properly taming peaks,
+    # the LUFS normalizer in step 15 has headroom to boost.
+    pre_limit_peak = true_peak(mixed)
+    mixed = true_peak_limit(mixed, sr, ceiling_dbtp=-1.0, lookahead_ms=5.0, release_ms=50.0)
+    post_limit_peak = true_peak(mixed)
+    logger.info(
+        "Session %s: Mix-bus limiter: peak %.3f -> %.3f",
+        session_id, pre_limit_peak, post_limit_peak,
+    )
+
+    # LUFS checkpoint: after limiter
+    _lufs_post_limiter = _meter.integrated_loudness(mixed)
+    logger.info("Session %s: LUFS after limiter: %.1f", session_id, _lufs_post_limiter)
 
     # === STEP 15: Peak-constrained LUFS normalization ===
     # Applies the minimum of (LUFS gain, peak-safe gain) so we never boost
@@ -406,6 +515,16 @@ def run_pipeline(
     # undoing LUFS gains entirely.
     mixed = lufs_normalize_constrained(mixed, sr, target_lufs=-12.0, ceiling_dbtp=-1.0)
     logger.info("Session %s: Peak-constrained LUFS normalization applied", session_id)
+
+    # LUFS checkpoint: after normalization
+    _lufs_post_normalize = _meter.integrated_loudness(mixed)
+    logger.info("Session %s: LUFS after normalize: %.1f (target: -12.0)", session_id, _lufs_post_normalize)
+
+    # === STEP 15.5: Safety soft clip (catch residual inter-sample peaks) ===
+    # Narrow 2.0 dB knee catches edge cases (fade boundaries, gain
+    # interpolation artifacts) without altering LUFS.
+    safety_ceiling = 10 ** (-1.0 / 20.0)
+    mixed = soft_clip(mixed, safety_ceiling, knee_db=2.0)
 
     # === STEP 16: Fades ===
     skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
@@ -421,7 +540,14 @@ def run_pipeline(
         "progress": 0.95,
     }, session=session)
 
-    export_mp3(mixed, sr, output_path)
+    use_s16_dither = not settings.ab_mp3_export_path_v1
+    logger.info(
+        "Session %s: Export MP3 path (use_s16_dither=%s, AB_MP3_EXPORT_PATH_V1=%s)",
+        session_id,
+        use_s16_dither,
+        settings.ab_mp3_export_path_v1,
+    )
+    export_mp3(mixed, sr, output_path, use_s16_dither=use_s16_dither)
 
     # === DONE ===
     session.remix_path = str(output_path)
