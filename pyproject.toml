@@ -21,6 +21,11 @@ dependencies = [
     "uvicorn[standard]>=0.41.0",
 ]
 
+[project.optional-dependencies]
+analysis = [
+    "essentia; python_version < '3.12'",
+]
+
 [tool.uv]
 package = true
 
