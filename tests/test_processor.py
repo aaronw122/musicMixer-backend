@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from musicmixer.services.processor import (
     soft_clip,
     trim_audio,
     true_peak,
+    true_peak_limit,
     validate_stem,
 )
 
@@ -297,6 +299,114 @@ class TestSoftClip:
         assert np.max(np.abs(result)) <= ceiling + 1e-7
 
 
+def _make_impulse_signal(
+    duration: float = 2.0,
+    sr: int = SR,
+    quiet_amp: float = 0.1,
+    impulse_amp: float = 1.5,
+    impulse_pos: float = 0.5,  # position as fraction of duration
+) -> np.ndarray:
+    """Create a stereo signal with a quiet baseline and a loud impulse."""
+    n_samples = int(sr * duration)
+    signal = np.ones((n_samples, 2), dtype=np.float32) * quiet_amp
+    imp_sample = int(impulse_pos * n_samples)
+    # Short impulse burst (10ms)
+    burst_len = int(0.01 * sr)
+    signal[imp_sample:imp_sample + burst_len] = impulse_amp
+    return signal
+
+
+class TestTruePeakLimit:
+    def test_below_ceiling_passthrough(self):
+        """Signal well below ceiling passes through unchanged (or nearly so)."""
+        audio = _make_stereo_sine(amplitude=0.3)
+        result = true_peak_limit(audio, SR, ceiling_dbtp=-1.0)
+        # ceiling = ~0.891, signal peak = 0.3 -- well below
+        np.testing.assert_allclose(result, audio, atol=1e-6)
+
+    def test_peaks_reduced_to_ceiling(self):
+        """Signal with peaks above ceiling is limited so true_peak(output) <= ceiling."""
+        audio = _make_stereo_sine(amplitude=1.5)
+        ceiling_dbtp = -1.0
+        ceiling_linear = 10 ** (ceiling_dbtp / 20.0)
+        result = true_peak_limit(audio, SR, ceiling_dbtp=ceiling_dbtp)
+        measured_peak = true_peak(result)
+        # Allow small overshoot from block-based processing + oversampled measurement
+        assert measured_peak <= ceiling_linear * 1.05, (
+            f"true peak {measured_peak:.4f} exceeds ceiling {ceiling_linear:.4f} by more than 5%"
+        )
+
+    def test_preserves_quiet_content(self):
+        """Quiet sections away from the impulse should be largely unchanged."""
+        signal = _make_impulse_signal(
+            duration=2.0, quiet_amp=0.1, impulse_amp=1.5, impulse_pos=0.5
+        )
+        result = true_peak_limit(signal, SR, ceiling_dbtp=-1.0, release_ms=50.0)
+        # Check a quiet region well before the impulse (first 20% of signal)
+        n = signal.shape[0]
+        quiet_end = int(0.2 * n)
+        quiet_original = np.max(np.abs(signal[:quiet_end]))
+        quiet_result = np.max(np.abs(result[:quiet_end]))
+        # Should be within 1 dB
+        if quiet_original > 1e-10:
+            ratio_db = 20 * np.log10(quiet_result / quiet_original)
+            assert abs(ratio_db) < 1.0, (
+                f"Quiet content changed by {ratio_db:.2f} dB (should be < 1 dB)"
+            )
+
+    def test_stereo_handling(self):
+        """Stereo input produces stereo output with same shape."""
+        audio = _make_stereo_sine(amplitude=1.5)
+        result = true_peak_limit(audio, SR, ceiling_dbtp=-1.0)
+        assert result.shape == audio.shape
+        assert result.ndim == 2
+        assert result.shape[1] == 2
+
+    def test_mono_handling(self):
+        """Mono input produces mono output."""
+        audio = _make_mono_sine(amplitude=1.5)
+        result = true_peak_limit(audio, SR, ceiling_dbtp=-1.0)
+        assert result.ndim == 1
+        assert result.shape == audio.shape
+
+    def test_different_ceilings(self):
+        """Lower ceiling produces lower output than higher ceiling."""
+        audio = _make_stereo_sine(amplitude=1.5)
+        result_high = true_peak_limit(audio, SR, ceiling_dbtp=-1.0)
+        result_low = true_peak_limit(audio, SR, ceiling_dbtp=-3.0)
+        peak_high = np.max(np.abs(result_high))
+        peak_low = np.max(np.abs(result_low))
+        assert peak_low < peak_high, (
+            f"Lower ceiling should produce lower output: "
+            f"-3 dBTP peak={peak_low:.4f}, -1 dBTP peak={peak_high:.4f}"
+        )
+
+    def test_release_recovery(self):
+        """After a loud impulse, gain should recover (release)."""
+        release_ms = 50.0
+        signal = _make_impulse_signal(
+            duration=2.0, quiet_amp=0.1, impulse_amp=1.5, impulse_pos=0.2
+        )
+        result = true_peak_limit(
+            signal, SR, ceiling_dbtp=-1.0, release_ms=release_ms
+        )
+        # Check a region well after the impulse: at 3x release time past impulse
+        impulse_sample = int(0.2 * signal.shape[0])
+        recovery_samples = int(release_ms * 3 * SR / 1000)
+        check_start = impulse_sample + recovery_samples
+        check_end = min(check_start + int(0.1 * SR), signal.shape[0])
+
+        if check_end > check_start:
+            original_quiet = np.max(np.abs(signal[check_start:check_end]))
+            recovered_quiet = np.max(np.abs(result[check_start:check_end]))
+            # After recovery, the quiet content should be at least 80% of original
+            if original_quiet > 1e-10:
+                ratio = recovered_quiet / original_quiet
+                assert ratio > 0.8, (
+                    f"Gain did not recover after release: ratio={ratio:.3f} (expected > 0.8)"
+                )
+
+
 class TestTruePeak:
     def test_stereo(self):
         """Measures peak across both channels correctly."""
@@ -366,6 +476,41 @@ class TestApplyFades:
 
 
 class TestExportMp3:
+    def test_export_uses_s16_dither_filter_when_enabled(self, tmp_dir: Path, monkeypatch):
+        """Export command includes the dither filter when enabled."""
+        seen: dict[str, list[str]] = {}
+
+        def _fake_run(cmd, capture_output, timeout):
+            seen["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(b"ID3")
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        monkeypatch.setattr("musicmixer.services.processor.subprocess.run", _fake_run)
+
+        audio = _make_stereo_sine(duration=1.0)
+        output_path = tmp_dir / "with_dither.mp3"
+        export_mp3(audio, SR, output_path, use_s16_dither=True)
+
+        assert "-af" in seen["cmd"]
+        assert "aresample=osf=s16:dither_method=triangular" in seen["cmd"]
+
+    def test_export_skips_s16_dither_filter_when_disabled(self, tmp_dir: Path, monkeypatch):
+        """Export command omits the dither filter when disabled."""
+        seen: dict[str, list[str]] = {}
+
+        def _fake_run(cmd, capture_output, timeout):
+            seen["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(b"ID3")
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        monkeypatch.setattr("musicmixer.services.processor.subprocess.run", _fake_run)
+
+        audio = _make_stereo_sine(duration=1.0)
+        output_path = tmp_dir / "without_dither.mp3"
+        export_mp3(audio, SR, output_path, use_s16_dither=False)
+
+        assert "-af" not in seen["cmd"]
+
     @pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg not installed")
     def test_export(self, tmp_dir: Path):
         """Verify MP3 file is created and non-empty."""

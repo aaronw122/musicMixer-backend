@@ -629,6 +629,98 @@ def soft_clip(
     return result
 
 
+def true_peak_limit(
+    signal: np.ndarray,
+    sr: int,
+    ceiling_dbtp: float = -1.0,
+    lookahead_ms: float = 5.0,
+    release_ms: float = 50.0,
+    attack_ms: float = 1.0,
+) -> np.ndarray:
+    """Look-ahead brickwall limiter targeting a true-peak ceiling.
+
+    Block-based processing (64-sample blocks) with envelope smoothing.
+    The lookahead shifts gain reduction backward in time so the limiter
+    anticipates peaks before they arrive.
+
+    Handles both mono (N,) and stereo (N, 2) signals. Returns float32.
+    """
+    from math import exp
+
+    ceiling = 10 ** (ceiling_dbtp / 20.0)
+    block_size = 64
+
+    # Work with 2D internally: (N, channels)
+    mono = signal.ndim == 1
+    if mono:
+        work = signal[:, np.newaxis].copy()
+    else:
+        work = signal.copy()
+
+    n_samples = work.shape[0]
+    n_blocks = (n_samples + block_size - 1) // block_size
+
+    # --- Step 1: compute per-block gain reduction ---
+    block_gains = np.ones(n_blocks, dtype=np.float64)
+    for i in range(n_blocks):
+        start = i * block_size
+        end = min(start + block_size, n_samples)
+        block = work[start:end]
+        peak = np.max(np.abs(block))
+        if peak > 1e-12:
+            block_gains[i] = min(1.0, ceiling / peak)
+
+    # --- Step 2: apply lookahead (shift gain reduction backward) ---
+    lookahead_samples = int(lookahead_ms * sr / 1000)
+    lookahead_blocks = max(1, lookahead_samples // block_size)
+    # Shift the gain envelope left (earlier in time) by lookahead_blocks
+    shifted_gains = np.ones(n_blocks, dtype=np.float64)
+    for i in range(n_blocks):
+        # Look ahead: take the minimum gain from current block to
+        # lookahead_blocks into the future
+        end_idx = min(i + lookahead_blocks + 1, n_blocks)
+        shifted_gains[i] = np.min(block_gains[i:end_idx])
+
+    # --- Step 3: smooth the envelope with attack/release ---
+    alpha_a = exp(-1.0 / (attack_ms * sr / 1000)) if attack_ms > 0 else 0.0
+    alpha_r = exp(-1.0 / (release_ms * sr / 1000)) if release_ms > 0 else 0.0
+
+    smoothed = np.ones(n_blocks, dtype=np.float64)
+    smoothed[0] = shifted_gains[0]
+    for i in range(1, n_blocks):
+        if shifted_gains[i] < smoothed[i - 1]:
+            # Gain decreasing (attack): fast response
+            alpha = alpha_a
+        else:
+            # Gain increasing (release): slow recovery
+            alpha = alpha_r
+        smoothed[i] = alpha * smoothed[i - 1] + (1.0 - alpha) * shifted_gains[i]
+
+    # --- Step 4: expand block-level gains to sample-level and apply ---
+    gain_envelope = np.ones(n_samples, dtype=np.float32)
+    for i in range(n_blocks):
+        start = i * block_size
+        end = min(start + block_size, n_samples)
+        gain_envelope[start:end] = smoothed[i]
+
+    # Apply gain to all channels
+    result = work * gain_envelope[:, np.newaxis]
+    result = result.astype(np.float32)
+
+    # Log max gain reduction applied
+    min_gain = float(np.min(smoothed))
+    if min_gain < 1.0:
+        max_reduction_db = 20.0 * np.log10(min_gain) if min_gain > 0 else -np.inf
+        logger.info(
+            "true_peak_limit: max gain reduction %.1f dB (ceiling=%.1f dBTP)",
+            max_reduction_db, ceiling_dbtp,
+        )
+
+    if mono:
+        return result[:, 0]
+    return result
+
+
 def highpass_filter(audio: np.ndarray, sr: int, cutoff_hz: float = 100.0, order: int = 2) -> np.ndarray:
     """Apply a Butterworth high-pass filter.
 
@@ -681,6 +773,7 @@ def export_mp3(
     mixed: np.ndarray,
     sr: int,
     output_path: Path,
+    use_s16_dither: bool = True,
 ) -> Path:
     """Export float32 audio to MP3 via ffmpeg subprocess (NOT pydub).
 
@@ -707,6 +800,8 @@ def export_mp3(
             "320k",
             str(output_path),
         ]
+        if use_s16_dither:
+            cmd[4:4] = ["-af", "aresample=osf=s16:dither_method=triangular"]
         result = subprocess.run(cmd, capture_output=True, timeout=120)
         if result.returncode != 0:
             stderr = result.stderr.decode(errors="replace")
