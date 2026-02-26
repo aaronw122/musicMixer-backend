@@ -179,10 +179,14 @@ def compute_tempo_plan(
     vocal_bpm: float,
     instrumental_bpm: float,
     tempo_source: str = "weighted_midpoint",
-) -> tuple[float, bool, bool, list[str]]:
+) -> tuple[float, bool, bool, list[str], float]:
     """Decide target BPM and which stems to stretch.
 
-    Returns: (target_bpm, stretch_vocals, stretch_instrumentals, warnings)
+    Returns: (target_bpm, stretch_vocals, stretch_instrumentals, warnings, stretch_pct)
+
+    The stretch_pct is the maximum stretch percentage either song undergoes,
+    calculated as abs(target_bpm - original_bpm) / original_bpm * 100.
+    This feeds into CrossSongRelationships.stretch_pct and the LLM prompt.
 
     Adaptive weighted midpoint splits the tempo stretch burden between
     vocals and instrumentals instead of forcing 100% onto vocals.
@@ -274,7 +278,12 @@ def compute_tempo_plan(
             stretch_instrumentals = False
             # Silent for vocals-only at 10-25%
 
-    return target_bpm, stretch_vocals, stretch_instrumentals, warnings
+    # Compute stretch percentage for both songs
+    vocal_stretch_pct_val = abs(target_bpm - vocal_bpm) / vocal_bpm * 100 if vocal_bpm > 0 else 0.0
+    inst_stretch_pct_val = abs(target_bpm - instrumental_bpm) / instrumental_bpm * 100 if instrumental_bpm > 0 else 0.0
+    stretch_pct = max(vocal_stretch_pct_val, inst_stretch_pct_val)
+
+    return target_bpm, stretch_vocals, stretch_instrumentals, warnings, stretch_pct
 
 
 # ---------------------------------------------------------------------------

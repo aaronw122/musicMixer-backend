@@ -278,7 +278,7 @@ def run_pipeline(
     inst_audio = _filter_inactive(inst_audio, "instrumental")
 
     # === STEP 8: Compute tempo plan ===
-    target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings = compute_tempo_plan(
+    target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings, stretch_pct = compute_tempo_plan(
         vocal_meta.bpm, inst_meta.bpm, plan.tempo_source,
     )
     plan.warnings.extend(tempo_warnings)
