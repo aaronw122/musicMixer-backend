@@ -30,6 +30,7 @@ from musicmixer.models import (
     StemAnalysis,
     VocalGap,
 )
+from musicmixer.services.tempo import compute_stretch_pct
 
 logger = logging.getLogger(__name__)
 
@@ -1530,11 +1531,15 @@ def compute_relationships(
                 "may cause masking in mid-frequencies"
             )
 
-    # Stretch percentage
-    if meta_a.bpm > 0 and meta_b.bpm > 0:
-        stretch_pct = abs(meta_a.bpm - meta_b.bpm) / min(meta_a.bpm, meta_b.bpm) * 100
+    # Stretch percentage -- use shared tempo module (single source of truth).
+    # vocal_source is already determined above.
+    if vocal_source == "song_b":
+        _vocal_bpm = meta_b.bpm
+        _inst_bpm = meta_a.bpm
     else:
-        stretch_pct = 0.0
+        _vocal_bpm = meta_a.bpm
+        _inst_bpm = meta_b.bpm
+    stretch_pct = compute_stretch_pct(vocal_bpm=_vocal_bpm, instrumental_bpm=_inst_bpm)
 
     return CrossSongRelationships(
         loudness_diff_db=round(loudness_diff, 1),

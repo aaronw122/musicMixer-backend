@@ -24,6 +24,7 @@ import anthropic
 
 from musicmixer.config import settings
 from musicmixer.models import AudioMetadata, RemixPlan, Section
+from musicmixer.services.tempo import compute_stretch_pct, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
 
@@ -202,8 +203,12 @@ def _build_system_prompt(
     total_beats_a = song_a_meta.total_beats
     total_beats_b = song_b_meta.total_beats
 
-    # Approximate target BPM for beat-to-seconds conversion
-    target_bpm = max(song_a_meta.bpm, song_b_meta.bpm)
+    # Approximate target BPM for beat-to-seconds conversion.
+    # Pre-LLM: we don't know vocal_source yet; assume song_a=vocal as default.
+    target_bpm = estimate_target_bpm(
+        vocal_bpm=song_a_meta.bpm,
+        instrumental_bpm=song_b_meta.bpm,
+    )
 
     # Stem gains note for 4-stem mode
     stem_gains_note = ""
@@ -1106,8 +1111,14 @@ def _validate_remix_plan(
     if clamped_fields:
         logger.info("Section validation clamped fields: %s", clamped_fields)
 
-    # Duration validation
-    target_bpm = max(song_a_meta.bpm, song_b_meta.bpm)
+    # Duration validation -- post-LLM, we know vocal_source and tempo_source
+    if plan.vocal_source == "song_b":
+        _vocal_bpm = song_b_meta.bpm
+        _inst_bpm = song_a_meta.bpm
+    else:
+        _vocal_bpm = song_a_meta.bpm
+        _inst_bpm = song_b_meta.bpm
+    target_bpm = estimate_target_bpm(_vocal_bpm, _inst_bpm, plan.tempo_source)
     plan = _validate_duration(plan, target_bpm)
 
     return plan
@@ -1146,16 +1157,10 @@ def _validate_duration(plan: RemixPlan, target_bpm: float) -> RemixPlan:
 def _compute_stretch_pct(bpm_a: float, bpm_b: float) -> float:
     """Compute the approximate stretch percentage between two songs.
 
-    Uses a simple average target BPM estimate and returns the max stretch
-    either song would undergo. This matches the logic in compute_tempo_plan().
+    Delegates to the shared tempo module (single source of truth).
+    Assumes song_a=vocal, song_b=instrumental as default convention.
     """
-    if bpm_a <= 0 or bpm_b <= 0:
-        return 0.0
-    # Approximate: use the weighted midpoint approach from compute_tempo_plan
-    target_bpm = bpm_b * 0.65 + bpm_a * 0.35
-    stretch_a = abs(target_bpm - bpm_a) / bpm_a * 100
-    stretch_b = abs(target_bpm - bpm_b) / bpm_b * 100
-    return max(stretch_a, stretch_b)
+    return compute_stretch_pct(vocal_bpm=bpm_a, instrumental_bpm=bpm_b)
 
 
 def _warn_vocal_stretch_limits(plan: RemixPlan, stretch_pct: float) -> None:
@@ -1224,12 +1229,16 @@ def interpret_prompt(
         song_a_meta, song_b_meta,
     )
 
-    # Compute total available beats (from instrumental source, approximated)
-    target_bpm = max(song_a_meta.bpm, song_b_meta.bpm)
+    # Compute total available beats (from instrumental source, approximated).
+    # Pre-LLM: assume song_a=vocal as default.
+    target_bpm = estimate_target_bpm(
+        vocal_bpm=song_a_meta.bpm,
+        instrumental_bpm=song_b_meta.bpm,
+    )
     total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
 
     # Compute stretch percentage for advisory context
-    stretch_pct = _compute_stretch_pct(song_a_meta.bpm, song_b_meta.bpm)
+    stretch_pct = compute_stretch_pct(song_a_meta.bpm, song_b_meta.bpm)
 
     system_prompt = _build_system_prompt(
         song_a_meta, song_b_meta,
@@ -1350,7 +1359,12 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
     i_end = min(i_start + TARGET_REMIX_DURATION_SECONDS, inst_meta.duration_seconds)
 
     tempo_src = "average"  # Split stretch burden between both songs
-    total_beats = int(inst_meta.bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+    fallback_target_bpm = estimate_target_bpm(
+        vocal_bpm=vocal_meta.bpm,
+        instrumental_bpm=inst_meta.bpm,
+        tempo_source=tempo_src,
+    )
+    total_beats = int(fallback_target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
 
     logger.info(
         "Generated fallback plan: vocals=%s, tempo=%s, total_beats=%d",
