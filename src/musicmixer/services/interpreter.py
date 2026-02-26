@@ -43,6 +43,21 @@ EXTRA_STEMS = {"guitar", "piano"}
 TARGET_REMIX_DURATION_SECONDS = 210  # 3.5 minutes
 
 
+class _DurationTooShortError(Exception):
+    """Raised when the LLM's arrangement is too short for the target duration."""
+
+    def __init__(self, plan: RemixPlan, target_bpm: float):
+        self.plan = plan
+        self.target_bpm = target_bpm
+        total_beats = plan.sections[-1].end_beat if plan.sections else 0
+        total_seconds = total_beats * 60 / target_bpm if target_bpm > 0 else 0
+        super().__init__(
+            f"Arrangement too short: {total_seconds:.0f}s "
+            f"({total_beats} beats at {target_bpm:.0f} BPM), "
+            f"target={TARGET_REMIX_DURATION_SECONDS}s"
+        )
+
+
 # ---------------------------------------------------------------------------
 # tool_use schema
 # ---------------------------------------------------------------------------
@@ -106,7 +121,7 @@ REMIX_PLAN_TOOL: dict = {
                         "end_beat": {
                             "type": "integer",
                             "minimum": 4,
-                            "description": "Ending beat (exclusive). Section length = end_beat - start_beat. Should be 4, 8, 16, or 32.",
+                            "description": "Ending beat (exclusive). Section length = end_beat - start_beat. Should be 4, 8, 16, 32, or 64.",
                         },
                         "stem_gains": {
                             "type": "object",
@@ -273,7 +288,7 @@ STRETCH WARNING ({stretch_pct:.1f}%):
 - "fade": Use for the first section (intro) and last section (outro). Also good for bringing vocals in from silence.{stretch_advisory}""")
 
     # Section 6: Arrangement Templates
-    sections.append(f"""Your sections must sum to approximately {total_available_beats} beats.
+    sections.append(f"""Your sections must sum to approximately {total_available_beats} beats (at the target BPM = ~{TARGET_REMIX_DURATION_SECONDS}s).
 
 Template A (Standard Mashup): intro(~15%) -> verse(~30%) -> breakdown(~15%) -> drop(~30%) -> outro(~10%)
 Template B (DJ Set): build(~25%) -> vocals in(~25%) -> peak(~25%) -> vocals out(~12%) -> outro(~13%)
@@ -286,7 +301,7 @@ If total beats < 48, use Template C. If 48-96, use Standard Mashup. If 96-192, u
     # Section 7: Section Rules
     stem_gains_required = stem_list
     sections.append(f"""SECTION RULES:
-- Sections should be 4, 8, 16, or 32 beats long (max 32 beats per section)
+- Sections should be 4, 8, 16, 32, or 64 beats long (max 64 beats per section)
 - Default: start with instrumental only (establishes the beat before vocals enter), unless the prompt suggests otherwise
 - Always end with instrumental only or a fade
 - section labels: "intro", "verse", "breakdown", "drop", "outro"
@@ -316,13 +331,15 @@ PITCH LIMIT:
 - Do not plan shifts above +/-4 semitones. If compatibility would require more, keep original key and add a warning.""")
 
     # Section 10: Ambiguity Handling
-    sections.append("""HANDLING AMBIGUOUS PROMPTS:
+    sections.append(f"""HANDLING AMBIGUOUS PROMPTS:
 - Vague ("make it cool"): Use energy profiles and section maps. Pick vocals from the song with higher vocal prominence. Use Standard Mashup template. Align sections to GOOD INSTRUMENTAL SOURCE annotations.
 - Contradictory ("vocals from both"): Acknowledge in warnings. Pick the better vocal source and explain why.
 - Genre jargon ("trap", "lo-fi"): Translate to volume/structure decisions. "Trap" = heavy bass, sparse hi-hats. "Lo-fi" = reduce other, gentle, Template D.
 - Time references ("guitar solo at 2:30"): Cross-reference with the section map to find the right region. Add a warning if unsure.
 
-DURATION: Target remix duration 180-240 seconds. Minimum 60s, maximum 300s.""")
+DURATION: Target remix duration {TARGET_REMIX_DURATION_SECONDS} seconds ({TARGET_REMIX_DURATION_SECONDS // 60}:{TARGET_REMIX_DURATION_SECONDS % 60:02d}).
+Your sections must sum to approximately {total_available_beats} beats at the target BPM to reach this target.
+IMPORTANT: Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)} seconds will be rejected and you will be asked to redo the plan.""")
 
     # Section 11: Stem Artifact Awareness
     sections.append("""STEM SEPARATION ARTIFACTS:
@@ -665,6 +682,7 @@ def _build_few_shot_messages() -> list[dict]:
             "role": "user",
             "content": (
                 'Create a remix plan for this prompt: "Put Song A\'s vocals over Song B\'s beat, boost the bass"\n\n'
+                "Beat budget: ~413 beats at 118 BPM for ~210s target\n\n"
                 "=== LAYER 1: SONG OVERVIEW ===\n"
                 'Song A: "Track One" -- 120 BPM, Cmin, 4:00, 120 bars.\n'
                 "Vocals: dominant, +8 dB above instrumental, clean separation. Energy: compressed.\n"
@@ -705,16 +723,19 @@ def _build_few_shot_messages() -> list[dict]:
                     "name": "create_remix_plan",
                     "input": {
                         "vocal_source": "song_a",
-                        "start_time_vocal": 16.0,
-                        "end_time_vocal": 136.0,
-                        "start_time_instrumental": 8.0,
-                        "end_time_instrumental": 128.0,
+                        "start_time_vocal": 0.0,
+                        "end_time_vocal": 220.0,
+                        "start_time_instrumental": 0.0,
+                        "end_time_instrumental": 210.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 16, "stem_gains": {"vocals": 0.0, "drums": 0.8, "bass": 1.0, "guitar": 0.5, "piano": 0.4, "other": 0.3}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 16, "end_beat": 48, "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 1.0, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 48, "end_beat": 64, "stem_gains": {"vocals": 0.0, "drums": 0.0, "bass": 0.5, "guitar": 0.6, "piano": 0.7, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 64, "end_beat": 96, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "guitar": 0.4, "piano": 0.3, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 96, "end_beat": 112, "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.7, "guitar": 0.5, "piano": 0.5, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.8, "bass": 1.0, "guitar": 0.5, "piano": 0.4, "other": 0.3}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 1.0, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.0, "bass": 0.5, "guitar": 0.6, "piano": 0.7, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.9, "drums": 0.7, "bass": 1.0, "guitar": 0.4, "piano": 0.2, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "guitar": 0.4, "piano": 0.3, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "breakdown", "start_beat": 256, "end_beat": 288, "stem_gains": {"vocals": 0.3, "drums": 0.3, "bass": 0.5, "guitar": 0.7, "piano": 0.6, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 288, "end_beat": 368, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 368, "end_beat": 416, "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.7, "guitar": 0.5, "piano": 0.5, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "tempo_source": "song_b",
                         "key_source": "none",
@@ -731,8 +752,9 @@ def _build_few_shot_messages() -> list[dict]:
             "role": "user",
             "content": (
                 'Create a remix plan for this prompt: "mix them together, make it sound good"\n\n'
+                "Beat budget: ~308 beats at 88 BPM for ~210s target\n\n"
                 "=== LAYER 1: SONG OVERVIEW ===\n"
-                'Song A: "Slow Jam" -- 88 BPM, Gmin, 3:15, 71 bars.\n'
+                'Song A: "Slow Jam" -- 88 BPM, Gmin, 3:45, 82 bars.\n'
                 "Vocals: moderate, +4 dB above instrumental. Energy: moderate dynamics.\n"
                 'Song B: "Upbeat Track" -- 125 BPM, Amin, 3:30, 109 bars.\n'
                 "Vocals: dominant, +7 dB above instrumental, clean separation. Energy: wide dynamic range.\n\n"
@@ -760,16 +782,17 @@ def _build_few_shot_messages() -> list[dict]:
                     "name": "create_remix_plan",
                     "input": {
                         "vocal_source": "song_b",
-                        "start_time_vocal": 15.0,
-                        "end_time_vocal": 133.0,
-                        "start_time_instrumental": 10.0,
-                        "end_time_instrumental": 100.0,
+                        "start_time_vocal": 0.0,
+                        "end_time_vocal": 220.0,
+                        "start_time_instrumental": 0.0,
+                        "end_time_instrumental": 225.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 16, "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.8, "guitar": 0.5, "piano": 0.4, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 16, "end_beat": 48, "stem_gains": {"vocals": 0.8, "drums": 0.7, "bass": 0.8, "guitar": 0.3, "piano": 0.3, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 48, "end_beat": 64, "stem_gains": {"vocals": 0.0, "drums": 0.3, "bass": 0.5, "guitar": 0.6, "piano": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 64, "end_beat": 88, "stem_gains": {"vocals": 1.0, "drums": 0.8, "bass": 0.9, "guitar": 0.4, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 88, "end_beat": 104, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.5, "guitar": 0.5, "piano": 0.6, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.8, "guitar": 0.5, "piano": 0.4, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.8, "drums": 0.7, "bass": 0.8, "guitar": 0.3, "piano": 0.3, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.3, "bass": 0.5, "guitar": 0.6, "piano": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.9, "drums": 0.7, "bass": 0.8, "guitar": 0.3, "piano": 0.3, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.8, "bass": 0.9, "guitar": 0.4, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 256, "end_beat": 312, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.5, "guitar": 0.5, "piano": 0.6, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "tempo_source": "song_a",
                         "key_source": "none",
@@ -843,6 +866,7 @@ def _build_few_shot_messages_4stem() -> list[dict]:
             "role": "user",
             "content": (
                 'Create a remix plan for this prompt: "Put Song A\'s vocals over Song B\'s beat, boost the bass"\n\n'
+                "Beat budget: ~413 beats at 118 BPM for ~210s target\n\n"
                 "=== LAYER 1: SONG OVERVIEW ===\n"
                 'Song A: "Track One" -- 120 BPM, Cmin, 4:00, 120 bars.\n'
                 "Vocals: dominant, +8 dB. Energy: compressed.\n"
@@ -862,16 +886,19 @@ def _build_few_shot_messages_4stem() -> list[dict]:
                     "name": "create_remix_plan",
                     "input": {
                         "vocal_source": "song_a",
-                        "start_time_vocal": 16.0,
-                        "end_time_vocal": 136.0,
-                        "start_time_instrumental": 8.0,
-                        "end_time_instrumental": 128.0,
+                        "start_time_vocal": 0.0,
+                        "end_time_vocal": 220.0,
+                        "start_time_instrumental": 0.0,
+                        "end_time_instrumental": 210.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 16, "stem_gains": {"vocals": 0.0, "drums": 0.8, "bass": 1.0, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 16, "end_beat": 48, "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 1.0, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 48, "end_beat": 64, "stem_gains": {"vocals": 0.0, "drums": 0.0, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 64, "end_beat": 96, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 96, "end_beat": 112, "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.7, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.8, "bass": 1.0, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 1.0, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.0, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.9, "drums": 0.7, "bass": 1.0, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "breakdown", "start_beat": 256, "end_beat": 288, "stem_gains": {"vocals": 0.3, "drums": 0.3, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 288, "end_beat": 368, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 368, "end_beat": 416, "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.7, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "tempo_source": "song_b",
                         "key_source": "none",
@@ -888,8 +915,9 @@ def _build_few_shot_messages_4stem() -> list[dict]:
             "role": "user",
             "content": (
                 'Create a remix plan for this prompt: "mix them together, make it sound good"\n\n'
+                "Beat budget: ~308 beats at 88 BPM for ~210s target\n\n"
                 "=== LAYER 1: SONG OVERVIEW ===\n"
-                'Song A: "Slow Jam" -- 88 BPM, Gmin, 3:15, 71 bars.\n'
+                'Song A: "Slow Jam" -- 88 BPM, Gmin, 3:45, 82 bars.\n'
                 'Song B: "Upbeat" -- 125 BPM, Amin, 3:30, 109 bars.\n'
                 "Vocals: dominant, +7 dB.\n\n"
                 "=== LAYER 4: CROSS-SONG ===\n"
@@ -905,15 +933,17 @@ def _build_few_shot_messages_4stem() -> list[dict]:
                     "name": "create_remix_plan",
                     "input": {
                         "vocal_source": "song_b",
-                        "start_time_vocal": 15.0,
-                        "end_time_vocal": 133.0,
-                        "start_time_instrumental": 10.0,
-                        "end_time_instrumental": 100.0,
+                        "start_time_vocal": 0.0,
+                        "end_time_vocal": 220.0,
+                        "start_time_instrumental": 0.0,
+                        "end_time_instrumental": 225.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 16, "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.8, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 16, "end_beat": 48, "stem_gains": {"vocals": 0.8, "drums": 0.7, "bass": 0.8, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 48, "end_beat": 80, "stem_gains": {"vocals": 1.0, "drums": 0.8, "bass": 0.9, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 2},
-                            {"label": "outro", "start_beat": 80, "end_beat": 96, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.8, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.8, "drums": 0.7, "bass": 0.8, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.3, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.9, "drums": 0.7, "bass": 0.8, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.8, "bass": 0.9, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 256, "end_beat": 312, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "tempo_source": "song_a",
                         "key_source": "none",
@@ -1119,35 +1149,57 @@ def _validate_remix_plan(
         _vocal_bpm = song_a_meta.bpm
         _inst_bpm = song_b_meta.bpm
     target_bpm = estimate_target_bpm(_vocal_bpm, _inst_bpm, plan.tempo_source)
-    plan = _validate_duration(plan, target_bpm)
+
+    # Pre-render logging: arrangement stats before duration validation
+    total_beats = sections[-1].end_beat if sections else 0
+    estimated_seconds = total_beats * 60 / target_bpm if target_bpm > 0 else 0
+    logger.info(
+        "Arrangement validated: %d sections, %d total beats, "
+        "estimated %.0fs at %.0f BPM (target: %ds)",
+        len(sections), total_beats, estimated_seconds,
+        target_bpm, TARGET_REMIX_DURATION_SECONDS,
+    )
+
+    plan, duration_ok = _validate_duration(plan, target_bpm)
+    if not duration_ok:
+        raise _DurationTooShortError(plan, target_bpm)
 
     return plan
 
 
-def _validate_duration(plan: RemixPlan, target_bpm: float) -> RemixPlan:
-    """Clamp total duration to 60-300 seconds."""
+def _validate_duration(
+    plan: RemixPlan, target_bpm: float,
+) -> tuple[RemixPlan, bool]:
+    """Validate arrangement duration against target range.
+
+    Returns (plan, is_acceptable). If is_acceptable is False, the caller
+    should retry the LLM with duration feedback rather than blindly extending.
+    """
     if not plan.sections:
-        return plan
+        return plan, False
 
     total_beats = plan.sections[-1].end_beat
     total_seconds = total_beats * 60 / target_bpm
 
-    min_duration = 60
-    max_duration = 300
+    min_duration = TARGET_REMIX_DURATION_SECONDS * 0.7   # 147s
+    max_duration = TARGET_REMIX_DURATION_SECONDS * 1.5   # 315s
 
     if total_seconds < min_duration:
-        # Extend last section
-        needed_beats = int(min_duration * target_bpm / 60) - total_beats
-        plan.sections[-1].end_beat += max(needed_beats, 8)
-        plan.warnings.append("Remix was extended to meet minimum duration.")
+        logger.warning(
+            "Arrangement too short: %.0fs (%.0f beats at %.0f BPM), "
+            "min=%.0fs, target=%ds",
+            total_seconds, total_beats, target_bpm,
+            min_duration, TARGET_REMIX_DURATION_SECONDS,
+        )
+        return plan, False
     elif total_seconds > max_duration:
-        # Truncate
         max_beats = int(max_duration * target_bpm / 60)
         plan.sections[-1].end_beat = min(plan.sections[-1].end_beat, max_beats)
         plan.sections = [s for s in plan.sections if s.start_beat < max_beats]
         plan.warnings.append("Remix was shortened to fit maximum duration.")
+        return plan, True
 
-    return plan
+    return plan, True
 
 
 # ---------------------------------------------------------------------------
@@ -1264,76 +1316,140 @@ def interpret_prompt(
     )
 
     start = time.monotonic()
+    max_duration_attempts = 2  # 1 original + 1 retry for short duration
 
-    try:
-        response = client.messages.create(
-            model=settings.llm_model,
-            max_tokens=2048,
-            system=system_prompt,
-            messages=messages,
-            tools=[tool_schema],
-            tool_choice={"type": "tool", "name": "create_remix_plan"},
-        )
-    except anthropic.APIStatusError as e:
-        if e.status_code in (429, 500, 529) and settings.llm_max_retries > 0:
-            # Retry once with longer timeout
-            logger.warning("LLM transient error %d, retrying", e.status_code)
-            time.sleep(2)
-            try:
-                response = client.messages.create(
-                    model=settings.llm_model,
-                    max_tokens=2048,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=[tool_schema],
-                    tool_choice={"type": "tool", "name": "create_remix_plan"},
-                )
-            except Exception:
-                logger.exception("LLM retry failed, using fallback")
+    for attempt in range(max_duration_attempts):
+        # --- LLM call (with existing transient error retry) ---
+        try:
+            response = client.messages.create(
+                model=settings.llm_model,
+                max_tokens=4096,
+                system=system_prompt,
+                messages=messages,
+                tools=[tool_schema],
+                tool_choice={"type": "tool", "name": "create_remix_plan"},
+            )
+        except anthropic.APIStatusError as e:
+            if e.status_code in (429, 500, 529) and settings.llm_max_retries > 0:
+                logger.warning("LLM transient error %d, retrying", e.status_code)
+                time.sleep(2)
+                try:
+                    response = client.messages.create(
+                        model=settings.llm_model,
+                        max_tokens=4096,
+                        system=system_prompt,
+                        messages=messages,
+                        tools=[tool_schema],
+                        tool_choice={"type": "tool", "name": "create_remix_plan"},
+                    )
+                except Exception:
+                    logger.exception("LLM retry failed, using fallback")
+                    return generate_fallback_plan(song_a_meta, song_b_meta)
+            else:
+                logger.exception("LLM error (status=%d), using fallback", e.status_code)
                 return generate_fallback_plan(song_a_meta, song_b_meta)
-        else:
-            logger.exception("LLM error (status=%d), using fallback", e.status_code)
+        except Exception:
+            logger.exception("LLM error, using fallback")
             return generate_fallback_plan(song_a_meta, song_b_meta)
-    except Exception:
-        logger.exception("LLM error, using fallback")
-        return generate_fallback_plan(song_a_meta, song_b_meta)
 
-    latency_ms = (time.monotonic() - start) * 1000
+        latency_ms = (time.monotonic() - start) * 1000
 
-    # Check stop reason
-    if response.stop_reason == "max_tokens":
-        logger.warning("LLM hit max_tokens, using fallback")
-        return generate_fallback_plan(song_a_meta, song_b_meta)
+        # Check stop reason
+        if response.stop_reason == "max_tokens":
+            logger.warning("LLM hit max_tokens, using fallback")
+            return generate_fallback_plan(song_a_meta, song_b_meta)
 
-    # Extract tool_use result
-    tool_use_block = next(
-        (b for b in response.content if b.type == "tool_use"), None
-    )
-    if tool_use_block is None:
-        logger.warning("LLM returned no tool_use block, using fallback")
-        return generate_fallback_plan(song_a_meta, song_b_meta)
+        # Extract tool_use result
+        tool_use_block = next(
+            (b for b in response.content if b.type == "tool_use"), None
+        )
+        if tool_use_block is None:
+            logger.warning("LLM returned no tool_use block, using fallback")
+            return generate_fallback_plan(song_a_meta, song_b_meta)
 
-    raw_plan = tool_use_block.input
+        raw_plan = tool_use_block.input
 
-    # Log response
-    logger.info(
-        "LLM response: latency_ms=%.0f, model=%s, raw_plan=%s",
-        latency_ms, response.model, json.dumps(raw_plan, indent=None),
-    )
+        logger.info(
+            "LLM response (attempt %d/%d): latency_ms=%.0f, model=%s, raw_plan=%s",
+            attempt + 1, max_duration_attempts,
+            latency_ms, response.model, json.dumps(raw_plan, indent=None),
+        )
 
-    # Parse and validate
-    try:
-        plan = _parse_remix_plan(raw_plan, song_a_meta, song_b_meta)
-        plan = _validate_remix_plan(plan, song_a_meta, song_b_meta)
+        # Parse and validate
+        try:
+            plan = _parse_remix_plan(raw_plan, song_a_meta, song_b_meta)
+        except Exception:
+            # Parse error -- on retry this can happen if LLM returns garbage
+            logger.exception(
+                "LLM plan parse failed (attempt %d/%d), using fallback",
+                attempt + 1, max_duration_attempts,
+            )
+            return generate_fallback_plan(song_a_meta, song_b_meta)
 
-        # Post-plan validation: warn if vocal sections exceed stretch bar limits
+        try:
+            plan = _validate_remix_plan(plan, song_a_meta, song_b_meta)
+        except _DurationTooShortError as e:
+            if attempt < max_duration_attempts - 1:
+                needed_beats = int(
+                    TARGET_REMIX_DURATION_SECONDS * target_bpm / 60
+                )
+                actual_beats = e.plan.sections[-1].end_beat if e.plan.sections else 0
+                beat_delta = needed_beats - actual_beats
+                suggested_sections = max(6, needed_beats // 32)
+                logger.warning(
+                    "LLM plan too short (attempt %d/%d): %d beats, need ~%d (+%d). Retrying.",
+                    attempt + 1, max_duration_attempts,
+                    actual_beats, needed_beats, beat_delta,
+                )
+                # Append the tool result + correction message for the retry
+                messages.append({
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_use_block.id,
+                            "name": "create_remix_plan",
+                            "input": raw_plan,
+                        }
+                    ],
+                })
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_block.id,
+                            "content": (
+                                f"REJECTED: Your arrangement is too short. "
+                                f"You produced {actual_beats} beats = "
+                                f"{actual_beats * 60 / target_bpm:.0f}s at {target_bpm:.0f} BPM. "
+                                f"Target: {TARGET_REMIX_DURATION_SECONDS}s = ~{needed_beats} beats. "
+                                f"You need {beat_delta} more beats. "
+                                f"Create at least {suggested_sections} sections of 16-64 beats each. "
+                                f"Use the Extended Mix template (intro -> verse -> chorus -> "
+                                f"breakdown -> verse -> chorus -> bridge -> drop -> outro)."
+                            ),
+                        }
+                    ],
+                })
+                continue  # retry
+            else:
+                logger.warning(
+                    "LLM plan too short after %d attempts, using fallback",
+                    max_duration_attempts,
+                )
+                return generate_fallback_plan(song_a_meta, song_b_meta)
+        except Exception:
+            logger.exception("LLM plan validation failed, using fallback")
+            return generate_fallback_plan(song_a_meta, song_b_meta)
+
+        # Validation passed
         if stretch_pct is not None and stretch_pct > 12:
             _warn_vocal_stretch_limits(plan, stretch_pct)
-
         return plan
-    except Exception:
-        logger.exception("LLM plan validation failed, using fallback")
-        return generate_fallback_plan(song_a_meta, song_b_meta)
+
+    # Safety fallback (should not reach here)
+    return generate_fallback_plan(song_a_meta, song_b_meta)
 
 
 # ===========================================================================
