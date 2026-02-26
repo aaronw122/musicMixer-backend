@@ -106,6 +106,7 @@ def run_pipeline(
         true_peak_limit,
         validate_stem,
     )
+    from musicmixer.services.ducking import spectral_duck
     from musicmixer.services.renderer import render_arrangement
     from musicmixer.services.separation import separate_stems
 
@@ -555,15 +556,37 @@ def run_pipeline(
         sr=sr,
     )
 
+    # === STEP 12.5: Spectral ducking ===
+    # Carve a mid-range pocket (300-3000 Hz) in the instrumental where vocals
+    # are active. This is the highest-ROI mixing improvement -- without it,
+    # vocals and instruments compete in the 300Hz-5kHz range with zero
+    # frequency-aware interaction.
+    #
+    # CRITICAL: Use a NEW variable (ducked_instrumental). Do NOT mutate
+    # instrumental_bus -- the auto-leveler at step 13.7 must continue using
+    # the un-ducked instrumental_bus as its detector signal.
+    logger.info("Session %s: [12.5/17] applying spectral ducking...", session_id)
+    emit_progress(event_queue, {
+        "step": "rendering",
+        "detail": "Applying spectral ducking...",
+        "progress": 0.87,
+    }, session=session)
+
+    ducked_instrumental = spectral_duck(instrumental_bus, vocal_bus, sr)
+
     # === STEP 13: Sum buses into final mix ===
-    # Ensure buses are the same length (pad shorter one)
-    max_len = max(len(vocal_bus), len(instrumental_bus))
+    # Ensure buses are the same length (pad shorter one).
+    # Use ducked_instrumental for the sum, but keep instrumental_bus intact
+    # for the auto-leveler detector (pad it to match too).
+    max_len = max(len(vocal_bus), len(ducked_instrumental))
     if len(vocal_bus) < max_len:
         vocal_bus = np.pad(vocal_bus, ((0, max_len - len(vocal_bus)), (0, 0)))
+    if len(ducked_instrumental) < max_len:
+        ducked_instrumental = np.pad(ducked_instrumental, ((0, max_len - len(ducked_instrumental)), (0, 0)))
     if len(instrumental_bus) < max_len:
         instrumental_bus = np.pad(instrumental_bus, ((0, max_len - len(instrumental_bus)), (0, 0)))
 
-    mixed = vocal_bus + instrumental_bus
+    mixed = vocal_bus + ducked_instrumental
 
     # LUFS checkpoint: after bus sum
     _meter = pyln.Meter(sr)
