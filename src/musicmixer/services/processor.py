@@ -158,8 +158,8 @@ def rubberband_process(
         else:
             cmd += ["--crisp", "5"]  # Best R2 equivalent
 
-        # Always preserve formants for vocals (tempo stretch also shifts formants)
-        if is_vocal:
+        # Formant preservation only when pitch-shifting vocals (not tempo-only)
+        if is_vocal and abs(semitones) >= 0.01:
             cmd += ["--formant"]
 
         cmd += [str(in_path), str(out_path)]
@@ -306,8 +306,8 @@ def cross_song_level_match(
 
     # Vocals and instrumentals at equal LUFS. Per-section stem_gains in the
     # arrangement handle the artistic balance (vocals forward in chorus, etc.).
-    # Professional mashups sit vocals at +0 to +1 dB relative to instrumental.
-    vocal_offset_db = 0.0
+    # +2 dB compromise: +3 clipped with compressor makeup, 0 buried vocals. Revisit with spectral ducking (Day 4).
+    vocal_offset_db = 2.0
     target_vocal_lufs = instrumental_lufs + vocal_offset_db
     gain_db = target_vocal_lufs - vocal_lufs
     gain_db = float(np.clip(gain_db, -12.0, 12.0))
@@ -502,7 +502,7 @@ def auto_level(
 def lufs_normalize(
     mixed: np.ndarray,
     sr: int,
-    target_lufs: float = -10.0,
+    target_lufs: float = -12.0,
 ) -> np.ndarray:
     """Normalize the FINAL MIX to target LUFS (not individual stems!).
 
@@ -532,6 +532,57 @@ def lufs_normalize(
     return mixed * (10 ** (gain_db / 20.0))
 
 
+def lufs_normalize_constrained(
+    audio: np.ndarray,
+    sr: int,
+    target_lufs: float = -12.0,
+    ceiling_dbtp: float = -1.0,
+) -> np.ndarray:
+    """LUFS normalize with peak constraint — never applies gain it can't keep.
+
+    Computes both the LUFS gain needed and the maximum gain allowed by the
+    peak ceiling, then applies whichever is smaller. This prevents the
+    normalize-then-trim loop where LUFS boost is undone by peak limiting.
+
+    Returns the gained signal. Logs a warning when peak-constrained.
+    """
+    import pyloudnorm as pyln
+
+    meter = pyln.Meter(sr)
+    current_lufs = meter.integrated_loudness(audio)
+
+    if current_lufs == float("-inf"):
+        logger.warning("Cannot normalize silent audio")
+        return audio
+
+    ceiling = 10 ** (ceiling_dbtp / 20.0)
+    current_peak = true_peak(audio)
+
+    lufs_gain_db = target_lufs - current_lufs
+    # Maximum gain before peak exceeds ceiling
+    peak_gain_db = 20 * np.log10(ceiling / max(current_peak, 1e-12))
+
+    applied_gain_db = min(lufs_gain_db, peak_gain_db)
+    applied_gain_db = float(np.clip(applied_gain_db, -12.0, 12.0))
+
+    shortfall_db = lufs_gain_db - applied_gain_db
+    if shortfall_db > 0.5:
+        logger.warning(
+            "LUFS constrained by peak ceiling: wanted %.1f dB, applied %.1f dB (%.1f dB shortfall). "
+            "Output will be ~%.1f LUFS instead of %.1f LUFS",
+            lufs_gain_db, applied_gain_db, shortfall_db,
+            current_lufs + applied_gain_db, target_lufs,
+        )
+    else:
+        logger.info(
+            "LUFS normalize (constrained): current=%.1f LUFS, target=%.1f LUFS, gain=%.1f dB",
+            current_lufs, target_lufs, applied_gain_db,
+        )
+
+    gain_linear = 10 ** (applied_gain_db / 20.0)
+    return audio * gain_linear
+
+
 def true_peak(signal: np.ndarray) -> float:
     """4x oversampled true-peak measurement (practical ITU-R BS.1770-4 approximation).
 
@@ -549,36 +600,141 @@ def true_peak(signal: np.ndarray) -> float:
 def soft_clip(
     signal: np.ndarray,
     ceiling: float,
-    knee_db: float = 2.0,
+    knee_db: float = 4.0,
 ) -> np.ndarray:
-    """Soft-knee clipper at given ceiling.
+    """Soft-knee clipper at given ceiling using tanh waveshaper.
 
-    Below threshold: UNCHANGED (bit-identical).
-    Knee region: quadratic compression (C1 continuous at both boundaries).
-    Above ceiling: hard limit.
-
-    ceiling = 10**(-1.0/20.0) ~ 0.891 for -1.0 dBTP
+    Below knee onset: UNCHANGED (bit-identical).
+    Knee region: tanh-shaped saturation curve — smooth, monotonic, C1 continuous.
     """
     knee_linear = 10 ** (knee_db / 20.0)
-    threshold = ceiling / knee_linear
+    threshold = ceiling / knee_linear  # knee onset
 
     result = signal.copy()
     abs_signal = np.abs(signal)
 
-    # Knee region: parabolic compression
-    knee_mask = (abs_signal > threshold) & (abs_signal <= ceiling)
-    if np.any(knee_mask):
-        x = abs_signal[knee_mask]
-        knee_width = ceiling - threshold
-        t = (x - threshold) / knee_width  # 0 to 1
-        compressed = threshold + knee_width * (2 * t - t * t)
-        result[knee_mask] = np.sign(signal[knee_mask]) * compressed
+    # Mask: everything above threshold needs processing
+    active = abs_signal > threshold
+    if not np.any(active):
+        return result
 
-    # Hard limit above ceiling
-    over_mask = abs_signal > ceiling
-    result[over_mask] = np.sign(signal[over_mask]) * ceiling
+    x = abs_signal[active]
+    # Map [threshold, inf) -> [0, inf), apply tanh saturation, map back
+    knee_width = ceiling - threshold
+    normalized = (x - threshold) / knee_width  # 0 at threshold, 1 at ceiling
+    # tanh maps [0, inf) -> [0, 1) with smooth saturation
+    compressed = threshold + knee_width * np.tanh(normalized)
+    result[active] = np.sign(signal[active]) * compressed
 
     return result
+
+
+def true_peak_limit(
+    signal: np.ndarray,
+    sr: int,
+    ceiling_dbtp: float = -1.0,
+    lookahead_ms: float = 5.0,
+    release_ms: float = 50.0,
+    attack_ms: float = 1.0,
+) -> np.ndarray:
+    """Look-ahead brickwall limiter targeting a true-peak ceiling.
+
+    Block-based processing (64-sample blocks) with envelope smoothing.
+    The lookahead shifts gain reduction backward in time so the limiter
+    anticipates peaks before they arrive.
+
+    Handles both mono (N,) and stereo (N, 2) signals. Returns float32.
+    """
+    from math import exp
+
+    ceiling = 10 ** (ceiling_dbtp / 20.0)
+    block_size = 64
+
+    # Work with 2D internally: (N, channels)
+    mono = signal.ndim == 1
+    if mono:
+        work = signal[:, np.newaxis].copy()
+    else:
+        work = signal.copy()
+
+    n_samples = work.shape[0]
+    n_blocks = (n_samples + block_size - 1) // block_size
+
+    # --- Step 1: compute per-block gain reduction ---
+    block_gains = np.ones(n_blocks, dtype=np.float64)
+    for i in range(n_blocks):
+        start = i * block_size
+        end = min(start + block_size, n_samples)
+        block = work[start:end]
+        peak = np.max(np.abs(block))
+        if peak > 1e-12:
+            block_gains[i] = min(1.0, ceiling / peak)
+
+    # --- Step 2: apply lookahead (shift gain reduction backward) ---
+    lookahead_samples = int(lookahead_ms * sr / 1000)
+    lookahead_blocks = max(1, lookahead_samples // block_size)
+    # Shift the gain envelope left (earlier in time) by lookahead_blocks
+    shifted_gains = np.ones(n_blocks, dtype=np.float64)
+    for i in range(n_blocks):
+        # Look ahead: take the minimum gain from current block to
+        # lookahead_blocks into the future
+        end_idx = min(i + lookahead_blocks + 1, n_blocks)
+        shifted_gains[i] = np.min(block_gains[i:end_idx])
+
+    # --- Step 3: smooth the envelope with attack/release ---
+    # Coefficients must be computed for BLOCK-RATE processing (every block_size
+    # samples), not sample-rate. If we use sample-rate coefficients but apply
+    # them once per block, the attack is ~64x too slow and the limiter barely
+    # reduces gain.
+    alpha_a = exp(-block_size / (attack_ms * sr / 1000)) if attack_ms > 0 else 0.0
+    alpha_r = exp(-block_size / (release_ms * sr / 1000)) if release_ms > 0 else 0.0
+
+    smoothed = np.ones(n_blocks, dtype=np.float64)
+    smoothed[0] = shifted_gains[0]
+    for i in range(1, n_blocks):
+        if shifted_gains[i] < smoothed[i - 1]:
+            # Gain decreasing (attack): fast response
+            alpha = alpha_a
+        else:
+            # Gain increasing (release): slow recovery
+            alpha = alpha_r
+        smoothed[i] = alpha * smoothed[i - 1] + (1.0 - alpha) * shifted_gains[i]
+
+    # --- Step 4: expand block-level gains to sample-level and apply ---
+    gain_envelope = np.ones(n_samples, dtype=np.float32)
+    for i in range(n_blocks):
+        start = i * block_size
+        end = min(start + block_size, n_samples)
+        gain_envelope[start:end] = smoothed[i]
+
+    # Apply gain to all channels
+    result = work * gain_envelope[:, np.newaxis]
+    result = result.astype(np.float32)
+
+    # Log max gain reduction applied
+    min_gain = float(np.min(smoothed))
+    if min_gain < 1.0:
+        max_reduction_db = 20.0 * np.log10(min_gain) if min_gain > 0 else -np.inf
+        logger.info(
+            "true_peak_limit: max gain reduction %.1f dB (ceiling=%.1f dBTP)",
+            max_reduction_db, ceiling_dbtp,
+        )
+
+    if mono:
+        return result[:, 0]
+    return result
+
+
+def highpass_filter(audio: np.ndarray, sr: int, cutoff_hz: float = 100.0, order: int = 2) -> np.ndarray:
+    """Apply a Butterworth high-pass filter.
+
+    Removes low-frequency bleed (bass rumble, kick drum artifacts) from
+    separated vocal stems. Standard practice before layering vocals over
+    different instrumentals.
+    """
+    from scipy.signal import butter, sosfiltfilt
+    sos = butter(order, cutoff_hz, btype='high', fs=sr, output='sos')
+    return sosfiltfilt(sos, audio, axis=0).astype(np.float32)
 
 
 def apply_fades(
@@ -621,6 +777,7 @@ def export_mp3(
     mixed: np.ndarray,
     sr: int,
     output_path: Path,
+    use_s16_dither: bool = True,
 ) -> Path:
     """Export float32 audio to MP3 via ffmpeg subprocess (NOT pydub).
 
@@ -647,6 +804,8 @@ def export_mp3(
             "320k",
             str(output_path),
         ]
+        if use_s16_dither:
+            cmd[4:4] = ["-af", "aresample=osf=s16:dither_method=triangular"]
         result = subprocess.run(cmd, capture_output=True, timeout=120)
         if result.returncode != 0:
             stderr = result.stderr.decode(errors="replace")

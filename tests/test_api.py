@@ -166,15 +166,12 @@ class TestCreateRemix:
         POST now returns 200 immediately; errors are reported via /status endpoint.
         """
         import time
-        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        def fake_failing_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock):
+            session.status = "error"
+            session.error = "Pipeline exploded"
+            processing_lock.release()
 
-        def failing_pipeline(session_id, song_a_path, song_b_path):
-            raise RuntimeError("Pipeline exploded")
-
-        fake_module.run_pipeline_sync = failing_pipeline
-        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
-
-        try:
+        with patch("musicmixer.api.remix._pipeline_wrapper", fake_failing_wrapper):
             response = client.post(
                 "/api/remix",
                 files={
@@ -194,8 +191,6 @@ class TestCreateRemix:
             status_resp = client.get(f"/api/remix/{session_id}/status")
             assert status_resp.status_code == 200
             assert status_resp.json()["status"] == "error"
-        finally:
-            del sys.modules["musicmixer.services.pipeline_day1"]
 
     def test_accepts_wav_files(self, client, tmp_path):
         """Should accept .wav files."""
