@@ -5,6 +5,10 @@ Day 2: Async pipeline with SSE progress events.
 - GET  /api/remix/{id}/progress -- SSE stream of pipeline progress events
 - GET  /api/remix/{id}/status   -- JSON snapshot of current session state
 - GET  /api/remix/{id}/audio    -- Serve the rendered remix MP3
+
+Day 3: Admin/debug stem endpoints.
+- GET  /api/remix/{id}/stems                    -- List available stems for both songs
+- GET  /api/remix/{id}/stems/{song}/{stem_name} -- Serve raw WAV stem file
 """
 
 import asyncio
@@ -252,6 +256,65 @@ async def get_audio(session_id: str):
     if not remix_path.exists():
         raise HTTPException(404, "Remix not found")
     return FileResponse(remix_path, media_type="audio/mpeg", filename="remix.mp3")
+
+
+VALID_SONGS = {"song_a", "song_b"}
+VALID_STEMS = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+
+
+@router.get("/remix/{session_id}/stems")
+async def list_stems(session_id: str):
+    """List available stems for both songs in a session."""
+    _validate_uuid(session_id)
+
+    stems_dir = (settings.data_dir / "stems" / session_id).resolve()
+
+    if not stems_dir.is_relative_to(settings.data_dir.resolve()):
+        raise HTTPException(400, "Invalid session ID")
+
+    if not stems_dir.exists():
+        raise HTTPException(404, "Stems not found for this session")
+
+    result: dict[str, list[str]] = {}
+    for song in sorted(VALID_SONGS):
+        song_dir = stems_dir / song
+        if not song_dir.is_dir():
+            result[song] = []
+            continue
+        result[song] = sorted(
+            f.stem
+            for f in song_dir.iterdir()
+            if f.suffix.lower() == ".wav" and f.stem in VALID_STEMS
+        )
+
+    return result
+
+
+@router.get("/remix/{session_id}/stems/{song}/{stem_name}")
+async def get_stem(session_id: str, song: str, stem_name: str):
+    """Serve a raw WAV stem file."""
+    _validate_uuid(session_id)
+
+    if song not in VALID_SONGS:
+        raise HTTPException(400, f"Invalid song: must be one of {sorted(VALID_SONGS)}")
+    if stem_name not in VALID_STEMS:
+        raise HTTPException(400, f"Invalid stem: must be one of {sorted(VALID_STEMS)}")
+
+    stem_path = (
+        settings.data_dir / "stems" / session_id / song / f"{stem_name}.wav"
+    ).resolve()
+
+    if not stem_path.is_relative_to(settings.data_dir.resolve()):
+        raise HTTPException(400, "Invalid session ID")
+
+    if not stem_path.exists():
+        raise HTTPException(404, f"Stem '{stem_name}' not found for {song}")
+
+    return FileResponse(
+        stem_path,
+        media_type="audio/wav",
+        filename=f"{song}_{stem_name}.wav",
+    )
 
 
 def _validate_uuid(session_id: str) -> None:
