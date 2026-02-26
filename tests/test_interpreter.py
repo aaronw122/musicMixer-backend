@@ -78,7 +78,7 @@ class TestGenerateFallbackPlan:
         plan = generate_fallback_plan(meta_a, meta_b)
 
         assert plan.vocal_source == "song_a"
-        assert plan.tempo_source == "weighted_midpoint"
+        assert plan.tempo_source == "average"
         assert plan.key_source == "none"
 
     def test_fallback_plan_time_ranges(self):

@@ -1,4 +1,4 @@
-"""Data models for Day 2 pipeline.
+"""Data models for the musicMixer pipeline.
 
 All dataclasses used across services are defined here to avoid circular imports.
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 import queue
 import time
 from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 
@@ -36,6 +37,80 @@ class ProgressEvent:
 
 
 # ---------------------------------------------------------------------------
+# Song structure analysis (Step 3.5)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class VocalGap:
+    """A contiguous run of bars where vocals are inactive."""
+    start_bar: int
+    end_bar: int
+    length_bars: int
+
+
+@dataclass
+class EnergyBuckets:
+    """Adaptive percentile-based energy thresholds for section classification.
+
+    Thresholds computed from normalized combined energy, filtering bars below
+    noise_floor. Classification: silent=<noise_floor, low=<p10, medium=p10-p50,
+    high=p50-p85, peak=>p85.
+    """
+    noise_floor: float  # default 0.02; bars below = "silent"
+    p10: float
+    p50: float
+    p85: float
+
+
+@dataclass
+class StemAnalysis:
+    """Per-bar stem energy analysis and vocal activity detection."""
+    bar_rms: dict[str, np.ndarray]    # stem_name -> per-bar RMS (raw, NOT normalized)
+    combined_energy: np.ndarray       # per-bar combined energy (normalized to p99=1.0)
+    vocal_active: np.ndarray          # per-bar bool
+    vocal_gaps: list[VocalGap]
+    bucket_thresholds: EnergyBuckets
+
+
+@dataclass
+class SectionInfo:
+    """A detected section of a song's structure."""
+    start_bar: int
+    end_bar: int
+    bar_count: int
+    start_time: float               # seconds
+    end_time: float                 # seconds
+    label: str                      # intro|verse|chorus|instrumental|breakdown|build|outro
+    energy_level: str               # low|medium|high|peak
+    energy_trajectory: str          # e.g. "medium->high" (thirds, deduped)
+    density: str                    # sparse|mid|full|full+extra
+    vocal_status: str               # vox:yes|vox:no|vox:fading
+    annotations: list[str] = field(default_factory=list)  # ["DROP","BUILD","GOOD INSTRUMENTAL SOURCE"]
+
+
+@dataclass
+class SongStructure:
+    """Complete song structure analysis: sections, vocal gaps, and bar count."""
+    sections: list[SectionInfo]
+    vocal_gaps: list[VocalGap]
+    total_bars: int
+
+
+@dataclass
+class CrossSongRelationships:
+    """Cross-song comparison metrics for remix planning."""
+    loudness_diff_db: float         # 20*log10(rms_a/rms_b), positive=A louder
+    energy_profile_a: str           # "consistent high" / "wide dynamic range"
+    energy_profile_b: str
+    vocal_source: str               # "song_a" or "song_b"
+    vocal_prominence_a_db: float    # dB above accompaniment
+    vocal_prominence_b_db: float
+    instrumental_sections: list[str]  # bar ranges from recommended source
+    frequency_conflicts: str        # warning text or empty
+    stretch_pct: float
+
+
+# ---------------------------------------------------------------------------
 # Audio analysis (Step 2)
 # ---------------------------------------------------------------------------
 
@@ -47,7 +122,15 @@ class AudioMetadata:
     beat_frames: np.ndarray        # Beat frame positions from librosa.beat.beat_track
     duration_seconds: float
     total_beats: int               # Total beats (rounded to nearest bar boundary)
-    # Day 3+: key, scale, key_confidence, energy_regions, groove_type, vocal_prominence_db
+    # Key detection (Day 3)
+    key: Optional[str] = None
+    scale: Optional[str] = None
+    key_confidence: Optional[float] = None
+    has_modulation: bool = False
+    # Energy analysis (Day 3)
+    mean_rms: Optional[float] = None       # From original mix audio (NOT summed stems)
+    stem_analysis: Optional[StemAnalysis] = None
+    song_structure: Optional[SongStructure] = None
 
 
 # ---------------------------------------------------------------------------
