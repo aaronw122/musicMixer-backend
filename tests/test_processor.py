@@ -283,9 +283,8 @@ class TestComputeTempoPlan:
         # 120 * 0.70 + 100 * 0.30 = 84 + 30 = 114
         assert target == 120.0 * 0.70 + 100.0 * 0.30
         assert stretch_v is True
-        # vocal_stretch_pct = abs(1 - 100/114) = 12.3% > 10%: tiered limits
-        # disable instrumental stretch (vocals-only in 10-25% speedup range)
-        assert stretch_i is False
+        # vocal_stretch_pct = abs(1 - 100/114) = 12.3%: both sides stretch toward target
+        assert stretch_i is True
         assert len(warnings) == 0
 
     def test_large_gap_clamps_vocal_stretch(self):
@@ -296,8 +295,8 @@ class TestComputeTempoPlan:
         assert target == 85.0 * 1.12
         assert stretch_v is True
         # Vocal stretch at 95.2 BPM: ratio=85/95.2=0.893, pct=10.7% speedup
-        # Tiered limits: 10-25% speedup -> vocals-only, no instrumental stretch
-        assert stretch_i is False
+        # Both sides stretch toward target BPM
+        assert stretch_i is True
 
     def test_very_large_gap_explicit_song_b(self):
         """70 vs 140 BPM with song_b: skips stretching entirely."""
