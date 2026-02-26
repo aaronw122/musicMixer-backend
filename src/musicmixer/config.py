@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     output_format: str = "mp3"
     output_bitrate: str = "320k"
 
+    # LLM
+    anthropic_api_key: str = ""
+    llm_model: str = "claude-sonnet-4-20250514"
+    llm_timeout_seconds: int = 20
+    llm_max_retries: int = 1
+
     # Day 3.5 audio-quality A/B flags (default-off)
     ab_control_day3: bool = True
     ab_autolvl_tune_v1: bool = False

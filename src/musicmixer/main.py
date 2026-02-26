@@ -64,5 +64,5 @@ def dev():
         host=settings.host,
         port=settings.port,
         reload=True,
-        reload_excludes=["data/*", "*.pyc", "__pycache__/*", "notes/*"],
+        reload_excludes=["data", "data/**", "*.pyc", "__pycache__", "notes"],
     )
