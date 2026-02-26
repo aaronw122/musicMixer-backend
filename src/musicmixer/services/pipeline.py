@@ -79,7 +79,14 @@ def run_pipeline(
     import pyloudnorm as pyln
 
     from musicmixer.config import settings
-    from musicmixer.services.analysis import analyze_audio, reconcile_bpm
+    from musicmixer.services.analysis import (
+        analyze_audio,
+        analyze_stems,
+        compute_relationships,
+        detect_key,
+        detect_modulation,
+        reconcile_bpm,
+    )
     from musicmixer.services.interpreter import interpret_prompt
     from musicmixer.services.processor import (
         apply_fades,
@@ -164,6 +171,73 @@ def run_pipeline(
         "step": "analyzing",
         "detail": f"Song A: {meta_a.bpm:.0f} BPM, Song B: {meta_b.bpm:.0f} BPM",
         "progress": 0.55,
+    }, session=session)
+
+    # === STEP 3.5: Analyze song structure ===
+    logger.info("Session %s: [3.5/17] analyzing song structure...", session_id)
+    emit_progress(event_queue, {
+        "step": "analyzing",
+        "detail": "Analyzing song structure...",
+        "progress": 0.56,
+    }, session=session)
+
+    # Key detection for both songs
+    for label, meta, path in [("A", meta_a, song_a_path), ("B", meta_b, song_b_path)]:
+        try:
+            key, scale, confidence = detect_key(path)
+            meta.key = key
+            meta.scale = scale
+            meta.key_confidence = confidence
+            meta.has_modulation = detect_modulation(path)
+            logger.info(
+                "Session %s: Song %s key=%s %s (confidence=%.2f, modulation=%s)",
+                session_id, label, key, scale, confidence, meta.has_modulation,
+            )
+        except Exception as e:
+            logger.warning("Session %s: Key detection failed for Song %s: %s", session_id, label, e)
+
+    # Stem-level structure analysis for both songs
+    for label, meta, stems_dir in [
+        ("A", meta_a, song_a_stems_dir),
+        ("B", meta_b, song_b_stems_dir),
+    ]:
+        try:
+            stem_paths = {name: stems_dir / f"{name}.wav" for name in ["vocals", "drums", "bass", "guitar", "piano", "other"]}
+            # Filter to stems that actually exist
+            stem_paths = {k: v for k, v in stem_paths.items() if v.exists()}
+            if stem_paths:
+                stem_analysis, song_structure = analyze_stems(
+                    stem_paths=stem_paths,
+                    beat_frames=meta.beat_frames,
+                    bpm=meta.bpm,
+                )
+                meta.stem_analysis = stem_analysis
+                meta.song_structure = song_structure
+                logger.info(
+                    "Session %s: Song %s structure: %d sections, %d vocal gaps, %d total bars",
+                    session_id, label,
+                    len(song_structure.sections),
+                    len(song_structure.vocal_gaps),
+                    song_structure.total_bars,
+                )
+        except Exception as e:
+            logger.warning("Session %s: Structure analysis failed for Song %s: %s", session_id, label, e)
+
+    # Cross-song relationships
+    try:
+        relationships = compute_relationships(meta_a, meta_b)
+        logger.info(
+            "Session %s: Cross-song: loudness_diff=%.1fdB, vocal_source=%s, stretch=%.1f%%",
+            session_id, relationships.loudness_diff_db,
+            relationships.vocal_source, relationships.stretch_pct,
+        )
+    except Exception as e:
+        logger.warning("Session %s: Cross-song relationship analysis failed: %s", session_id, e)
+
+    emit_progress(event_queue, {
+        "step": "analyzing",
+        "detail": "Song structure analyzed!",
+        "progress": 0.57,
     }, session=session)
 
     # === STEP 4: Interpret prompt via LLM (fallback to deterministic plan) ===
