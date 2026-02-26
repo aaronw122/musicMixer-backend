@@ -89,7 +89,7 @@ def run_pipeline(
         detect_modulation,
         reconcile_bpm,
     )
-    from musicmixer.services.interpreter import interpret_prompt
+    from musicmixer.services.interpreter import interpret_prompt, TARGET_REMIX_DURATION_SECONDS
     from musicmixer.services.processor import (
         apply_fades,
         auto_level,
@@ -265,6 +265,21 @@ def run_pipeline(
     )
 
     logger.info("Session %s: [4/17] plan ready (vocals=%s, %d sections, fallback=%s)", session_id, plan.vocal_source, len(plan.sections), plan.used_fallback)
+
+    # Post-interpret arrangement logging
+    if plan.sections:
+        _pi_total_beats = plan.sections[-1].end_beat
+        from musicmixer.services.tempo import estimate_target_bpm as _est_bpm
+        if plan.vocal_source == "song_b":
+            _v_bpm, _i_bpm = meta_b.bpm, meta_a.bpm
+        else:
+            _v_bpm, _i_bpm = meta_a.bpm, meta_b.bpm
+        _pi_approx_bpm = _est_bpm(_v_bpm, _i_bpm)
+        _pi_est_duration = _pi_total_beats * 60 / _pi_approx_bpm if _pi_approx_bpm > 0 else 0
+        logger.info(
+            "Session %s: Arrangement: %d sections, %d beats, est %.0fs at %.0f BPM",
+            session_id, len(plan.sections), _pi_total_beats, _pi_est_duration, _pi_approx_bpm,
+        )
 
     # === STEP 5: Determine vocal/instrumental sources ===
     if plan.vocal_source == "song_a":
@@ -555,6 +570,22 @@ def run_pipeline(
         beat_frames=post_stretch_beat_frames,
         sr=sr,
     )
+
+    # Post-render duration sanity check
+    _pr_actual_duration = vocal_bus.shape[0] / sr
+    if plan.sections:
+        _pr_estimated_duration = plan.sections[-1].end_beat * 60 / target_bpm if target_bpm > 0 else 0
+        logger.info(
+            "Session %s: Post-render duration: actual=%.1fs, estimated=%.1fs, target=%ds",
+            session_id, _pr_actual_duration, _pr_estimated_duration, TARGET_REMIX_DURATION_SECONDS,
+        )
+        if _pr_estimated_duration > 0 and abs(_pr_actual_duration - _pr_estimated_duration) / _pr_estimated_duration > 0.15:
+            logger.warning(
+                "Session %s: Post-render duration mismatch >15%%: actual=%.1fs vs estimated=%.1fs "
+                "(delta=%.1f%%). Beat grid or BPM estimation may be inaccurate.",
+                session_id, _pr_actual_duration, _pr_estimated_duration,
+                (_pr_actual_duration - _pr_estimated_duration) / _pr_estimated_duration * 100,
+            )
 
     # === STEP 12.5: Spectral ducking ===
     # Carve a mid-range pocket (300-3000 Hz) in the instrumental where vocals
