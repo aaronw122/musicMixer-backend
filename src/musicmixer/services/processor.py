@@ -160,8 +160,8 @@ def rubberband_process(
         else:
             cmd += ["--crisp", "5"]  # Best R2 equivalent
 
-        # Formant preservation only when pitch-shifting vocals (not tempo-only)
-        if is_vocal and abs(semitones) >= 0.01:
+        # Formant preservation for all vocal stretching (tempo and pitch)
+        if is_vocal:
             cmd += ["--formant"]
 
         cmd += [str(in_path), str(out_path)]
@@ -193,12 +193,10 @@ def compute_tempo_plan(
     Adaptive weighted midpoint splits the tempo stretch burden between
     vocals and instrumentals instead of forcing 100% onto vocals.
 
-    Tiered stretch limits (asymmetric for slowdown vs speedup):
-      < 10%: stretch either/both silently
-      10-25%: stretch vocals only
-      25-30% speedup / 25% slowdown: stretch vocals, strong warn
-      30-45% speedup / 25-35% slowdown: vocals-only stretch, warn
-      > 45% speedup / > 35% slowdown: skip stretching entirely
+    Tiered stretch limits (both sides always stretch, asymmetric for slowdown vs speedup):
+      ≤ 25% slowdown / ≤ 30% speedup: stretch both sides silently
+      25-35% slowdown / 30-45% speedup: stretch both sides, warn
+      > 35% slowdown / > 45% speedup: skip stretching entirely
     """
     # Delegate BPM selection to shared tempo module (single source of truth)
     target_bpm = estimate_target_bpm(vocal_bpm, instrumental_bpm, tempo_source)
@@ -215,7 +213,7 @@ def compute_tempo_plan(
     stretch_vocals = True
     stretch_instrumentals = abs(1.0 - inst_ratio) > 0.001
 
-    # Apply tiered limits
+    # Apply tiered limits -- both sides always stretch toward target BPM
     if is_slowdown:
         # Slowdown limits (tighter -- more artifacts when slowing)
         if vocal_stretch_pct > 0.35:
@@ -225,13 +223,9 @@ def compute_tempo_plan(
                 "Tempo difference too large for stretching. Songs play at original tempos."
             )
         elif vocal_stretch_pct > 0.25:
-            stretch_instrumentals = False
             warnings.append(
                 "Vocals stretched significantly to match the beat -- they may sound different."
             )
-        elif vocal_stretch_pct > 0.10:
-            stretch_instrumentals = False
-            warnings.append("Vocals adjusted to match the instrumental tempo.")
     else:
         # Speedup limits (more tolerant)
         if vocal_stretch_pct > 0.45:
@@ -241,16 +235,9 @@ def compute_tempo_plan(
                 "Tempo difference too large for stretching. Songs play at original tempos."
             )
         elif vocal_stretch_pct > 0.30:
-            stretch_instrumentals = False
             warnings.append(
                 "Vocals stretched significantly to match the beat -- they may sound different."
             )
-        elif vocal_stretch_pct > 0.25:
-            stretch_instrumentals = False
-            warnings.append("Vocals adjusted to match the instrumental tempo.")
-        elif vocal_stretch_pct > 0.10:
-            stretch_instrumentals = False
-            # Silent for vocals-only at 10-25%
 
     # Compute stretch percentage for both songs
     vocal_stretch_pct_val = abs(target_bpm - vocal_bpm) / vocal_bpm * 100 if vocal_bpm > 0 else 0.0
