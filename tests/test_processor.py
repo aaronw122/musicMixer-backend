@@ -17,9 +17,11 @@ import soundfile as sf
 
 from musicmixer.services.processor import (
     apply_fades,
+    bandpass_filter,
     compute_tempo_plan,
     cross_song_level_match,
     export_mp3,
+    highpass_filter,
     lufs_normalize,
     rubberband_process,
     soft_clip,
@@ -133,6 +135,106 @@ class TestTrimAudio:
         trimmed = trim_audio(audio, sr, start_sec=1.0, end_sec=10.0)
         expected_length = int(1.0 * sr)
         assert trimmed.shape[0] == expected_length
+
+
+class TestBandpassFilter:
+    """Tests for the vocal bandpass pre-filter (150Hz-8kHz)."""
+
+    def test_attenuates_low_frequencies(self):
+        """A 50Hz tone (well below 150Hz cutoff) should be heavily attenuated."""
+        audio = _make_stereo_sine(freq=50.0, amplitude=0.5, duration=1.0)
+        result = bandpass_filter(audio, SR, low_hz=150.0, high_hz=8000.0)
+        # 50Hz is well below the 150Hz cutoff -- expect >20dB attenuation
+        input_rms = np.sqrt(np.mean(audio ** 2))
+        output_rms = np.sqrt(np.mean(result ** 2))
+        attenuation_db = 20 * np.log10(output_rms / input_rms)
+        assert attenuation_db < -20.0, (
+            f"50Hz tone attenuated only {attenuation_db:.1f} dB (expected < -20 dB)"
+        )
+
+    def test_attenuates_high_frequencies(self):
+        """A 15kHz tone (well above 8kHz cutoff) should be heavily attenuated."""
+        audio = _make_stereo_sine(freq=15000.0, amplitude=0.5, duration=1.0)
+        result = bandpass_filter(audio, SR, low_hz=150.0, high_hz=8000.0)
+        input_rms = np.sqrt(np.mean(audio ** 2))
+        output_rms = np.sqrt(np.mean(result ** 2))
+        attenuation_db = 20 * np.log10(output_rms / input_rms)
+        assert attenuation_db < -20.0, (
+            f"15kHz tone attenuated only {attenuation_db:.1f} dB (expected < -20 dB)"
+        )
+
+    def test_passes_midrange_frequencies(self):
+        """A 1kHz tone (well inside passband) should pass through with minimal loss."""
+        audio = _make_stereo_sine(freq=1000.0, amplitude=0.5, duration=1.0)
+        result = bandpass_filter(audio, SR, low_hz=150.0, high_hz=8000.0)
+        input_rms = np.sqrt(np.mean(audio ** 2))
+        output_rms = np.sqrt(np.mean(result ** 2))
+        attenuation_db = 20 * np.log10(output_rms / input_rms)
+        # Should be within 1 dB of unity (minimal passband loss)
+        assert abs(attenuation_db) < 1.0, (
+            f"1kHz tone changed by {attenuation_db:.1f} dB (expected < 1 dB loss)"
+        )
+
+    def test_stereo_output_shape(self):
+        """Stereo input produces stereo output with same shape."""
+        audio = _make_stereo_sine(freq=440.0, amplitude=0.5, duration=1.0)
+        result = bandpass_filter(audio, SR)
+        assert result.shape == audio.shape
+        assert result.ndim == 2
+        assert result.shape[1] == 2
+
+    def test_mono_output_shape(self):
+        """Mono input produces mono output with same shape."""
+        audio = _make_mono_sine(freq=440.0, amplitude=0.5, duration=1.0)
+        result = bandpass_filter(audio, SR)
+        assert result.shape == audio.shape
+        assert result.ndim == 1
+
+    def test_returns_float32(self):
+        """Output dtype is float32 regardless of input."""
+        audio = _make_stereo_sine(freq=440.0, amplitude=0.5, duration=1.0)
+        result = bandpass_filter(audio, SR)
+        assert result.dtype == np.float32
+
+    def test_subsumes_highpass_at_100hz(self):
+        """Bandpass at 150Hz provides at least as much low-freq rejection as HPF at 100Hz.
+
+        This validates that the old 100Hz HPF at step 11.2 is redundant
+        once the 150Hz-8kHz bandpass is in place.
+        """
+        # Use an 80Hz tone that both filters should attenuate
+        audio = _make_stereo_sine(freq=80.0, amplitude=0.5, duration=1.0)
+        hpf_result = highpass_filter(audio, SR, cutoff_hz=100.0)
+        bpf_result = bandpass_filter(audio, SR, low_hz=150.0, high_hz=8000.0)
+
+        hpf_rms = np.sqrt(np.mean(hpf_result ** 2))
+        bpf_rms = np.sqrt(np.mean(bpf_result ** 2))
+
+        # Bandpass at 150Hz should attenuate 80Hz MORE than HPF at 100Hz
+        assert bpf_rms <= hpf_rms, (
+            f"Bandpass RMS ({bpf_rms:.6f}) should be <= HPF RMS ({hpf_rms:.6f}) at 80Hz"
+        )
+
+    def test_custom_cutoff_frequencies(self):
+        """Custom low_hz and high_hz parameters are respected."""
+        # Use a very narrow band: 400-600Hz. A 500Hz tone should pass.
+        audio = _make_stereo_sine(freq=500.0, amplitude=0.5, duration=1.0)
+        result = bandpass_filter(audio, SR, low_hz=400.0, high_hz=600.0)
+        input_rms = np.sqrt(np.mean(audio ** 2))
+        output_rms = np.sqrt(np.mean(result ** 2))
+        attenuation_db = 20 * np.log10(output_rms / input_rms)
+        assert abs(attenuation_db) < 1.0, (
+            f"500Hz tone in 400-600Hz band changed by {attenuation_db:.1f} dB"
+        )
+
+        # A 200Hz tone should be attenuated by the narrow band
+        audio_low = _make_stereo_sine(freq=200.0, amplitude=0.5, duration=1.0)
+        result_low = bandpass_filter(audio_low, SR, low_hz=400.0, high_hz=600.0)
+        low_rms = np.sqrt(np.mean(result_low ** 2))
+        low_attenuation_db = 20 * np.log10(low_rms / input_rms)
+        assert low_attenuation_db < -6.0, (
+            f"200Hz tone in 400-600Hz band attenuated only {low_attenuation_db:.1f} dB"
+        )
 
 
 class TestRubberband:
