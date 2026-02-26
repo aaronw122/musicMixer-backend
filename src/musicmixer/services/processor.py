@@ -18,6 +18,8 @@ import pyloudnorm
 import soundfile as sf
 from scipy.signal import resample_poly
 
+from musicmixer.services.tempo import estimate_target_bpm
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -198,36 +200,8 @@ def compute_tempo_plan(
       30-45% speedup / 25-35% slowdown: vocals-only stretch, warn
       > 45% speedup / > 35% slowdown: skip stretching entirely
     """
-    gap_pct = abs(vocal_bpm - instrumental_bpm) / max(vocal_bpm, instrumental_bpm)
-
-    if tempo_source == "weighted_midpoint" or tempo_source == "average":
-        if gap_pct <= 0.04:
-            # Within DJ-transparent range -- match to instrumental
-            target_bpm = instrumental_bpm
-        elif gap_pct <= 0.10:
-            # Safe mashup range -- 65/35 instrumental bias
-            target_bpm = instrumental_bpm * 0.65 + vocal_bpm * 0.35
-        elif gap_pct <= 0.20:
-            # Extended range -- 70/30 bias, cap each side at 12%
-            target_bpm = instrumental_bpm * 0.70 + vocal_bpm * 0.30
-        else:
-            # Beyond practical range -- clamp so neither side exceeds 12%
-            # Bias toward instrumental
-            target_bpm = instrumental_bpm * 0.70 + vocal_bpm * 0.30
-            # Clamp: if vocal stretch > 12%, pull target toward vocal
-            vocal_stretch = abs(vocal_bpm - target_bpm) / vocal_bpm
-            if vocal_stretch > 0.12:
-                # Solve: |vocal_bpm - target| / vocal_bpm = 0.12
-                if vocal_bpm > target_bpm:
-                    target_bpm = vocal_bpm * 0.88  # Max 12% slowdown
-                else:
-                    target_bpm = vocal_bpm * 1.12  # Max 12% speedup
-    elif tempo_source == "song_a":
-        target_bpm = vocal_bpm
-    elif tempo_source == "song_b":
-        target_bpm = instrumental_bpm
-    else:
-        target_bpm = instrumental_bpm
+    # Delegate BPM selection to shared tempo module (single source of truth)
+    target_bpm = estimate_target_bpm(vocal_bpm, instrumental_bpm, tempo_source)
 
     # time_ratio for rubberband: source_bpm / target_bpm
     vocal_ratio = vocal_bpm / target_bpm
