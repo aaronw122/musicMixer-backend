@@ -746,6 +746,32 @@ def highpass_filter(audio: np.ndarray, sr: int, cutoff_hz: float = 100.0, order:
     return sosfiltfilt(sos, audio, axis=0).astype(np.float32)
 
 
+def bandpass_filter(
+    audio: np.ndarray,
+    sr: int,
+    low_hz: float = 150.0,
+    high_hz: float = 8000.0,
+    order: int = 2,
+) -> np.ndarray:
+    """Apply a Butterworth bandpass filter (zero-phase).
+
+    Removes low-frequency bleed (bass rumble, kick artifacts) and
+    high-frequency noise/artifacts from separated vocal stems. Designed
+    to be applied before tempo stretching so rubberband's R3 engine
+    works on cleaner input.
+
+    The 150 Hz low cutoff preserves bass vocal fundamentals (e.g. Biggie
+    at ~100-130 Hz has harmonics above 150 Hz). The 8 kHz high cutoff
+    removes separation artifacts above the vocal presence range; may dull
+    vocal "air" slightly -- evaluate during listening sessions.
+
+    Uses sosfiltfilt for zero-phase filtering (no group delay).
+    """
+    from scipy.signal import butter, sosfiltfilt
+    sos = butter(order, [low_hz, high_hz], btype='band', fs=sr, output='sos')
+    return sosfiltfilt(sos, audio, axis=0).astype(np.float32)
+
+
 def apply_fades(
     audio: np.ndarray,
     sr: int,

@@ -58,10 +58,12 @@ def run_pipeline(
       5. Determine vocal/instrumental sources from plan
       6. Load and standardize all stems (44.1kHz, stereo, float32)
       7. Trim stems to source time ranges
+     7.5. Detect and exclude near-silent stems
+     7.7. Vocal pre-filter bandpass (150Hz-8kHz, before rubberband)
       8. Compute tempo plan (target BPM, which stems to stretch)
       9. Tempo match via rubberband
      10. Post-stretch beat grid re-detection
-     11. Vocal compression + HPF + cross-song level matching
+     11. Vocal compression + cross-song level matching
     11.8. Pre-limit drum/bass transients (reduce crest factor for LUFS headroom)
      12. Render arrangement into vocal + instrumental buses
      13. Sum buses into final mix + auto-leveler
@@ -91,11 +93,11 @@ def run_pipeline(
     from musicmixer.services.processor import (
         apply_fades,
         auto_level,
+        bandpass_filter,
         compress_dynamic_range,
         cross_song_level_match,
         compute_tempo_plan,
         export_mp3,
-        highpass_filter,
         lufs_normalize_constrained,
         rubberband_process,
         soft_clip,
@@ -351,6 +353,20 @@ def run_pipeline(
     vocal_audio = _filter_inactive(vocal_audio, "vocal")
     inst_audio = _filter_inactive(inst_audio, "instrumental")
 
+    # === STEP 7.7: Vocal pre-filter bandpass ===
+    # Apply 150Hz-8kHz bandpass to vocal stems before tempo stretching.
+    # Removes low-frequency bleed (bass rumble, kick artifacts) and
+    # high-frequency separation noise, giving rubberband's R3 engine
+    # cleaner input for transient detection. This subsumes the old 100Hz
+    # HPF that was at step 11.2 (now removed), and also resolves the
+    # compressor-before-HPF ordering issue since bass bleed is cleaned
+    # before the compressor ever sees the signal.
+    if "vocals" in vocal_audio:
+        vocal_audio["vocals"] = bandpass_filter(
+            vocal_audio["vocals"], sr, low_hz=150.0, high_hz=8000.0,
+        )
+        logger.info("Session %s: Vocal bandpass pre-filter applied (150Hz-8kHz)", session_id)
+
     # === STEP 8: Compute tempo plan ===
     target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings, stretch_pct = compute_tempo_plan(
         vocal_meta.bpm, inst_meta.bpm, plan.tempo_source,
@@ -471,11 +487,9 @@ def run_pipeline(
             settings.ab_vocal_makeup_v1,
         )
 
-    # === STEP 11.2: High-pass filter vocals ===
-    # Remove low-frequency bleed from stem separation (bass rumble, kick artifacts).
-    if "vocals" in vocal_audio:
-        vocal_audio["vocals"] = highpass_filter(vocal_audio["vocals"], sr, cutoff_hz=100.0)
-        logger.info("Session %s: Vocal HPF applied at 100 Hz", session_id)
+    # === STEP 11.2: REMOVED (100Hz HPF) ===
+    # The 150Hz-8kHz bandpass pre-filter at step 7.7 subsumes this.
+    # Bass bleed is now cleaned before both rubberband and the compressor.
 
     # === STEP 11.5: Cross-song level matching ===
     # Runs AFTER compression so LUFS measurement reflects actual vocal loudness.
