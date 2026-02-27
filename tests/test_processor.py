@@ -288,15 +288,21 @@ class TestComputeTempoPlan:
         assert len(warnings) == 0
 
     def test_large_gap_clamps_vocal_stretch(self):
-        """85 vs 130 BPM (34.6% gap, > 20%): clamps so vocal stretch <= 12%."""
+        """85 vs 130 BPM (34.6% gap, > 20%): clamps target to vocal*1.12=95.2.
+
+        After clamping, instrumental must stretch from 130 to 95.2 BPM,
+        which is a 36.55% slowdown -- exceeding the 35% instrumental disable
+        threshold. So stretching is disabled for both sides with a warning.
+        """
         target, stretch_v, stretch_i, warnings, stretch_pct = compute_tempo_plan(85.0, 130.0)
         # Weighted: 130*0.70 + 85*0.30 = 116.5. Vocal stretch = |85-116.5|/85 = 37% > 12%
         # Clamp: vocal_bpm < target_bpm, so target = 85 * 1.12 = 95.2
         assert target == 85.0 * 1.12
-        assert stretch_v is True
-        # Vocal stretch at 95.2 BPM: ratio=85/95.2=0.893, pct=10.7% speedup
-        # Both sides stretch toward target BPM
-        assert stretch_i is True
+        # Instrumental stretch: inst_ratio=130/95.2=1.366, pct=36.55% slowdown > 35% threshold
+        # Both sides disabled by instrumental threshold check
+        assert stretch_v is False
+        assert stretch_i is False
+        assert any("too large" in w.lower() for w in warnings)
 
     def test_very_large_gap_explicit_song_b(self):
         """70 vs 140 BPM with song_b: skips stretching entirely."""
@@ -333,6 +339,50 @@ class TestComputeTempoPlan:
             110.0, 120.0, tempo_source="weighted_midpoint"
         )
         assert target_avg == target_wm
+
+    def test_instrumental_stretch_warning(self):
+        """Instrumental stretch > 25% emits warning even when vocal stretch is fine.
+
+        90 vs 130 BPM: target clamps to 90*1.12=100.8.
+        Vocal stretch = 12%, OK. Instrumental stretch = 130->100.8 = 28.95% slowdown.
+        Should warn about instrumental stretch.
+        """
+        target, stretch_v, stretch_i, warnings, stretch_pct = compute_tempo_plan(90.0, 130.0)
+        # Target = 90*1.12 = 100.8 after clamping (gap > 20%, vocal stretch > 12%)
+        assert target == pytest.approx(90.0 * 1.12)
+        # Instrumental stretch: 130 -> 100.8 = 29.2/130 = 22.46% as ratio,
+        # inst_ratio = 130/100.8 = 1.2897, inst_stretch_pct = 0.2897 = 28.97%
+        # 25% < 28.97% < 35%: warn but don't disable
+        assert stretch_v is True
+        assert stretch_i is True
+        assert any("instrumental" in w.lower() for w in warnings)
+
+    def test_stretch_pct_zero_when_disabled(self):
+        """stretch_pct is 0.0 when stretching is disabled for both sides.
+
+        70 vs 140 BPM: stretching disabled entirely.
+        stretch_pct should be 0.0, not the theoretical stretch value.
+        """
+        _, stretch_v, stretch_i, _, stretch_pct = compute_tempo_plan(
+            70.0, 140.0, tempo_source="song_b"
+        )
+        assert stretch_v is False
+        assert stretch_i is False
+        assert stretch_pct == 0.0
+
+    def test_stretch_pct_only_includes_active_sides(self):
+        """stretch_pct reflects only sides that are actually being stretched.
+
+        118 vs 122 BPM: vocals stretch, instrumentals do not (DJ-transparent range).
+        stretch_pct should reflect vocal stretch only.
+        """
+        target, stretch_v, stretch_i, _, stretch_pct = compute_tempo_plan(118.0, 122.0)
+        assert target == 122.0
+        assert stretch_v is True
+        assert stretch_i is False
+        # stretch_pct should be the vocal stretch: |122-118|/118 * 100 = 3.39%
+        expected = abs(122.0 - 118.0) / 118.0 * 100
+        assert stretch_pct == pytest.approx(expected, abs=0.01)
 
 
 # ---------------------------------------------------------------------------

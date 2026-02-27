@@ -205,17 +205,19 @@ def compute_tempo_plan(
     vocal_ratio = vocal_bpm / target_bpm
     inst_ratio = instrumental_bpm / target_bpm
 
-    # Compute stretch percentage and direction
+    # Compute stretch percentage and direction for both sides
     vocal_stretch_pct = abs(1.0 - vocal_ratio)
-    is_slowdown = vocal_ratio > 1.0  # Vocals need to be stretched longer = slowed down
+    inst_stretch_pct = abs(1.0 - inst_ratio)
+    is_vocal_slowdown = vocal_ratio > 1.0  # Vocals need to be stretched longer = slowed down
+    is_inst_slowdown = inst_ratio > 1.0  # Instrumentals slowed down
 
     warnings: list[str] = []
     stretch_vocals = True
     stretch_instrumentals = abs(1.0 - inst_ratio) > 0.001
 
-    # Apply tiered limits -- both sides always stretch toward target BPM
-    if is_slowdown:
-        # Slowdown limits (tighter -- more artifacts when slowing)
+    # Apply tiered limits -- check BOTH sides against thresholds
+    # Vocal thresholds (tighter: vocals are more perceptible when distorted)
+    if is_vocal_slowdown:
         if vocal_stretch_pct > 0.35:
             stretch_vocals = False
             stretch_instrumentals = False
@@ -227,7 +229,6 @@ def compute_tempo_plan(
                 "Vocals stretched significantly to match the beat -- they may sound different."
             )
     else:
-        # Speedup limits (more tolerant)
         if vocal_stretch_pct > 0.45:
             stretch_vocals = False
             stretch_instrumentals = False
@@ -239,9 +240,45 @@ def compute_tempo_plan(
                 "Vocals stretched significantly to match the beat -- they may sound different."
             )
 
-    # Compute stretch percentage for both songs
-    vocal_stretch_pct_val = abs(target_bpm - vocal_bpm) / vocal_bpm * 100 if vocal_bpm > 0 else 0.0
-    inst_stretch_pct_val = abs(target_bpm - instrumental_bpm) / instrumental_bpm * 100 if instrumental_bpm > 0 else 0.0
+    # Instrumental thresholds (checked only if stretching wasn't already disabled)
+    # Instrumentals tolerate more stretch than vocals, but extreme stretch still degrades quality
+    if stretch_instrumentals:
+        if is_inst_slowdown:
+            # Slowdown: disable at 35%, warn at 25% (same as vocal)
+            if inst_stretch_pct > 0.35:
+                stretch_vocals = False
+                stretch_instrumentals = False
+                warnings.append(
+                    "Tempo difference too large for stretching. Songs play at original tempos."
+                )
+            elif inst_stretch_pct > 0.25:
+                warnings.append(
+                    "Instrumental stretched significantly -- beat may sound different."
+                )
+        else:
+            # Speedup: disable at 45%, warn at 25%
+            if inst_stretch_pct > 0.45:
+                stretch_vocals = False
+                stretch_instrumentals = False
+                warnings.append(
+                    "Tempo difference too large for stretching. Songs play at original tempos."
+                )
+            elif inst_stretch_pct > 0.25:
+                warnings.append(
+                    "Instrumental stretched significantly -- beat may sound different."
+                )
+
+    # Compute stretch percentage for both songs, only including sides that are actually stretched
+    vocal_stretch_pct_val = (
+        abs(target_bpm - vocal_bpm) / vocal_bpm * 100
+        if stretch_vocals and vocal_bpm > 0
+        else 0.0
+    )
+    inst_stretch_pct_val = (
+        abs(target_bpm - instrumental_bpm) / instrumental_bpm * 100
+        if stretch_instrumentals and instrumental_bpm > 0
+        else 0.0
+    )
     stretch_pct = max(vocal_stretch_pct_val, inst_stretch_pct_val)
 
     return target_bpm, stretch_vocals, stretch_instrumentals, warnings, stretch_pct
