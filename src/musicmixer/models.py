@@ -31,7 +31,7 @@ class SessionState:
 @dataclass
 class ProgressEvent:
     """A single SSE progress event."""
-    step: str           # "separating" | "analyzing" | "processing" | "rendering" | "complete" | "error"
+    step: str           # "downloading" | "separating" | "analyzing" | "processing" | "rendering" | "complete" | "error"
     detail: str
     progress: float     # 0.0 - 1.0
 
@@ -151,6 +151,8 @@ class AudioMetadata:
     scale: Optional[str] = None
     key_confidence: Optional[float] = None
     has_modulation: bool = False
+    # Source quality (YouTube inputs)
+    source_quality: Optional[str] = None   # e.g. "youtube-opus-128kbps" or None for file uploads
     # Energy analysis (Day 3)
     mean_rms: Optional[float] = None       # From original mix audio (NOT summed stems)
     stem_analysis: Optional[StemAnalysis] = None
