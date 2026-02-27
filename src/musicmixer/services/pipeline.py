@@ -884,6 +884,44 @@ def run_pipeline(
         # above the limiter ceiling, causing audible distortion.
         safety_ceiling = 10 ** (-1.0 / 20.0)
         mixed = soft_clip(mixed, safety_ceiling, knee_db=2.0)
+
+        # === STEP 14.7: Post-soft-clip LUFS correction (iterate-and-converge) ===
+        # master_static normalizes + limits, but the limiter eats 2-3 dB of
+        # integrated loudness. The soft clip shaves a bit more. This loop
+        # measures the actual LUFS and applies a bounded correction + a light
+        # second limiter pass to catch any re-introduced peaks.
+        TARGET_MASTER_LUFS = -12.0
+        _lufs_meter = pyln.Meter(sr)
+        _meas = np.column_stack([mixed, mixed]) if mixed.ndim == 1 else mixed
+        post_clip_lufs = _lufs_meter.integrated_loudness(_meas)
+
+        if post_clip_lufs > -70.0 and post_clip_lufs < TARGET_MASTER_LUFS - 1.0:
+            correction_db = TARGET_MASTER_LUFS - post_clip_lufs
+            correction_db = min(correction_db, 3.0)  # safety cap: never boost more than 3 dB
+
+            # Apply correction unconditionally -- do NOT cap by peak headroom.
+            # The second limiter pass below will handle any peaks that exceed ceiling.
+            mixed = mixed * (10 ** (correction_db / 20.0))
+            logger.info(
+                "Session %s: post-soft-clip LUFS correction +%.1f dB (%.1f -> ~%.1f LUFS)",
+                session_id, correction_db, post_clip_lufs, post_clip_lufs + correction_db,
+            )
+
+            # Second (lighter) limiter pass to catch re-introduced peaks.
+            mixed = true_peak_limit(
+                mixed, sr,
+                ceiling_dbtp=-1.0,
+                lookahead_ms=1.5,
+                release_ms=50.0,
+            )
+
+            # Log final LUFS for verification
+            _meas_final = np.column_stack([mixed, mixed]) if mixed.ndim == 1 else mixed
+            final_lufs = _lufs_meter.integrated_loudness(_meas_final)
+            logger.info(
+                "Session %s: final LUFS after correction + re-limit: %.1f",
+                session_id, final_lufs,
+            )
     else:
         # === STEP 14: Look-ahead peak limiter (standard path) ===
         # Key insight: limit to a LOWER ceiling than the final -1.0 dBTP target.
