@@ -219,45 +219,20 @@ CAPABILITIES:
 - Choose transitions between sections (fade, crossfade, cut)
 - Set tempo and key matching strategy"""
 
-    # Section 2: Failure Mode Guards
-    section_2 = """CRITICAL MIXING RULES (violations produce bad audio):
+    # Section 2: Merged Mixing Rules (was Sections 2+3)
+    section_2 = """MIXING RULES:
 1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:no, labeled GOOD INSTRUMENTAL SOURCE). For the "other" stem: low-energy sections -> gain 0.2; medium+ energy -> gain 0.4-0.6 (preserves genre identity).
 2. VOCAL CLARITY: When vocals are active, reduce mid-frequency stems (guitar, piano, other) by 30% or more. Only drums + bass should be at full volume alongside vocals.
-3. NO RHYTHMIC COLLISION: Never use drums from both songs simultaneously. Never overlap bass lines from both songs.
-4. ENERGY MATCHING: Match vocal energy to instrumental energy level. Exception: quiet vocal over minimal beat is acceptable as an intentional artistic choice.
-5. DYNAMIC RANGE: The remix MUST have at least 1 contrast moment (e.g., breakdown -> drop) and use a minimum of 3 different energy levels across sections.
-6. ENDING: End with 4-8 bars of reduced energy or a natural outro. NEVER cut the remix at full energy -- it sounds broken.
-7. GAIN VARIATION: Vary gain profiles across sections. Strip down to drums+bass+vocals for contrast, then use full arrangement for impact. Flat gain across all sections produces a lifeless mix.
-8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 bar numbers with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section."""
+3. DYNAMIC RANGE: The remix MUST have at least 1 contrast moment (e.g., breakdown -> drop) and use a minimum of 3 different energy levels across sections.
+4. ENDING: End with 4-8 bars of reduced energy or a natural outro. NEVER cut the remix at full energy -- it sounds broken.
+5. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 bar numbers with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section.
+6. CLIPPING: Two peak-level stems at full volume (1.0) will clip. Reduce one by 3-6 dB (gain 0.5-0.7). Use the full 0.0-1.0 range -- avoid keeping all stems at 0.5-0.8 throughout.
+7. SOURCE REGIONS: Start vocal region at beginning of verse/chorus (not mid-phrase). Start instrumental region at beginning of GOOD INSTRUMENTAL SOURCE section."""
 
-    # Section 3: Mixing Advisory Notes
-    section_3 = """MIXING ADVISORY:
-- Stagger stem entries over 2-4 bars for natural-sounding builds (don't bring everything in at once).
-- Begin vocal sections 1-2 beats early for pickup notes (vocals often start before the downbeat).
-- Two peak-level stems at full volume (1.0) will clip. Reduce one by 3-6 dB (gain 0.5-0.7).
-- Section labels in the song data are approximate guidance, not rigid constraints. Use them to understand song structure, but your arrangement should serve the user's prompt.
-- Contrast creates energy: if a section has drums at 0.0, the next section's drums at 1.0 will feel powerful.
-- Muted stems (0.0) are a tool, not a failure -- silence in the right place is more powerful than sound.
-- Use the full 0.0-1.0 range. Avoid keeping all stems at 0.5-0.8 throughout -- that produces a flat, unengaging mix."""
-
-    # Section 6 (original): Section Rules
-    section_6 = f"""SECTION RULES:
-- Sections should be 4, 8, 16, 32, or 64 beats long (max 64 beats per section)
+    # Section 6 (original): Section Rules (trimmed -- tool schema covers details)
+    section_6 = """SECTION RULES:
 - Default: start with instrumental only (establishes the beat before vocals enter), unless the prompt suggests otherwise
-- Always end with instrumental only or a fade
-- section labels: "intro", "verse", "breakdown", "drop", "outro"
-- stem_gains values must be between 0.0 and 1.0 (never exceed 1.0 -- it causes distortion)
-- stem_gains must include all stems: {stem_list}
-- transition_in: "fade", "crossfade", or "cut"
-- transition_beats: how many beats the transition lasts (0-8, must be less than half the section length)"""
-
-    # Section 7 (original): Genre Guidance
-    section_7 = """GENRE GUIDANCE (infer from BPM + energy profile + section map):
-- Hip-hop/rap (80-100 BPM): Keep drums consistent throughout. Build energy through vocal intensity and layering, not drum drops.
-- EDM/dance (120-130 BPM): Use breakdown -> build -> drop patterns. Align drops with sections annotated DROP.
-- Pop/rock (100-130 BPM): Use verse-chorus dynamics -- stripped for verses, full for choruses.
-- R&B/soul (60-90 BPM): Smooth transitions, no abrupt changes. Layer elements gradually.
-- Jam/rock (variable BPM): Use instrumental sections for extended jams. Vocal gaps are natural entry points."""
+- Always end with instrumental only or a fade"""
 
     # Section 10 (original): Stem Artifact Awareness
     section_10 = """STEM SEPARATION ARTIFACTS:
@@ -273,7 +248,7 @@ WARNINGS: Populate this array when:
 - You're uncertain about a time reference or genre interpretation
 - Tempo/key gap is large and the remix may sound noticeably different from the originals"""
 
-    static_sections = [section_1, section_2, section_3, section_6, section_7, section_10, section_11]
+    static_sections = [section_1, section_2, section_6, section_10, section_11]
     static_block = {
         "type": "text",
         "text": "\n\n".join(static_sections),

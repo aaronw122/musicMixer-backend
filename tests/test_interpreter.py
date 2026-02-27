@@ -306,12 +306,10 @@ class TestBuildSystemPromptBlocks:
         # Key strings that uniquely identify each section
         section_markers = [
             "You are a music remix planner",           # Section 1
-            "CRITICAL MIXING RULES",                   # Section 2
-            "MIXING ADVISORY",                         # Section 3
+            "MIXING RULES:",                           # Section 2 (merged from Sections 2+3)
             "TRANSITIONS:",                            # Section 4
             "Template A (Standard Mashup)",            # Section 5
             "SECTION RULES:",                          # Section 6
-            "GENRE GUIDANCE",                          # Section 7
             "TEMPO MATCHING:",                         # Section 8
             "HANDLING AMBIGUOUS PROMPTS",              # Section 9
             "STEM SEPARATION ARTIFACTS",               # Section 10
@@ -337,11 +335,9 @@ class TestBuildSystemPromptBlocks:
         # These markers must be present regardless of variant
         required_markers = [
             "You are a music remix planner",
-            "CRITICAL MIXING RULES",
-            "MIXING ADVISORY",
+            "MIXING RULES:",
             "TRANSITIONS:",
             "SECTION RULES:",
-            "GENRE GUIDANCE",
             "TEMPO MATCHING:",
             "HANDLING AMBIGUOUS PROMPTS",
             "STEM SEPARATION ARTIFACTS",
