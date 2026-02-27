@@ -244,6 +244,8 @@ def _youtube_pipeline_wrapper(
             session=session,
             song_a_original_filename=result_a.title,
             song_b_original_filename=result_b.title,
+            source_quality_a=source_quality_a,
+            source_quality_b=source_quality_b,
         )
 
     except BaseException as exc:

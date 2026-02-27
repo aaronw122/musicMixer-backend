@@ -49,6 +49,8 @@ def run_pipeline(
     session: SessionState,
     song_a_original_filename: str = "",
     song_b_original_filename: str = "",
+    source_quality_a: str | None = None,
+    source_quality_b: str | None = None,
 ) -> None:
     """Complete Day 2 pipeline: separation, analysis, tempo matching, arrangement, export.
 
@@ -110,6 +112,9 @@ def run_pipeline(
         validate_stem,
     )
     from musicmixer.services.ducking import spectral_duck
+    from musicmixer.services.eq import apply_corrective_eq
+    from musicmixer.services.mastering import master_static
+    from musicmixer.services.multiband import multiband_compress
     from musicmixer.services.renderer import render_arrangement
     from musicmixer.services.separation import separate_stems
 
@@ -393,6 +398,15 @@ def run_pipeline(
         vocal_meta = meta_b
         inst_meta = meta_a
 
+    # === Source-quality-aware processing: derive per-song lossy flags ===
+    is_lossy_source_a = source_quality_a is not None and source_quality_a.startswith("youtube")
+    is_lossy_source_b = source_quality_b is not None and source_quality_b.startswith("youtube")
+
+    # Dynamically map lossy flags to vocal/instrumental based on plan.vocal_source.
+    # When vocals come from song B, the lossy flags must be swapped.
+    is_lossy_vocal_source = is_lossy_source_a if plan.vocal_source == "song_a" else is_lossy_source_b
+    is_lossy_inst_source = is_lossy_source_b if plan.vocal_source == "song_a" else is_lossy_source_a
+
     emit_progress(event_queue, {
         "step": "processing",
         "detail": "Standardizing audio...",
@@ -470,18 +484,52 @@ def run_pipeline(
     inst_audio = _filter_inactive(inst_audio, "instrumental")
 
     # === STEP 7.7: Vocal pre-filter bandpass ===
-    # Apply 150Hz-8kHz bandpass to vocal stems before tempo stretching.
+    # Apply 150Hz bandpass to vocal stems before tempo stretching.
     # Removes low-frequency bleed (bass rumble, kick artifacts) and
     # high-frequency separation noise, giving rubberband's R3 engine
     # cleaner input for transient detection. This subsumes the old 100Hz
     # HPF that was at step 11.2 (now removed), and also resolves the
     # compressor-before-HPF ordering issue since bass bleed is cleaned
     # before the compressor ever sees the signal.
+    #
+    # Upper cutoff: 16kHz when ab_per_stem_eq_v1 is True (preserves vocal
+    # air/breathiness), 8kHz when False (original behavior for A/B control).
+    vocal_bandpass_high_hz = 16000.0 if settings.ab_per_stem_eq_v1 else 8000.0
     if "vocals" in vocal_audio:
         vocal_audio["vocals"] = bandpass_filter(
-            vocal_audio["vocals"], sr, low_hz=150.0, high_hz=8000.0,
+            vocal_audio["vocals"], sr, low_hz=150.0, high_hz=vocal_bandpass_high_hz,
         )
-        logger.info("Session %s: Vocal bandpass pre-filter applied (150Hz-8kHz)", session_id)
+        logger.info(
+            "Session %s: Vocal bandpass pre-filter applied (150Hz-%.0fHz, ab_per_stem_eq_v1=%s)",
+            session_id, vocal_bandpass_high_hz, settings.ab_per_stem_eq_v1,
+        )
+
+    # === STEP 7.75: Broad preset EQ (before tempo stretch) ===
+    # Apply corrective EQ profiles per stem type. Only broad cuts/boosts (Q~1-3)
+    # are safe before stretching. Resonance notch cuts are deferred to step 9.5.
+    if settings.ab_per_stem_eq_v1:
+        vocal_eq_kwargs = {"halve_hf_boosts": True} if is_lossy_vocal_source else {}
+        inst_eq_kwargs = {"halve_hf_boosts": True} if is_lossy_inst_source else {}
+        for stem_type, audio in vocal_audio.items():
+            vocal_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+                apply_preset=True, apply_resonance_cuts=False, **vocal_eq_kwargs)
+        for stem_type, audio in inst_audio.items():
+            inst_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+                apply_preset=True, apply_resonance_cuts=False, **inst_eq_kwargs)
+
+        # LUFS checkpoint: after preset EQ
+        _eq_meter = pyln.Meter(sr)
+        for stem_type, audio in vocal_audio.items():
+            _eq_lufs = _eq_meter.integrated_loudness(audio)
+            logger.info("Session %s: LUFS after preset EQ (vocal/%s): %.1f", session_id, stem_type, _eq_lufs)
+        for stem_type, audio in inst_audio.items():
+            _eq_lufs = _eq_meter.integrated_loudness(audio)
+            logger.info("Session %s: LUFS after preset EQ (inst/%s): %.1f", session_id, stem_type, _eq_lufs)
+
+        logger.info(
+            "Session %s: Preset EQ applied (lossy_vocal=%s, lossy_inst=%s)",
+            session_id, is_lossy_vocal_source, is_lossy_inst_source,
+        )
 
     # === STEP 8: Compute tempo plan ===
     target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings, stretch_pct = compute_tempo_plan(
@@ -573,6 +621,21 @@ def run_pipeline(
         logger.warning(
             "Session %s: Post-stretch beat detection failed, using scaled grid: %s",
             session_id, e,
+        )
+
+    # === STEP 9.5: Narrow resonance notch cuts (after tempo stretch) ===
+    # Narrow notch filters (Q=4-6) must be applied after tempo stretch because
+    # they confuse rubberband's transient detector and cause ringing artifacts.
+    if settings.ab_per_stem_eq_v1 and settings.ab_resonance_detection_v1:
+        for stem_type, audio in vocal_audio.items():
+            vocal_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+                apply_preset=False, apply_resonance_cuts=True)
+        for stem_type, audio in inst_audio.items():
+            inst_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+                apply_preset=False, apply_resonance_cuts=True)
+        logger.info(
+            "Session %s: Resonance notch cuts applied (ab_resonance_detection_v1=%s)",
+            session_id, settings.ab_resonance_detection_v1,
         )
 
     # === STEP 11: Compress vocal dynamic range ===
@@ -728,33 +791,50 @@ def run_pipeline(
     # (step 13.7) handle dynamics. A second 3:1 compressor at the same threshold
     # produced ~9:1 effective ratio on vocals, making them flat and lifeless.
 
+    # === STEP 13.3: Multiband compression (after bus sum, before auto-leveler) ===
+    if settings.ab_multiband_comp_v1:
+        mixed = multiband_compress(mixed, sr)
+        # LUFS checkpoint: after multiband compression
+        _lufs_post_multiband = _meter.integrated_loudness(mixed)
+        logger.info("Session %s: LUFS after multiband compression: %.1f", session_id, _lufs_post_multiband)
 
     # === STEP 13.7: Slow auto-leveler ===
-    # Maintains consistent overall volume over 2-second windows.
+    # Maintains consistent overall volume over multi-second windows.
     # Gently boosts instrumental-only moments (between vocal phrases)
     # and slightly reduces the loudest peaks. Uses long window so
     # gain changes are imperceptible (no pumping).
-    # Detects from the INSTRUMENTAL bus so vocal gain transitions at
-    # section boundaries don't trigger pre-emptive cuts via the
-    # windowed look-ahead effect (which caused volume dips at ~11s/~22s).
-    autolv_window_sec = 4.0 if settings.ab_autolvl_tune_v1 else 3.0
-    autolv_max_boost_db = 1.0 if settings.ab_autolvl_tune_v1 else 2.0
-    autolv_max_cut_db = 2.0 if settings.ab_autolvl_tune_v1 else 3.0
-    mixed = auto_level(
-        mixed, sr,
-        window_sec=autolv_window_sec,       # AB_AUTOLVL_TUNE_V1: 3.0 -> 4.0
-        max_boost_db=autolv_max_boost_db,   # AB_AUTOLVL_TUNE_V1: 2.0 -> 1.0
-        max_cut_db=autolv_max_cut_db,       # AB_AUTOLVL_TUNE_V1: 3.0 -> 2.0
-        target_percentile=50, # Target the median level
-        detector_audio=instrumental_bus,  # CRITICAL: drives detection from stable instrumental bus
-        active_floor_db=-40.0,  # Treat lower-level tail/noise windows as inactive
-    )
+    #
+    # Auto-leveler tuning: ab_multiband_comp_v1 takes priority over
+    # ab_autolvl_tune_v1 for boost/cut. window_sec always follows
+    # ab_autolvl_tune_v1 regardless of multiband state.
+    window_sec = 4.0 if settings.ab_autolvl_tune_v1 else 3.0
+
+    if settings.ab_multiband_comp_v1:
+        # Multiband already handles per-frequency dynamics — reduce auto-leveler aggressiveness
+        auto_level_kwargs = dict(max_boost_db=1.0, max_cut_db=1.5, window_sec=window_sec)
+    elif settings.ab_autolvl_tune_v1:
+        # ab_autolvl_tune_v1 tuning: wider window, slightly tighter limits
+        auto_level_kwargs = dict(max_boost_db=1.5, max_cut_db=2.5, window_sec=window_sec)
+    else:
+        # Default tuning
+        auto_level_kwargs = dict(max_boost_db=2.0, max_cut_db=3.0, window_sec=window_sec)
+
+    # CRITICAL: detector_audio must be set to instrumental_bus to avoid the volume-dip
+    # regression (the ~11s/~22s dip bug). Without this, auto_level uses the mixed signal
+    # for detection, which causes vocals to trigger gain reduction on themselves.
+    auto_level_kwargs["detector_audio"] = instrumental_bus
+    auto_level_kwargs["target_percentile"] = 50.0
+    auto_level_kwargs["active_floor_db"] = -40.0
+
+    mixed = auto_level(mixed, sr, **auto_level_kwargs)
     logger.info(
-        "Session %s: Auto-leveler applied (window_sec=%.1f, max_boost_db=%.1f, max_cut_db=%.1f, AB_AUTOLVL_TUNE_V1=%s)",
+        "Session %s: Auto-leveler applied (window_sec=%.1f, max_boost_db=%.1f, max_cut_db=%.1f, "
+        "ab_multiband_comp_v1=%s, ab_autolvl_tune_v1=%s)",
         session_id,
-        autolv_window_sec,
-        autolv_max_boost_db,
-        autolv_max_cut_db,
+        auto_level_kwargs["window_sec"],
+        auto_level_kwargs["max_boost_db"],
+        auto_level_kwargs["max_cut_db"],
+        settings.ab_multiband_comp_v1,
         settings.ab_autolvl_tune_v1,
     )
 
@@ -762,43 +842,64 @@ def run_pipeline(
     _lufs_post_autolevel = _meter.integrated_loudness(mixed)
     logger.info("Session %s: LUFS after auto-level: %.1f", session_id, _lufs_post_autolevel)
 
-    # === STEP 14: Look-ahead peak limiter (replaces memoryless soft clip) ===
-    # Key insight: limit to a LOWER ceiling than the final -1.0 dBTP target.
-    # This creates headroom for the LUFS normalizer to boost in step 15.
-    # Without this gap, the limiter brings peaks to ceiling and the normalizer
-    # has zero headroom (the original 6 dB loudness shortfall).
-    #
-    # -7 dBTP ceiling provides ~6 dB of headroom for normalization.
-    # The normalizer in step 15 then boosts by up to 6 dB (constrained by
-    # the final -1.0 dBTP ceiling), and the safety clip catches any residual.
-    pre_limit_peak = true_peak(mixed)
-    mixed = true_peak_limit(mixed, sr, ceiling_dbtp=-7.0, lookahead_ms=5.0, release_ms=50.0)
-    post_limit_peak = true_peak(mixed)
-    logger.info(
-        "Session %s: Mix-bus limiter: peak %.3f -> %.3f",
-        session_id, pre_limit_peak, post_limit_peak,
-    )
+    # === STEPS 14/14.5/15/15.5: Mastering chain (mutual exclusion) ===
+    if settings.ab_static_mastering_v1:
+        # === STEP 14.5: Static mastering chain ===
+        # Constrained LUFS normalize (-12 LUFS) then limiter (-1.0 dBTP).
+        # Replaces the standard limiter -> normalize -> soft-clip chain.
+        master_kwargs: dict = dict(target_lufs=-12.0, ceiling_dbtp=-1.0)
+        if is_lossy_source_a or is_lossy_source_b:
+            master_kwargs["lossy_lpf_hz"] = 16000  # gentle LPF at spectral ceiling
+        mixed = master_static(mixed, sr, **master_kwargs)
 
-    # LUFS checkpoint: after limiter
-    _lufs_post_limiter = _meter.integrated_loudness(mixed)
-    logger.info("Session %s: LUFS after limiter: %.1f", session_id, _lufs_post_limiter)
+        # LUFS checkpoint: after static mastering
+        _lufs_post_master = _meter.integrated_loudness(mixed)
+        logger.info("Session %s: LUFS after static mastering: %.1f", session_id, _lufs_post_master)
 
-    # === STEP 15: Peak-constrained LUFS normalization ===
-    # Applies the minimum of (LUFS gain, peak-safe gain) so we never boost
-    # past the ceiling. Eliminates the old normalize-then-trim loop that was
-    # undoing LUFS gains entirely.
-    mixed = lufs_normalize_constrained(mixed, sr, target_lufs=-12.0, ceiling_dbtp=-1.0)
-    logger.info("Session %s: Peak-constrained LUFS normalization applied", session_id)
+        # === STEP 14.6: Safety soft clip ===
+        # Catches inter-sample true peaks that can exceed -1.0 dBTP after
+        # MP3 encoding. Without this, lossy codecs can reconstruct peaks
+        # above the limiter ceiling, causing audible distortion.
+        safety_ceiling = 10 ** (-1.0 / 20.0)
+        mixed = soft_clip(mixed, safety_ceiling, knee_db=2.0)
+    else:
+        # === STEP 14: Look-ahead peak limiter (standard path) ===
+        # Key insight: limit to a LOWER ceiling than the final -1.0 dBTP target.
+        # This creates headroom for the LUFS normalizer to boost in step 15.
+        # Without this gap, the limiter brings peaks to ceiling and the normalizer
+        # has zero headroom (the original 6 dB loudness shortfall).
+        #
+        # -7 dBTP ceiling provides ~6 dB of headroom for normalization.
+        # The normalizer in step 15 then boosts by up to 6 dB (constrained by
+        # the final -1.0 dBTP ceiling), and the safety clip catches any residual.
+        pre_limit_peak = true_peak(mixed)
+        mixed = true_peak_limit(mixed, sr, ceiling_dbtp=-7.0, lookahead_ms=5.0, release_ms=50.0)
+        post_limit_peak = true_peak(mixed)
+        logger.info(
+            "Session %s: Mix-bus limiter: peak %.3f -> %.3f",
+            session_id, pre_limit_peak, post_limit_peak,
+        )
 
-    # LUFS checkpoint: after normalization
-    _lufs_post_normalize = _meter.integrated_loudness(mixed)
-    logger.info("Session %s: LUFS after normalize: %.1f (target: -12.0)", session_id, _lufs_post_normalize)
+        # LUFS checkpoint: after limiter
+        _lufs_post_limiter = _meter.integrated_loudness(mixed)
+        logger.info("Session %s: LUFS after limiter: %.1f", session_id, _lufs_post_limiter)
 
-    # === STEP 15.5: Safety soft clip (catch residual inter-sample peaks) ===
-    # Narrow 2.0 dB knee catches edge cases (fade boundaries, gain
-    # interpolation artifacts) without altering LUFS.
-    safety_ceiling = 10 ** (-1.0 / 20.0)
-    mixed = soft_clip(mixed, safety_ceiling, knee_db=2.0)
+        # === STEP 15: Peak-constrained LUFS normalization ===
+        # Applies the minimum of (LUFS gain, peak-safe gain) so we never boost
+        # past the ceiling. Eliminates the old normalize-then-trim loop that was
+        # undoing LUFS gains entirely.
+        mixed = lufs_normalize_constrained(mixed, sr, target_lufs=-12.0, ceiling_dbtp=-1.0)
+        logger.info("Session %s: Peak-constrained LUFS normalization applied", session_id)
+
+        # LUFS checkpoint: after normalization
+        _lufs_post_normalize = _meter.integrated_loudness(mixed)
+        logger.info("Session %s: LUFS after normalize: %.1f (target: -12.0)", session_id, _lufs_post_normalize)
+
+        # === STEP 15.5: Safety soft clip (catch residual inter-sample peaks) ===
+        # Narrow 2.0 dB knee catches edge cases (fade boundaries, gain
+        # interpolation artifacts) without altering LUFS.
+        safety_ceiling = 10 ** (-1.0 / 20.0)
+        mixed = soft_clip(mixed, safety_ceiling, knee_db=2.0)
 
     # === STEP 16: Fades ===
     skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
