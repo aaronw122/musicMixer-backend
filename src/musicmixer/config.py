@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     ab_multiband_comp_v1: bool = False
     ab_static_mastering_v1: bool = False
 
+    # Taste training (candidate generation + scoring)
+    ab_taste_model_v1: bool = False
+
     model_config = SettingsConfigDict(env_file=".env")
 
 
