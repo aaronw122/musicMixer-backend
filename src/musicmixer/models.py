@@ -14,6 +14,14 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
+# Fixed convention: Song A always provides vocals, Song B always provides
+# instrumentals. Both analysis.py and interpreter.py reference this constant
+# to prevent drift.
+# ---------------------------------------------------------------------------
+VOCAL_SOURCE: str = "song_a"
+
+
+# ---------------------------------------------------------------------------
 # Session management (Step 1)
 # ---------------------------------------------------------------------------
 
@@ -102,7 +110,7 @@ class CrossSongRelationships:
     loudness_diff_db: float         # 20*log10(rms_a/rms_b), positive=A louder
     energy_profile_a: str           # "consistent high" / "wide dynamic range"
     energy_profile_b: str
-    vocal_source: str               # "song_a" or "song_b"
+    vocal_source: str               # Always "song_a" — fixed convention, Song A provides vocals
     vocal_prominence_a_db: float    # dB above accompaniment
     vocal_prominence_b_db: float
     instrumental_sections: list[str]  # bar ranges from recommended source
@@ -177,7 +185,7 @@ class Section:
 @dataclass
 class RemixPlan:
     """Complete remix plan — produced by LLM (Day 3) or deterministic fallback."""
-    vocal_source: str                           # "song_a" | "song_b"
+    vocal_source: str                           # Always "song_a" — Song A is the fixed vocal source
     start_time_vocal: float                     # Seconds, original tempo
     end_time_vocal: float
     start_time_instrumental: float
