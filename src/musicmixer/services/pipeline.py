@@ -6,10 +6,19 @@ Complete 15-step chain: separation -> analysis -> plan -> processing -> render -
 
 import logging
 import queue
+import time
 
 from musicmixer.models import LyricsData, SessionState
 
 logger = logging.getLogger(__name__)
+
+# Maximum wall-clock time (seconds) for any single DSP step on the enhanced
+# pipeline path.  If a step exceeds this, its output is discarded and
+# processing continues with the pre-step signal state.  This is a post-hoc
+# check, not a preemptive kill -- a degenerate step will still block for
+# the full duration.  The guard's value is (1) logging which step was slow,
+# and (2) not applying potentially corrupted output.
+DSP_STEP_TIMEOUT_S = 120.0
 
 
 def emit_progress(
@@ -528,11 +537,35 @@ def run_pipeline(
         vocal_eq_kwargs = {"halve_hf_boosts": True} if is_lossy_vocal_source else {}
         inst_eq_kwargs = {"halve_hf_boosts": True} if is_lossy_inst_source else {}
         for stem_type, audio in vocal_audio.items():
-            vocal_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+            _pre = vocal_audio[stem_type]
+            _t0 = time.monotonic()
+            _result = apply_corrective_eq(audio, sr, stem_type,
                 apply_preset=True, apply_resonance_cuts=False, **vocal_eq_kwargs)
+            _elapsed = time.monotonic() - _t0
+            if _elapsed > DSP_STEP_TIMEOUT_S:
+                logger.error(
+                    "Session %s: DSP step 'preset_eq vocal/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                    session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
+                )
+                vocal_audio[stem_type] = _pre
+            else:
+                vocal_audio[stem_type] = _result
+                logger.info("Session %s: preset_eq vocal/%s took %.2fs", session_id, stem_type, _elapsed)
         for stem_type, audio in inst_audio.items():
-            inst_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+            _pre = inst_audio[stem_type]
+            _t0 = time.monotonic()
+            _result = apply_corrective_eq(audio, sr, stem_type,
                 apply_preset=True, apply_resonance_cuts=False, **inst_eq_kwargs)
+            _elapsed = time.monotonic() - _t0
+            if _elapsed > DSP_STEP_TIMEOUT_S:
+                logger.error(
+                    "Session %s: DSP step 'preset_eq inst/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                    session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
+                )
+                inst_audio[stem_type] = _pre
+            else:
+                inst_audio[stem_type] = _result
+                logger.info("Session %s: preset_eq inst/%s took %.2fs", session_id, stem_type, _elapsed)
 
         # LUFS checkpoint: after preset EQ
         _eq_meter = pyln.Meter(sr)
@@ -645,11 +678,35 @@ def run_pipeline(
     # they confuse rubberband's transient detector and cause ringing artifacts.
     if settings.ab_per_stem_eq_v1 and settings.ab_resonance_detection_v1:
         for stem_type, audio in vocal_audio.items():
-            vocal_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+            _pre = vocal_audio[stem_type]
+            _t0 = time.monotonic()
+            _result = apply_corrective_eq(audio, sr, stem_type,
                 apply_preset=False, apply_resonance_cuts=True)
+            _elapsed = time.monotonic() - _t0
+            if _elapsed > DSP_STEP_TIMEOUT_S:
+                logger.error(
+                    "Session %s: DSP step 'resonance_eq vocal/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                    session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
+                )
+                vocal_audio[stem_type] = _pre
+            else:
+                vocal_audio[stem_type] = _result
+                logger.info("Session %s: resonance_eq vocal/%s took %.2fs", session_id, stem_type, _elapsed)
         for stem_type, audio in inst_audio.items():
-            inst_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+            _pre = inst_audio[stem_type]
+            _t0 = time.monotonic()
+            _result = apply_corrective_eq(audio, sr, stem_type,
                 apply_preset=False, apply_resonance_cuts=True)
+            _elapsed = time.monotonic() - _t0
+            if _elapsed > DSP_STEP_TIMEOUT_S:
+                logger.error(
+                    "Session %s: DSP step 'resonance_eq inst/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                    session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
+                )
+                inst_audio[stem_type] = _pre
+            else:
+                inst_audio[stem_type] = _result
+                logger.info("Session %s: resonance_eq inst/%s took %.2fs", session_id, stem_type, _elapsed)
         logger.info(
             "Session %s: Resonance notch cuts applied (ab_resonance_detection_v1=%s)",
             session_id, settings.ab_resonance_detection_v1,
@@ -815,7 +872,19 @@ def run_pipeline(
 
     # === STEP 13.3: Multiband compression (after bus sum, before auto-leveler) ===
     if settings.ab_multiband_comp_v1:
-        mixed = multiband_compress(mixed, sr)
+        _pre_multiband = mixed
+        _t0 = time.monotonic()
+        _multiband_result = multiband_compress(mixed, sr)
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > DSP_STEP_TIMEOUT_S:
+            logger.error(
+                "Session %s: DSP step 'multiband_compress' exceeded %.0fs timeout (%.1fs), skipping",
+                session_id, DSP_STEP_TIMEOUT_S, _elapsed,
+            )
+            mixed = _pre_multiband
+        else:
+            mixed = _multiband_result
+            logger.info("Session %s: multiband_compress took %.2fs", session_id, _elapsed)
         # LUFS checkpoint: after multiband compression
         _lufs_post_multiband = _meter.integrated_loudness(mixed)
         logger.info("Session %s: LUFS after multiband compression: %.1f", session_id, _lufs_post_multiband)
@@ -877,7 +946,19 @@ def run_pipeline(
         master_kwargs: dict = dict(target_lufs=-12.0, ceiling_dbtp=-1.0)
         if is_lossy_source_a or is_lossy_source_b:
             master_kwargs["lossy_lpf_hz"] = 16000  # gentle LPF at spectral ceiling
-        mixed = master_static(mixed, sr, **master_kwargs)
+        _pre_master = mixed
+        _t0 = time.monotonic()
+        _master_result = master_static(mixed, sr, **master_kwargs)
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > DSP_STEP_TIMEOUT_S:
+            logger.error(
+                "Session %s: DSP step 'master_static' exceeded %.0fs timeout (%.1fs), skipping",
+                session_id, DSP_STEP_TIMEOUT_S, _elapsed,
+            )
+            mixed = _pre_master
+        else:
+            mixed = _master_result
+            logger.info("Session %s: master_static took %.2fs", session_id, _elapsed)
 
         # LUFS checkpoint: after static mastering
         _lufs_post_master = _meter.integrated_loudness(mixed)
