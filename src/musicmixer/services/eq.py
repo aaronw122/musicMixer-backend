@@ -53,23 +53,22 @@ RESONANCE_ELIGIBLE_STEMS = {"vocals", "drums", "other"}
 _EQ_PRESETS: dict[str, list[tuple[type, dict[str, Any]]]] = {
     "vocals": [
         (HighpassFilter, {"cutoff_frequency_hz": 80.0}),
-        (PeakFilter, {"cutoff_frequency_hz": 250.0, "gain_db": -2.5, "q": Q_CUT}),
+        (PeakFilter, {"cutoff_frequency_hz": 250.0, "gain_db": -1.5, "q": Q_CUT}),
         (PeakFilter, {"cutoff_frequency_hz": 800.0, "gain_db": -1.5, "q": Q_CUT}),
         (PeakFilter, {"cutoff_frequency_hz": 3000.0, "gain_db": 0.75, "q": Q_BOOST}),
         (LowpassFilter, {"cutoff_frequency_hz": 16000.0}),
     ],
     "drums": [
         (HighpassFilter, {"cutoff_frequency_hz": 30.0}),
-        (PeakFilter, {"cutoff_frequency_hz": 400.0, "gain_db": -3.0, "q": Q_CUT}),
+        (PeakFilter, {"cutoff_frequency_hz": 400.0, "gain_db": -1.5, "q": Q_CUT}),
         (PeakFilter, {"cutoff_frequency_hz": 800.0, "gain_db": -2.0, "q": Q_CUT}),
         (PeakFilter, {"cutoff_frequency_hz": 5000.0, "gain_db": 0.75, "q": Q_BOOST}),
         (HighShelfFilter, {"cutoff_frequency_hz": 12000.0, "gain_db": -1.0}),
     ],
     "bass": [
         (HighpassFilter, {"cutoff_frequency_hz": 30.0}),
-        (PeakFilter, {"cutoff_frequency_hz": 60.0, "gain_db": 0.75, "q": Q_BOOST}),
         (PeakFilter, {"cutoff_frequency_hz": 250.0, "gain_db": -2.0, "q": Q_CUT}),
-        (PeakFilter, {"cutoff_frequency_hz": 800.0, "gain_db": -3.0, "q": Q_CUT}),
+        (PeakFilter, {"cutoff_frequency_hz": 800.0, "gain_db": -2.0, "q": Q_CUT}),
         (LowpassFilter, {"cutoff_frequency_hz": 8000.0}),
     ],
     "guitar": [
@@ -77,11 +76,13 @@ _EQ_PRESETS: dict[str, list[tuple[type, dict[str, Any]]]] = {
         (PeakFilter, {"cutoff_frequency_hz": 200.0, "gain_db": -2.0, "q": Q_CUT}),
         (PeakFilter, {"cutoff_frequency_hz": 1200.0, "gain_db": -1.5, "q": Q_CUT}),
         (PeakFilter, {"cutoff_frequency_hz": 3500.0, "gain_db": 0.75, "q": Q_BOOST}),
+        (LowpassFilter, {"cutoff_frequency_hz": 14000.0}),
     ],
     "piano": [
         (HighpassFilter, {"cutoff_frequency_hz": 60.0}),
         (PeakFilter, {"cutoff_frequency_hz": 300.0, "gain_db": -1.5, "q": Q_CUT}),
         (PeakFilter, {"cutoff_frequency_hz": 2500.0, "gain_db": 0.75, "q": Q_BOOST}),
+        (LowpassFilter, {"cutoff_frequency_hz": 16000.0}),
     ],
     "other": [
         (HighpassFilter, {"cutoff_frequency_hz": 80.0}),
@@ -190,7 +191,8 @@ def detect_resonances(
     # Smoothed baseline via moving average (wide window for broad shape)
     baseline_window = max(1, int(len(mag_db) * 0.05))  # 5% of spectrum width
     kernel = np.ones(baseline_window) / baseline_window
-    baseline_db = np.convolve(mag_db, kernel, mode="same")
+    padded = np.pad(mag_db, baseline_window // 2, mode="edge")
+    baseline_db = np.convolve(padded, kernel, mode="valid")[: len(mag_db)]
 
     # Find peaks above baseline within specified frequency ranges
     prominence = mag_db - baseline_db
