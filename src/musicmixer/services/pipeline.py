@@ -51,6 +51,7 @@ def run_pipeline(
     song_b_original_filename: str = "",
     source_quality_a: str | None = None,
     source_quality_b: str | None = None,
+    force_vocal_source: str | None = None,
 ) -> None:
     """Complete Day 2 pipeline: separation, analysis, tempo matching, arrangement, export.
 
@@ -364,6 +365,10 @@ def run_pipeline(
     }, session=session)
 
     plan = interpret_prompt(prompt, meta_a, meta_b, lyrics_a=lyrics_a_data, lyrics_b=lyrics_b_data)
+
+    if force_vocal_source is not None:
+        plan.vocal_source = force_vocal_source
+        logger.info("Session %s: Forced vocal_source=%s", session_id, force_vocal_source)
 
     if plan.used_fallback:
         logger.warning(
