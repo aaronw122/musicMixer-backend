@@ -15,6 +15,7 @@ dependencies = [
     "onnxruntime>=1.24.2",
     "pydantic-settings>=2.13.1",
     "pydub>=0.25.1",
+    "pedalboard>=0.9.0",
     "pyloudnorm>=0.2.0",
     "python-multipart>=0.0.22",
     "scipy>=1.17.1",
