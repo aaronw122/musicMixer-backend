@@ -186,3 +186,4 @@ class RemixPlan:
     explanation: str
     warnings: list[str] = field(default_factory=list)
     used_fallback: bool = False
+

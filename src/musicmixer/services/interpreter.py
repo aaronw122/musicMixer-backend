@@ -7,8 +7,8 @@ LLM failure.
 Day 2 fallback functions (generate_fallback_plan, default_arrangement) are
 preserved at the bottom of this file.
 
-Day 3 song structure integration: 4-layer system prompt with section maps,
-stem character, cross-song relationships, and 7 failure mode guards.
+Day 3 song structure integration: 5-layer system prompt with section maps,
+stem character, cross-song relationships, lyrics, and 8 failure mode guards.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from pathlib import Path
 import anthropic
 
 from musicmixer.config import settings
-from musicmixer.models import AudioMetadata, RemixPlan, Section
+from musicmixer.models import AudioMetadata, LyricsData, RemixPlan, Section
 from musicmixer.services.tempo import compute_stretch_pct, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -206,8 +206,10 @@ def _build_system_prompt(
     key_matching_detail: str,
     total_available_beats: int,
     stretch_pct: float | None = None,
+    lyrics_a: LyricsData | None = None,
+    lyrics_b: LyricsData | None = None,
 ) -> str:
-    """Construct the full system prompt with 4-layer song data and failure mode guards."""
+    """Construct the full system prompt with 5-layer song data and failure mode guards."""
 
     # Determine which stems are available
     is_4stem = settings.stem_backend == "local"
@@ -260,7 +262,8 @@ CAPABILITIES:
 4. ENERGY MATCHING: Match vocal energy to instrumental energy level. Exception: quiet vocal over minimal beat is acceptable as an intentional artistic choice.
 5. DYNAMIC RANGE: The remix MUST have at least 1 contrast moment (e.g., breakdown -> drop) and use a minimum of 3 different energy levels across sections.
 6. ENDING: End with 4-8 bars of reduced energy or a natural outro. NEVER cut the remix at full energy -- it sounds broken.
-7. GAIN VARIATION: Vary gain profiles across sections. Strip down to drums+bass+vocals for contrast, then use full arrangement for impact. Flat gain across all sections produces a lifeless mix.""")
+7. GAIN VARIATION: Vary gain profiles across sections. Strip down to drums+bass+vocals for contrast, then use full arrangement for impact. Flat gain across all sections produces a lifeless mix.
+8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 bar numbers with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section.""")
 
     # Section 3: Mixing Advisory Notes
     sections.append("""MIXING ADVISORY:
@@ -401,6 +404,11 @@ WARNINGS: Populate this array when:
     if cross_song:
         song_data_parts.append("\n=== LAYER 4: CROSS-SONG ===")
         song_data_parts.append(cross_song)
+
+    # Layer 5: Lyrics
+    lyrics_layer = _build_lyrics_layer(lyrics_a, lyrics_b)
+    if lyrics_layer:
+        song_data_parts.append(lyrics_layer)
 
     sections.append("SONG DATA:\n\n" + "\n".join(song_data_parts))
 
@@ -557,6 +565,48 @@ def _song_filename(meta: AudioMetadata) -> str:
     return "uploaded song"
 
 
+def _build_lyrics_layer(
+    lyrics_a: LyricsData | None,
+    lyrics_b: LyricsData | None,
+    max_lines_per_song: int = 60,
+) -> str:
+    """Build Layer 5: Lyrics text for the system prompt.
+
+    Formats synced lyrics with bar numbers, plain lyrics with just text.
+    Caps at max_lines_per_song per song; samples evenly if longer.
+    Returns empty string if no lyrics exist for either song.
+    """
+    if not lyrics_a and not lyrics_b:
+        return ""
+
+    parts: list[str] = [
+        "\n=== LAYER 5: LYRICS ===",
+        "Use these lyrics to avoid cutting mid-phrase, identify hooks, and match themes to the prompt.",
+    ]
+
+    for label, lyrics in [("Song A", lyrics_a), ("Song B", lyrics_b)]:
+        if not lyrics or not lyrics.lines:
+            parts.append(f"\n{label} lyrics: no lyrics found.")
+            continue
+
+        sync_label = "synced" if lyrics.is_synced else "plain"
+        parts.append(f"\n{label} lyrics ({sync_label}, {len(lyrics.lines)} lines):")
+
+        lines = lyrics.lines
+        # Sample evenly if too many lines
+        if len(lines) > max_lines_per_song:
+            step = len(lines) / max_lines_per_song
+            lines = [lines[int(i * step)] for i in range(max_lines_per_song)]
+
+        for line in lines:
+            if line.bar_number is not None:
+                parts.append(f"  bar {line.bar_number:>3}: {line.text}")
+            else:
+                parts.append(f"  {line.text}")
+
+    return "\n".join(parts)
+
+
 def _build_cross_song_layer(
     meta_a: AudioMetadata,
     meta_b: AudioMetadata,
@@ -664,12 +714,12 @@ def _compute_key_guidance(
 # ---------------------------------------------------------------------------
 
 def _build_few_shot_messages() -> list[dict]:
-    """Build 3 few-shot examples showing how to interpret the 4-layer song data.
+    """Build 3 few-shot examples showing how to interpret the 5-layer song data.
 
     Examples demonstrate:
-    1. Clear directive with section map alignment
-    2. Vague prompt using vocal gaps and energy profiles
-    3. Contradictory prompt with extreme tempo mismatch
+    1. Clear directive with section map alignment + Layer 5 lyrics
+    2. Vague prompt using vocal gaps and energy profiles (no lyrics -- graceful degradation)
+    3. Contradictory prompt with extreme tempo mismatch (no lyrics -- graceful degradation)
     """
     is_4stem = settings.stem_backend == "local"
 
@@ -677,7 +727,7 @@ def _build_few_shot_messages() -> list[dict]:
         return _build_few_shot_messages_4stem()
 
     return [
-        # Example 1: Clear directive, uses section map + GOOD INSTRUMENTAL SOURCE
+        # Example 1: Clear directive, uses section map + GOOD INSTRUMENTAL SOURCE + Layer 5 lyrics
         {
             "role": "user",
             "content": (
@@ -711,7 +761,23 @@ def _build_few_shot_messages() -> list[dict]:
                 "=== LAYER 4: CROSS-SONG ===\n"
                 "Loudness: Song A ~5 dB louder. Reduce Song A stems ~5 dB.\n"
                 "Vocal source: Song A (+8 dB, clean). Song B has more bleed (+3 dB).\n"
-                "Instrumental source: Song B clean sections at bars 1-8, 41-72, 89-103."
+                "Instrumental source: Song B clean sections at bars 1-8, 41-72, 89-103.\n\n"
+                "=== LAYER 5: LYRICS ===\n"
+                "Use these lyrics to avoid cutting mid-phrase, identify hooks, and match themes to the prompt.\n\n"
+                "Song A lyrics (synced, 12 lines):\n"
+                "  bar   9: Rolling through the city late at night\n"
+                "  bar  11: Every streetlight burning way too bright\n"
+                "  bar  14: Said she wanna ride so we ride all night\n"
+                "  bar  17: Windows down and feeling so alive\n"
+                "  bar  41: Roll with me roll with me now\n"
+                "  bar  43: Roll with me roll with me now\n"
+                "  bar  45: Everybody knows that we run this town\n"
+                "  bar  47: Roll with me roll with me now\n"
+                "  bar  57: Back on the block where it all began\n"
+                "  bar  59: Same old crew with the same old plan\n"
+                "  bar  73: Roll with me roll with me now\n"
+                "  bar  75: Everybody knows that we run this town\n"
+                "Song B lyrics: no lyrics found."
             ),
         },
         {
@@ -739,7 +805,7 @@ def _build_few_shot_messages() -> list[dict]:
                         ],
                         "tempo_source": "song_b",
                         "key_source": "none",
-                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted to full. I used Song B's clean instrumental sections (bars 41-72) for the main groove, starting with their sparse intro. Mid-frequency stems are reduced when vocals are active for clarity.",
+                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted to full. Starting with the hook from Track One ('Roll with me') at bar 41 for the drop gives immediate impact -- the chorus lyrics align with the section boundary at bar 41. Mid-frequency stems are reduced when vocals are active for clarity.",
                         "warnings": [],
                     },
                 }
@@ -858,10 +924,10 @@ def _build_few_shot_messages_4stem() -> list[dict]:
     """Build few-shot examples adapted for 4-stem (local) mode.
 
     Same structure as 6-stem but without guitar/piano in stem_gains.
-    Uses the new 4-layer song data format.
+    Uses the new 5-layer song data format.
     """
     return [
-        # Example 1: Clear directive with section map
+        # Example 1: Clear directive with section map + Layer 5 lyrics
         {
             "role": "user",
             "content": (
@@ -874,7 +940,21 @@ def _build_few_shot_messages_4stem() -> list[dict]:
                 "Vocals: moderate, +3 dB. Energy: wide dynamic range.\n\n"
                 "=== LAYER 4: CROSS-SONG ===\n"
                 "Loudness: Song A ~5 dB louder.\n"
-                "Vocal source: Song A (+8 dB, clean)."
+                "Vocal source: Song A (+8 dB, clean).\n\n"
+                "=== LAYER 5: LYRICS ===\n"
+                "Use these lyrics to avoid cutting mid-phrase, identify hooks, and match themes to the prompt.\n\n"
+                "Song A lyrics (synced, 10 lines):\n"
+                "  bar   9: Rolling through the city late at night\n"
+                "  bar  11: Every streetlight burning way too bright\n"
+                "  bar  14: Said she wanna ride so we ride all night\n"
+                "  bar  17: Windows down and feeling so alive\n"
+                "  bar  41: Roll with me roll with me now\n"
+                "  bar  43: Roll with me roll with me now\n"
+                "  bar  45: Everybody knows that we run this town\n"
+                "  bar  57: Back on the block where it all began\n"
+                "  bar  59: Same old crew with the same old plan\n"
+                "  bar  73: Roll with me roll with me now\n"
+                "Song B lyrics: no lyrics found."
             ),
         },
         {
@@ -902,7 +982,7 @@ def _build_few_shot_messages_4stem() -> list[dict]:
                         ],
                         "tempo_source": "song_b",
                         "key_source": "none",
-                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted to full. Mid-frequency stems are reduced when vocals are active for clarity. The breakdown strips to bass and other for contrast before the full drop.",
+                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted to full. The hook 'Roll with me' starts at bar 41 which aligns with the chorus section, so I used that as the entry point for the drop. The breakdown strips to bass and other for contrast before the full drop.",
                         "warnings": [],
                     },
                 }
@@ -1260,6 +1340,8 @@ def interpret_prompt(
     prompt: str,
     song_a_meta: AudioMetadata,
     song_b_meta: AudioMetadata,
+    lyrics_a: LyricsData | None = None,
+    lyrics_b: LyricsData | None = None,
 ) -> RemixPlan:
     """Convert user prompt + song metadata into a structured remix plan.
 
@@ -1297,6 +1379,8 @@ def interpret_prompt(
         _key_available, key_matching_detail,
         total_available_beats,
         stretch_pct=stretch_pct,
+        lyrics_a=lyrics_a,
+        lyrics_b=lyrics_b,
     )
 
     # Build messages: few-shot examples + user prompt
