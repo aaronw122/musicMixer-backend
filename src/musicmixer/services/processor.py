@@ -507,12 +507,20 @@ def lufs_normalize_constrained(
     sr: int,
     target_lufs: float = -12.0,
     ceiling_dbtp: float = -1.0,
+    headroom_db: float = 0.0,
 ) -> np.ndarray:
     """LUFS normalize with peak constraint — never applies gain it can't keep.
 
     Computes both the LUFS gain needed and the maximum gain allowed by the
     peak ceiling, then applies whichever is smaller. This prevents the
     normalize-then-trim loop where LUFS boost is undone by peak limiting.
+
+    Args:
+        headroom_db: Extra headroom above the ceiling for peak-constraint math.
+            When a limiter immediately follows (e.g. in the static mastering chain),
+            set this to ~3.0 dB so the normalizer can push peaks slightly above
+            the ceiling, letting the limiter handle them. Default 0.0 preserves
+            backward compatibility for the standard path where no limiter follows.
 
     Returns the gained signal. Logs a warning when peak-constrained.
     """
@@ -525,12 +533,12 @@ def lufs_normalize_constrained(
         logger.warning("Cannot normalize silent audio")
         return audio
 
-    ceiling = 10 ** (ceiling_dbtp / 20.0)
+    ceiling_with_headroom = 10 ** ((ceiling_dbtp + headroom_db) / 20.0)
     current_peak = true_peak(audio)
 
     lufs_gain_db = target_lufs - current_lufs
-    # Maximum gain before peak exceeds ceiling
-    peak_gain_db = 20 * np.log10(ceiling / max(current_peak, 1e-12))
+    # Maximum gain before peak exceeds ceiling (with headroom allowance)
+    peak_gain_db = 20 * np.log10(ceiling_with_headroom / max(current_peak, 1e-12))
 
     applied_gain_db = min(lufs_gain_db, peak_gain_db)
     applied_gain_db = float(np.clip(applied_gain_db, -12.0, 12.0))
