@@ -16,6 +16,7 @@ Band layout:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -215,11 +216,14 @@ def multiband_compress(
     if len(audio) == 0:
         return audio
 
+    t_total = time.monotonic()
+
     band_settings = dict(DEFAULT_BAND_SETTINGS)
     if settings is not None:
         band_settings.update(settings)
 
     # Step 1: Measure integrated LUFS of input before band splitting
+    t0 = time.monotonic()
     meter = pyloudnorm.Meter(sr)
     # pyloudnorm requires stereo (N, 2) or mono (N,) — handle both
     if audio.ndim == 1:
@@ -227,9 +231,12 @@ def multiband_compress(
     else:
         lufs_input_audio = audio
     input_lufs = meter.integrated_loudness(lufs_input_audio)
+    logger.info("multiband_compress: input LUFS measurement took %.2fs", time.monotonic() - t0)
 
     # Step 2: Split into 4 bands
+    t0 = time.monotonic()
     bands = split_4_bands(audio, sr, crossovers)
+    logger.info("multiband_compress: band splitting took %.2fs", time.monotonic() - t0)
 
     # Step 3: Compress each band
     compressed_bands: dict[str, np.ndarray] = {}
@@ -238,23 +245,31 @@ def multiband_compress(
         if bs is None:
             compressed_bands[band_name] = band_audio
             continue
+        t0 = time.monotonic()
         compressed_bands[band_name] = _compress_band(band_audio, sr, bs)
+        logger.info("multiband_compress: band '%s' compression took %.2fs", band_name, time.monotonic() - t0)
 
     # Step 4: Recombine by summation
+    t0 = time.monotonic()
     output = sum(compressed_bands.values())
+    logger.info("multiband_compress: recombination took %.2fs", time.monotonic() - t0)
 
     # Step 5: Restore pre-compression integrated LUFS
     if input_lufs > LUFS_FLOOR:
+        t0 = time.monotonic()
         if output.ndim == 1:
             lufs_output_audio = np.column_stack([output, output])
         else:
             lufs_output_audio = output
         output_lufs = meter.integrated_loudness(lufs_output_audio)
+        logger.info("multiband_compress: output LUFS measurement took %.2fs", time.monotonic() - t0)
 
         if output_lufs > LUFS_FLOOR:
+            t0 = time.monotonic()
             gain_db = input_lufs - output_lufs
             gain_db = float(np.clip(gain_db, -12.0, 12.0))
             output = output * (10 ** (gain_db / 20.0))
+            logger.info("multiband_compress: gain restoration took %.2fs", time.monotonic() - t0)
             logger.info(
                 "Multiband compress: input=%.1f LUFS, post-compress=%.1f LUFS, "
                 "makeup=%.1f dB",
@@ -275,4 +290,5 @@ def multiband_compress(
             input_lufs,
         )
 
+    logger.info("multiband_compress: total took %.2fs", time.monotonic() - t_total)
     return output.astype(np.float32)
