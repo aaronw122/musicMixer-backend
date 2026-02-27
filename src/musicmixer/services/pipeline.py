@@ -7,7 +7,7 @@ Complete 15-step chain: separation -> analysis -> plan -> processing -> render -
 import logging
 import queue
 
-from musicmixer.models import SessionState
+from musicmixer.models import LyricsData, SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ def run_pipeline(
      16. Fade-in / fade-out
      17. Export to MP3
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
     from pathlib import Path
 
     import librosa
@@ -83,6 +83,7 @@ def run_pipeline(
     import pyloudnorm as pyln
 
     from musicmixer.config import settings
+    from musicmixer.services.lyrics import lookup_lyrics_for_song, map_lyrics_to_bars, map_plain_lyrics_to_bars
     from musicmixer.services.analysis import (
         analyze_audio,
         analyze_stems,
@@ -132,12 +133,67 @@ def run_pipeline(
     song_a_stems_dir = stems_dir / "song_a"
     song_b_stems_dir = stems_dir / "song_b"
 
+    # --- Parallel lyrics fetch (runs alongside stem separation) ---
+    # Submit lyrics lookups BEFORE stem separation so they run concurrently.
+    # Lyrics only need the filename + audio path, not stems.
+    lyrics_a_data: LyricsData | None = None
+    lyrics_b_data: LyricsData | None = None
+    lyrics_future_a = None
+    lyrics_future_b = None
+    lyrics_executor = None
+
+    if settings.lyrics_lookup_enabled:
+        lyrics_executor = ThreadPoolExecutor(max_workers=2)
+        try:
+            lyrics_future_a = lyrics_executor.submit(
+                lookup_lyrics_for_song, song_a_path, song_a_original_filename,
+            )
+            lyrics_future_b = lyrics_executor.submit(
+                lookup_lyrics_for_song, song_b_path, song_b_original_filename,
+            )
+            logger.info("Session %s: Lyrics lookup submitted for both songs", session_id)
+        except Exception:
+            logger.warning("Session %s: Failed to submit lyrics lookups", session_id, exc_info=True)
+
     # Run both separations concurrently
     with ThreadPoolExecutor(max_workers=2) as sep_executor:
         future_a = sep_executor.submit(separate_stems, song_a_path, song_a_stems_dir)
         future_b = sep_executor.submit(separate_stems, song_b_path, song_b_stems_dir)
         song_a_stems = future_a.result(timeout=900)
         song_b_stems = future_b.result(timeout=900)
+
+    # --- Collect lyrics results (after stem separation completes) ---
+    if lyrics_executor is not None:
+        try:
+            if lyrics_future_a is not None:
+                try:
+                    lyrics_a_data = lyrics_future_a.result(timeout=15)
+                except FuturesTimeoutError:
+                    logger.warning("Session %s: Lyrics lookup timed out for Song A", session_id)
+                    lyrics_future_a.cancel()
+                except Exception:
+                    logger.warning("Session %s: Lyrics lookup failed for Song A", session_id, exc_info=True)
+
+            if lyrics_future_b is not None:
+                try:
+                    lyrics_b_data = lyrics_future_b.result(timeout=15)
+                except FuturesTimeoutError:
+                    logger.warning("Session %s: Lyrics lookup timed out for Song B", session_id)
+                    lyrics_future_b.cancel()
+                except Exception:
+                    logger.warning("Session %s: Lyrics lookup failed for Song B", session_id, exc_info=True)
+        finally:
+            lyrics_executor.shutdown(wait=False)
+
+        for label, data in [("A", lyrics_a_data), ("B", lyrics_b_data)]:
+            if data is not None:
+                logger.info(
+                    "Session %s: Song %s lyrics: %d lines, synced=%s, source=%s (%.0fms)",
+                    session_id, label, len(data.lines), data.is_synced, data.source,
+                    data.lookup_duration_ms,
+                )
+            else:
+                logger.info("Session %s: Song %s lyrics: not found", session_id, label)
 
     emit_progress(event_queue, {
         "step": "separating",
@@ -245,6 +301,48 @@ def run_pipeline(
         "progress": 0.57,
     }, session=session)
 
+    # === STEP 3.7: Map lyrics to bars ===
+    # Now that beat_frames and bpm are available from analysis, map lyric
+    # timestamps to bar numbers so the LLM can cross-reference lyrics with
+    # the section map.
+    for label, lyrics_data, meta in [
+        ("A", lyrics_a_data, meta_a),
+        ("B", lyrics_b_data, meta_b),
+    ]:
+        if lyrics_data is None:
+            continue
+        try:
+            if lyrics_data.is_synced:
+                lyrics_data.lines = map_lyrics_to_bars(
+                    lyrics_data.lines,
+                    beat_frames=meta.beat_frames,
+                    bpm=meta.bpm,
+                )
+            else:
+                # Plain lyrics: distribute across vocal-active bars
+                vocal_active = None
+                total_bars = 0
+                if meta.stem_analysis is not None:
+                    vocal_active = meta.stem_analysis.vocal_active
+                if meta.song_structure is not None:
+                    total_bars = meta.song_structure.total_bars
+                if total_bars > 0:
+                    lyrics_data.lines = map_plain_lyrics_to_bars(
+                        lyrics_data.lines,
+                        vocal_active=vocal_active,
+                        total_bars=total_bars,
+                    )
+            mapped_count = sum(1 for l in lyrics_data.lines if l.bar_number is not None)
+            logger.info(
+                "Session %s: Song %s lyrics: %d/%d lines mapped to bars",
+                session_id, label, mapped_count, len(lyrics_data.lines),
+            )
+        except Exception:
+            logger.warning(
+                "Session %s: Bar mapping failed for Song %s lyrics",
+                session_id, label, exc_info=True,
+            )
+
     # === STEP 4: Interpret prompt via LLM (fallback to deterministic plan) ===
     logger.info("Session %s: [4/17] interpreting prompt via LLM...", session_id)
     emit_progress(event_queue, {
@@ -253,7 +351,7 @@ def run_pipeline(
         "progress": 0.58,
     }, session=session)
 
-    plan = interpret_prompt(prompt, meta_a, meta_b)
+    plan = interpret_prompt(prompt, meta_a, meta_b, lyrics_a=lyrics_a_data, lyrics_b=lyrics_b_data)
 
     if plan.used_fallback:
         logger.warning(
