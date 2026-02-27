@@ -87,8 +87,15 @@ def pipeline_tmp(tmp_path):
     }
 
 
-def _run_pipeline_with_mock_separation(pipeline_tmp, session=None):
-    """Helper to run the pipeline with mocked separation returning pre-made stems."""
+def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_overrides=None, **pipeline_kwargs):
+    """Helper to run the pipeline with mocked separation returning pre-made stems.
+
+    Args:
+        pipeline_tmp: Fixture dict with paths and stems.
+        session: Optional pre-created SessionState.
+        settings_overrides: Dict of setting name -> value to override on mock_settings.
+        **pipeline_kwargs: Extra keyword args passed to run_pipeline (e.g. source_quality_a).
+    """
     from musicmixer.services.pipeline import run_pipeline
 
     tmp_path = pipeline_tmp["tmp_path"]
@@ -109,6 +116,25 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None):
     ):
         mock_settings.data_dir = tmp_path
 
+        # Set sensible defaults for all settings the pipeline reads.
+        # MagicMock returns MagicMock objects for unset attributes, which
+        # causes boolean comparisons to behave unpredictably.
+        mock_settings.stem_backend = "modal"
+        mock_settings.lyrics_lookup_enabled = False
+        mock_settings.ab_per_stem_eq_v1 = False
+        mock_settings.ab_resonance_detection_v1 = False
+        mock_settings.ab_multiband_comp_v1 = False
+        mock_settings.ab_static_mastering_v1 = False
+        mock_settings.ab_autolvl_tune_v1 = False
+        mock_settings.ab_vocal_makeup_v1 = False
+        mock_settings.ab_mp3_export_path_v1 = False
+        mock_settings.ab_control_day3 = True
+
+        # Apply settings overrides (AB flags, etc.)
+        if settings_overrides:
+            for key, value in settings_overrides.items():
+                setattr(mock_settings, key, value)
+
         run_pipeline(
             session_id="test-session",
             song_a_path=str(pipeline_tmp["song_a_path"]),
@@ -116,6 +142,7 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None):
             prompt="test remix",
             event_queue=event_queue,
             session=session,
+            **pipeline_kwargs,
         )
 
     return event_queue, session
@@ -466,4 +493,195 @@ class TestLoudnessFixPipeline:
         )
         assert output_lufs < -6.0, (
             f"Output LUFS {output_lufs:.1f} is unreasonably loud"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sound quality enhancement wiring tests
+# ---------------------------------------------------------------------------
+
+
+class TestAutoLeveler4State:
+    """Verify all 4 combinations of ab_multiband_comp_v1 x ab_autolvl_tune_v1
+    produce the correct auto-leveler kwargs.
+
+    The AB suite only tests all-off (control) and all-on (enhanced), so
+    intermediate states must be covered here.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_auto_level(self):
+        """Patch auto_level to capture its kwargs without running the full pipeline."""
+        self.captured_kwargs = {}
+
+        def _capture_auto_level(audio, sr, **kwargs):
+            self.captured_kwargs = kwargs
+            return audio  # pass through
+
+        with patch("musicmixer.services.processor.auto_level", side_effect=_capture_auto_level):
+            yield
+
+    def _get_auto_level_kwargs(self, pipeline_tmp, multiband: bool, autolvl: bool):
+        """Run pipeline with given flags, return captured auto_level kwargs."""
+        self.captured_kwargs = {}
+        _run_pipeline_with_mock_separation(
+            pipeline_tmp,
+            settings_overrides={
+                "ab_multiband_comp_v1": multiband,
+                "ab_autolvl_tune_v1": autolvl,
+            },
+        )
+        return self.captured_kwargs
+
+    def test_both_off(self, pipeline_tmp):
+        """Default: max_boost=2.0, max_cut=3.0, window_sec=3.0."""
+        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=False, autolvl=False)
+        assert kw["max_boost_db"] == 2.0
+        assert kw["max_cut_db"] == 3.0
+        assert kw["window_sec"] == 3.0
+
+    def test_autolvl_only(self, pipeline_tmp):
+        """ab_autolvl_tune_v1 only: max_boost=1.5, max_cut=2.5, window_sec=4.0."""
+        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=False, autolvl=True)
+        assert kw["max_boost_db"] == 1.5
+        assert kw["max_cut_db"] == 2.5
+        assert kw["window_sec"] == 4.0
+
+    def test_multiband_only(self, pipeline_tmp):
+        """ab_multiband_comp_v1 only: max_boost=1.0, max_cut=1.5, window_sec=3.0.
+        Multiband takes priority for boost/cut."""
+        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=True, autolvl=False)
+        assert kw["max_boost_db"] == 1.0
+        assert kw["max_cut_db"] == 1.5
+        assert kw["window_sec"] == 3.0
+
+    def test_both_on(self, pipeline_tmp):
+        """Both flags: max_boost=1.0, max_cut=1.5, window_sec=4.0.
+        Multiband takes priority for boost/cut; window_sec from autolvl_tune."""
+        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=True, autolvl=True)
+        assert kw["max_boost_db"] == 1.0
+        assert kw["max_cut_db"] == 1.5
+        assert kw["window_sec"] == 4.0
+
+    def test_detector_audio_is_always_set(self, pipeline_tmp):
+        """detector_audio must always be the instrumental bus (not None)."""
+        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=False, autolvl=False)
+        assert "detector_audio" in kw
+        assert kw["detector_audio"] is not None
+
+    def test_active_floor_is_always_set(self, pipeline_tmp):
+        """active_floor_db must always be set to -40.0."""
+        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=False, autolvl=False)
+        assert kw["active_floor_db"] == -40.0
+        assert kw["target_percentile"] == 50.0
+
+
+class TestPipelineWithSoundQualityFlags:
+    """Run the full pipeline with new sound quality flags enabled,
+    verify output is valid (MP3 exists, LUFS reasonable, peaks within ceiling).
+    """
+
+    def test_all_enhancement_flags_on(self, pipeline_tmp):
+        """Pipeline with all sound quality flags enabled produces valid output."""
+        event_queue, session = _run_pipeline_with_mock_separation(
+            pipeline_tmp,
+            settings_overrides={
+                "ab_per_stem_eq_v1": True,
+                "ab_resonance_detection_v1": True,
+                "ab_multiband_comp_v1": True,
+                "ab_static_mastering_v1": True,
+            },
+        )
+
+        output_path = Path(session.remix_path)
+        assert output_path.exists(), f"Expected remix MP3 at {output_path}"
+        assert output_path.stat().st_size > 0, "Remix MP3 should not be empty"
+        assert session.status == "complete"
+
+    def test_eq_only(self, pipeline_tmp):
+        """Pipeline with only EQ flag enabled produces valid output."""
+        event_queue, session = _run_pipeline_with_mock_separation(
+            pipeline_tmp,
+            settings_overrides={
+                "ab_per_stem_eq_v1": True,
+            },
+        )
+
+        output_path = Path(session.remix_path)
+        assert output_path.exists()
+        assert session.status == "complete"
+
+    def test_static_mastering_only(self, pipeline_tmp):
+        """Pipeline with only static mastering flag produces valid output."""
+        event_queue, session = _run_pipeline_with_mock_separation(
+            pipeline_tmp,
+            settings_overrides={
+                "ab_static_mastering_v1": True,
+            },
+        )
+
+        output_path = Path(session.remix_path)
+        assert output_path.exists()
+        assert session.status == "complete"
+
+    def test_output_lufs_within_range(self, pipeline_tmp):
+        """Output LUFS should be within reasonable range when all flags are on."""
+        import soundfile as sf_mod
+
+        event_queue, session = _run_pipeline_with_mock_separation(
+            pipeline_tmp,
+            settings_overrides={
+                "ab_per_stem_eq_v1": True,
+                "ab_resonance_detection_v1": True,
+                "ab_multiband_comp_v1": True,
+                "ab_static_mastering_v1": True,
+            },
+        )
+
+        # Read the output MP3 as WAV for LUFS measurement
+        # (export_mp3 writes to disk; read it back)
+        output_path = Path(session.remix_path)
+        assert output_path.exists()
+
+        # Use soundfile to read the mp3 (via libsndfile if it supports mp3, else skip)
+        try:
+            audio, sr = sf_mod.read(str(output_path), dtype="float32")
+        except Exception:
+            pytest.skip("soundfile cannot read MP3 (libsndfile version)")
+
+        meter = pyln.Meter(sr)
+        output_lufs = meter.integrated_loudness(audio)
+
+        # LUFS should be within a reasonable range of the -12 target
+        assert output_lufs > -24.0, f"Output LUFS {output_lufs:.1f} is unreasonably quiet"
+        assert output_lufs < -6.0, f"Output LUFS {output_lufs:.1f} is unreasonably loud"
+
+    def test_output_peak_within_ceiling(self, pipeline_tmp):
+        """Output true peak should not grossly exceed -1.0 dBTP ceiling."""
+        import soundfile as sf_mod
+
+        event_queue, session = _run_pipeline_with_mock_separation(
+            pipeline_tmp,
+            settings_overrides={
+                "ab_per_stem_eq_v1": True,
+                "ab_resonance_detection_v1": True,
+                "ab_multiband_comp_v1": True,
+                "ab_static_mastering_v1": True,
+            },
+        )
+
+        output_path = Path(session.remix_path)
+        assert output_path.exists()
+
+        try:
+            audio, sr = sf_mod.read(str(output_path), dtype="float32")
+        except Exception:
+            pytest.skip("soundfile cannot read MP3 (libsndfile version)")
+
+        peak = true_peak(audio)
+        # True peak should be under ceiling with some tolerance
+        # (MP3 encoding can introduce small peak overshoots)
+        ceiling_linear = 10 ** (-1.0 / 20.0)
+        assert peak <= ceiling_linear + 0.05, (
+            f"True peak {peak:.4f} grossly exceeds ceiling {ceiling_linear:.4f}"
         )
