@@ -166,7 +166,7 @@ class TestCreateRemix:
         POST now returns 200 immediately; errors are reported via /status endpoint.
         """
         import time
-        def fake_failing_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock):
+        def fake_failing_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
             session.status = "error"
             session.error = "Pipeline exploded"
             processing_lock.release()

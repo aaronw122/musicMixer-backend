@@ -44,7 +44,7 @@ def client(tmp_path):
 @pytest.fixture
 def mock_pipeline_fast(tmp_path):
     """Mock pipeline that completes instantly, emitting progress events."""
-    def _mock_run_pipeline(session_id, song_a_path, song_b_path, prompt, event_queue, session):
+    def _mock_run_pipeline(session_id, song_a_path, song_b_path, prompt, event_queue, session, **kwargs):
         from musicmixer.services.pipeline import emit_progress
 
         emit_progress(event_queue, {
@@ -80,7 +80,7 @@ def mock_pipeline_slow():
     go_event = threading.Event()
     done_event = threading.Event()
 
-    def _mock_run_pipeline(session_id, song_a_path, song_b_path, prompt, event_queue, session):
+    def _mock_run_pipeline(session_id, song_a_path, song_b_path, prompt, event_queue, session, **kwargs):
         from musicmixer.services.pipeline import emit_progress
 
         session.status = "processing"
