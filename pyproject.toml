@@ -21,6 +21,7 @@ dependencies = [
     "soxr>=1.0.0",
     "syncedlyrics>=1.0.1",
     "uvicorn[standard]>=0.41.0",
+    "yt-dlp>=2025.1.0",
 ]
 
 [project.optional-dependencies]
