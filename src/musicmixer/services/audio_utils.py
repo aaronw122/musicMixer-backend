@@ -5,8 +5,12 @@ Used by eq.py, multiband.py, and mastering.py.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from pedalboard import Pedalboard
+
+logger = logging.getLogger(__name__)
 
 
 def process_with_pedalboard(audio: np.ndarray, board: Pedalboard, sr: int) -> np.ndarray:
@@ -31,7 +35,19 @@ def process_with_pedalboard(audio: np.ndarray, board: Pedalboard, sr: int) -> np
         # (N, 2) -> (2, N)
         pb_input = audio.T.astype(np.float32)
 
-    pb_output = board(pb_input, sr)
+    try:
+        pb_output = board(pb_input, sr)
+    except Exception:
+        plugin_names = [type(p).__name__ for p in board]
+        logger.error(
+            "Pedalboard processing failed (plugins=%s, sr=%d, shape=%s), "
+            "returning unprocessed audio",
+            plugin_names,
+            sr,
+            audio.shape,
+            exc_info=True,
+        )
+        return audio
 
     if mono:
         return pb_output[0].astype(np.float32)
