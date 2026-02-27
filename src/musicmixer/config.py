@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     output_format: str = "mp3"
     output_bitrate: str = "320k"
 
+    # Lyrics lookup (Day 3)
+    lyrics_lookup_enabled: bool = True
+
     # LLM (Day 3)
     anthropic_api_key: str = ""  # ANTHROPIC_API_KEY env var
     llm_model: str = "claude-sonnet-4-20250514"

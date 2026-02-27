@@ -111,6 +111,30 @@ class CrossSongRelationships:
 
 
 # ---------------------------------------------------------------------------
+# Lyrics lookup (Day 3 — lyrics intelligence)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LyricLine:
+    """A single line of lyrics, optionally synced to a timestamp and bar."""
+    text: str
+    timestamp_seconds: float | None = None
+    bar_number: int | None = None
+
+
+@dataclass
+class LyricsData:
+    """Complete lyrics data for a song, with optional bar-level sync."""
+    artist: str
+    title: str
+    source: str              # "lrclib" | "musixmatch" | "filename" | "id3"
+    is_synced: bool
+    lines: list[LyricLine]
+    raw_text: str
+    lookup_duration_ms: float = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Audio analysis (Step 2)
 # ---------------------------------------------------------------------------
 
