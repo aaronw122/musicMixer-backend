@@ -581,17 +581,18 @@ def lufs_normalize_constrained(
     applied_gain_db = float(np.clip(applied_gain_db, -12.0, 12.0))
 
     shortfall_db = lufs_gain_db - applied_gain_db
+    headroom_note = f", headroom={headroom_db:.1f} dB" if headroom_db > 0.01 else ""
     if shortfall_db > 0.5:
         logger.warning(
-            "LUFS constrained by peak ceiling: wanted %.1f dB, applied %.1f dB (%.1f dB shortfall). "
+            "LUFS constrained by peak ceiling: wanted %.1f dB, applied %.1f dB (%.1f dB shortfall%s). "
             "Output will be ~%.1f LUFS instead of %.1f LUFS",
-            lufs_gain_db, applied_gain_db, shortfall_db,
+            lufs_gain_db, applied_gain_db, shortfall_db, headroom_note,
             current_lufs + applied_gain_db, target_lufs,
         )
     else:
         logger.info(
-            "LUFS normalize (constrained): current=%.1f LUFS, target=%.1f LUFS, gain=%.1f dB",
-            current_lufs, target_lufs, applied_gain_db,
+            "LUFS normalize (constrained): current=%.1f LUFS, target=%.1f LUFS, gain=%.1f dB%s",
+            current_lufs, target_lufs, applied_gain_db, headroom_note,
         )
 
     gain_linear = 10 ** (applied_gain_db / 20.0)
