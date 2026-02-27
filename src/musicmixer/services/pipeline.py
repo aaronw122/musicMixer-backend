@@ -47,6 +47,8 @@ def run_pipeline(
     prompt: str,
     event_queue: queue.Queue,
     session: SessionState,
+    song_a_original_filename: str = "",
+    song_b_original_filename: str = "",
 ) -> None:
     """Complete Day 2 pipeline: separation, analysis, tempo matching, arrangement, export.
 

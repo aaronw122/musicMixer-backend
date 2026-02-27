@@ -38,6 +38,8 @@ def _pipeline_wrapper(
     prompt: str,
     session: SessionState,
     processing_lock,
+    song_a_original_filename: str = "",
+    song_b_original_filename: str = "",
 ) -> None:
     """Runs the pipeline in a background thread. Releases processing_lock on exit."""
     try:
@@ -51,6 +53,8 @@ def _pipeline_wrapper(
             prompt=prompt,
             event_queue=session.events,
             session=session,
+            song_a_original_filename=song_a_original_filename,
+            song_b_original_filename=song_b_original_filename,
         )
     except BaseException as exc:
         logger.exception("Session %s: pipeline failed", session_id)
@@ -102,6 +106,10 @@ def create_remix(
         upload_dir = settings.data_dir / "uploads" / session_id
         upload_dir.mkdir(parents=True, exist_ok=True)
 
+        # Capture original filenames before saving (needed for lyrics lookup)
+        song_a_original_filename = song_a.filename or ""
+        song_b_original_filename = song_b.filename or ""
+
         song_a_ext = Path(song_a.filename or "song_a.mp3").suffix.lower()
         song_b_ext = Path(song_b.filename or "song_b.mp3").suffix.lower()
 
@@ -141,6 +149,8 @@ def create_remix(
             prompt,
             session,
             processing_lock,
+            song_a_original_filename,
+            song_b_original_filename,
         )
 
         return {"session_id": session_id}
