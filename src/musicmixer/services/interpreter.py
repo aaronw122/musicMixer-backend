@@ -13,7 +13,6 @@ stem character, cross-song relationships, lyrics, and 8 failure mode guards.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import math
@@ -34,10 +33,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 ALL_STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
-FOUR_STEMS = ["vocals", "drums", "bass", "other"]
-
-# Stems that only exist in 6-stem (Modal) mode
-EXTRA_STEMS = {"guitar", "piano"}
 
 # Target remix duration in seconds. Controls beat budget, LLM guidance, and fallback plans.
 TARGET_REMIX_DURATION_SECONDS = 210  # 3.5 minutes
@@ -179,23 +174,6 @@ REMIX_PLAN_TOOL: dict = {
 
 
 # ---------------------------------------------------------------------------
-# 4-stem adaptation
-# ---------------------------------------------------------------------------
-
-def _adapt_schema_for_4stem(tool_schema: dict) -> dict:
-    """Remove guitar and piano from the tool schema for 4-stem (local) mode."""
-    schema = copy.deepcopy(tool_schema)
-    stem_gains = schema["input_schema"]["properties"]["sections"]["items"]["properties"]["stem_gains"]
-
-    # Remove guitar and piano from required and properties
-    stem_gains["required"] = [s for s in stem_gains["required"] if s not in EXTRA_STEMS]
-    for stem in EXTRA_STEMS:
-        stem_gains["properties"].pop(stem, None)
-
-    return schema
-
-
-# ---------------------------------------------------------------------------
 # System prompt construction
 # ---------------------------------------------------------------------------
 
@@ -211,10 +189,9 @@ def _build_system_prompt(
 ) -> str:
     """Construct the full system prompt with 5-layer song data and failure mode guards."""
 
-    # Determine which stems are available
-    is_4stem = settings.stem_backend == "local"
-    stem_list = "vocals, drums, bass, other" if is_4stem else "vocals, drums, bass, guitar, piano, other"
-    stem_count = 4 if is_4stem else 6
+    # 6-stem separation (Modal / BS-RoFormer)
+    stem_list = "vocals, drums, bass, guitar, piano, other"
+    stem_count = 6
 
     # Compute per-song beat counts (approximate)
     total_beats_a = song_a_meta.total_beats
@@ -227,14 +204,6 @@ def _build_system_prompt(
         instrumental_bpm=song_b_meta.bpm,
     )
 
-    # Stem gains note for 4-stem mode
-    stem_gains_note = ""
-    if is_4stem:
-        stem_gains_note = (
-            "\n- Only 4 stems are available: vocals, drums, bass, other. "
-            "Guitar and piano are not separated in this mode."
-        )
-
     sections: list[str] = []
 
     # Section 1: Role and MVP Constraints
@@ -245,7 +214,7 @@ CONSTRAINTS:
 - You CANNOT mix stems across songs (e.g., no "drums from Song A with bass from Song B").
 - You CANNOT add effects, generate new sounds, or use vocals from both songs.
 - "other" contains synths, strings, wind instruments, and anything not captured by the {stem_count - 1} named stems.
-- If the user asks for something impossible, acknowledge it in the `warnings` field and produce the best plan within these limits.{stem_gains_note}
+- If the user asks for something impossible, acknowledge it in the `warnings` field and produce the best plan within these limits.
 
 CAPABILITIES:
 - Choose which song provides vocals (vocal_source)
@@ -302,14 +271,13 @@ Template E (Extended Mix): intro(~8%) -> verse(~15%) -> chorus(~12%) -> breakdow
 If total beats < 48, use Template C. If 48-96, use Standard Mashup. If 96-192, use DJ Set or add a second verse. If > 192, use Extended Mix.""")
 
     # Section 7: Section Rules
-    stem_gains_required = stem_list
     sections.append(f"""SECTION RULES:
 - Sections should be 4, 8, 16, 32, or 64 beats long (max 64 beats per section)
 - Default: start with instrumental only (establishes the beat before vocals enter), unless the prompt suggests otherwise
 - Always end with instrumental only or a fade
 - section labels: "intro", "verse", "breakdown", "drop", "outro"
 - stem_gains values must be between 0.0 and 1.0 (never exceed 1.0 -- it causes distortion)
-- stem_gains must include all stems: {stem_gains_required}
+- stem_gains must include all stems: {stem_list}
 - transition_in: "fade", "crossfade", or "cut"
 - transition_beats: how many beats the transition lasts (0-8, must be less than half the section length)""")
 
@@ -721,11 +689,6 @@ def _build_few_shot_messages() -> list[dict]:
     2. Vague prompt using vocal gaps and energy profiles (no lyrics -- graceful degradation)
     3. Contradictory prompt with extreme tempo mismatch (no lyrics -- graceful degradation)
     """
-    is_4stem = settings.stem_backend == "local"
-
-    if is_4stem:
-        return _build_few_shot_messages_4stem()
-
     return [
         # Example 1: Clear directive, uses section map + GOOD INSTRUMENTAL SOURCE + Layer 5 lyrics
         {
@@ -911,166 +874,6 @@ def _build_few_shot_messages() -> list[dict]:
                         "warnings": [
                             "I can only use vocals from one song at a time -- I chose Song B since its vocals are much cleaner (+9 dB separation vs Song A's +1 dB).",
                             "These songs have extremely different tempos (48.6% stretch). The vocals have been sped up significantly and may sound different from the original.",
-                        ],
-                    },
-                }
-            ],
-        },
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "example_3", "content": "Plan accepted."}]},
-    ]
-
-
-def _build_few_shot_messages_4stem() -> list[dict]:
-    """Build few-shot examples adapted for 4-stem (local) mode.
-
-    Same structure as 6-stem but without guitar/piano in stem_gains.
-    Uses the new 5-layer song data format.
-    """
-    return [
-        # Example 1: Clear directive with section map + Layer 5 lyrics
-        {
-            "role": "user",
-            "content": (
-                'Create a remix plan for this prompt: "Put Song A\'s vocals over Song B\'s beat, boost the bass"\n\n'
-                "Beat budget: ~413 beats at 118 BPM for ~210s target\n\n"
-                "=== LAYER 1: SONG OVERVIEW ===\n"
-                'Song A: "Track One" -- 120 BPM, Cmin, 4:00, 120 bars.\n'
-                "Vocals: dominant, +8 dB. Energy: compressed.\n"
-                'Song B: "Track Two" -- 118 BPM, Cmaj, 3:30, 103 bars.\n'
-                "Vocals: moderate, +3 dB. Energy: wide dynamic range.\n\n"
-                "=== LAYER 4: CROSS-SONG ===\n"
-                "Loudness: Song A ~5 dB louder.\n"
-                "Vocal source: Song A (+8 dB, clean).\n\n"
-                "=== LAYER 5: LYRICS ===\n"
-                "Use these lyrics to avoid cutting mid-phrase, identify hooks, and match themes to the prompt.\n\n"
-                "Song A lyrics (synced, 10 lines):\n"
-                "  bar   9: Rolling through the city late at night\n"
-                "  bar  11: Every streetlight burning way too bright\n"
-                "  bar  14: Said she wanna ride so we ride all night\n"
-                "  bar  17: Windows down and feeling so alive\n"
-                "  bar  41: Roll with me roll with me now\n"
-                "  bar  43: Roll with me roll with me now\n"
-                "  bar  45: Everybody knows that we run this town\n"
-                "  bar  57: Back on the block where it all began\n"
-                "  bar  59: Same old crew with the same old plan\n"
-                "  bar  73: Roll with me roll with me now\n"
-                "Song B lyrics: no lyrics found."
-            ),
-        },
-        {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "tool_use",
-                    "id": "example_1",
-                    "name": "create_remix_plan",
-                    "input": {
-                        "vocal_source": "song_a",
-                        "start_time_vocal": 0.0,
-                        "end_time_vocal": 220.0,
-                        "start_time_instrumental": 0.0,
-                        "end_time_instrumental": 210.0,
-                        "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.8, "bass": 1.0, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 1.0, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.0, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.9, "drums": 0.7, "bass": 1.0, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "breakdown", "start_beat": 256, "end_beat": 288, "stem_gains": {"vocals": 0.3, "drums": 0.3, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 288, "end_beat": 368, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 368, "end_beat": 416, "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.7, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
-                        ],
-                        "tempo_source": "song_b",
-                        "key_source": "none",
-                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted to full. The hook 'Roll with me' starts at bar 41 which aligns with the chorus section, so I used that as the entry point for the drop. The breakdown strips to bass and other for contrast before the full drop.",
-                        "warnings": [],
-                    },
-                }
-            ],
-        },
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "example_1", "content": "Plan accepted."}]},
-
-        # Example 2: Vague prompt
-        {
-            "role": "user",
-            "content": (
-                'Create a remix plan for this prompt: "mix them together, make it sound good"\n\n'
-                "Beat budget: ~308 beats at 88 BPM for ~210s target\n\n"
-                "=== LAYER 1: SONG OVERVIEW ===\n"
-                'Song A: "Slow Jam" -- 88 BPM, Gmin, 3:45, 82 bars.\n'
-                'Song B: "Upbeat" -- 125 BPM, Amin, 3:30, 109 bars.\n'
-                "Vocals: dominant, +7 dB.\n\n"
-                "=== LAYER 4: CROSS-SONG ===\n"
-                "Vocal source: Song B (+7 dB, cleaner)."
-            ),
-        },
-        {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "tool_use",
-                    "id": "example_2",
-                    "name": "create_remix_plan",
-                    "input": {
-                        "vocal_source": "song_b",
-                        "start_time_vocal": 0.0,
-                        "end_time_vocal": 210.0,
-                        "start_time_instrumental": 0.0,
-                        "end_time_instrumental": 225.0,
-                        "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.8, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.8, "drums": 0.7, "bass": 0.8, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.3, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.9, "drums": 0.7, "bass": 0.8, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.8, "bass": 0.9, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 256, "end_beat": 312, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
-                        ],
-                        "tempo_source": "song_a",
-                        "key_source": "none",
-                        "explanation": "I chose Song B's vocals since they have better separation. The laid-back 88 BPM instrumental groove from Song A gives a chill vibe. The 'other' stem is kept low when vocals are active for clarity.",
-                        "warnings": ["These songs have very different tempos, so the vocals have been slowed down to fit the beat."],
-                    },
-                }
-            ],
-        },
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "example_2", "content": "Plan accepted."}]},
-
-        # Example 3: Contradictory prompt
-        {
-            "role": "user",
-            "content": (
-                'Create a remix plan for this prompt: "I want the drums from Song A with the vocals from both songs"\n\n'
-                "=== LAYER 1: SONG OVERVIEW ===\n"
-                'Song A: "Fast EDM" -- 140 BPM, F#min, 3:00, 105 bars.\n'
-                'Song B: "Slow RnB" -- 72 BPM, Bbmaj, 4:00, 72 bars.\n'
-                "Vocals: dominant, +9 dB. Tempo stretch: 48.6%."
-            ),
-        },
-        {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "tool_use",
-                    "id": "example_3",
-                    "name": "create_remix_plan",
-                    "input": {
-                        "vocal_source": "song_b",
-                        "start_time_vocal": 20.0,
-                        "end_time_vocal": 100.0,
-                        "start_time_instrumental": 0.0,
-                        "end_time_instrumental": 60.0,
-                        "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 8, "stem_gains": {"vocals": 0.0, "drums": 0.9, "bass": 0.7, "other": 0.4}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 8, "end_beat": 24, "stem_gains": {"vocals": 1.0, "drums": 0.0, "bass": 0.5, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 24, "end_beat": 40, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 40, "end_beat": 48, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.4, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
-                        ],
-                        "tempo_source": "song_a",
-                        "key_source": "none",
-                        "explanation": "I used Song B's vocals since they have much better separation (+9 dB). The drums-only verse creates contrast before the full drop. Kept it short due to the extreme tempo difference.",
-                        "warnings": [
-                            "I can only use vocals from one song at a time -- I chose Song B since its vocals are much cleaner.",
-                            "These songs have extremely different tempos (48.6% stretch). The vocals have been sped up significantly and may sound different.",
                         ],
                     },
                 }
@@ -1348,6 +1151,13 @@ def interpret_prompt(
     Synchronous -- runs in the pipeline thread, NOT the async event loop.
     Falls back to generate_fallback_plan() on any LLM failure.
     """
+    # Guard: interpreter requires 6-stem separation (Modal)
+    if settings.stem_backend != "modal":
+        raise ValueError(
+            f"stem_backend={settings.stem_backend!r} is not supported. "
+            "The interpreter requires 6-stem separation (stem_backend='modal')."
+        )
+
     # Guard: if no API key configured, skip LLM entirely
     if not settings.anthropic_api_key:
         logger.warning("No ANTHROPIC_API_KEY configured, using fallback plan")
@@ -1388,10 +1198,7 @@ def interpret_prompt(
         {"role": "user", "content": f'Create a remix plan for this prompt: "{prompt}"'},
     ]
 
-    # Select and possibly adapt tool schema for 4-stem mode
     tool_schema = REMIX_PLAN_TOOL
-    if settings.stem_backend == "local":
-        tool_schema = _adapt_schema_for_4stem(tool_schema)
 
     # Log request
     logger.info(
