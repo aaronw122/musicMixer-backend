@@ -8,6 +8,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pedalboard import Compressor, Pedalboard
+
+from musicmixer.services.audio_utils import process_with_pedalboard
 from musicmixer.services.multiband import (
     DEFAULT_BAND_SETTINGS,
     BandSettings,
@@ -365,4 +368,84 @@ class TestMultibandCompress:
         # LUFS should be restored within ~1 dB
         assert abs(output_lufs - input_lufs) < 1.5, (
             f"LUFS should be restored: input={input_lufs:.1f}, output={output_lufs:.1f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fix 15: pedalboard.Compressor behavior with input > 0 dBFS
+# ---------------------------------------------------------------------------
+
+
+class TestPedalboardCompressorHotSignal:
+    """Verify pedalboard.Compressor behavior with signals peaking above 0 dBFS.
+
+    The multiband compressor feeds each band through pedalboard.Compressor.
+    If a band's peak exceeds 0 dBFS (linear amplitude > 1.0), the compressor
+    must compress rather than hard-clip the signal. This test validates that
+    pedalboard does not introduce hard clipping at 0 dBFS.
+    """
+
+    def test_compressor_does_not_hard_clip_hot_signal(self):
+        """Feed a +6 dBFS signal into pedalboard.Compressor and verify
+        the output is not hard-clipped at 0 dBFS.
+
+        A +6 dBFS signal has a linear peak of ~2.0. If pedalboard hard-clips,
+        the output would be capped at exactly 1.0 (0 dBFS). A proper
+        compressor should produce output above 1.0 (reduced but not clipped)
+        or below 1.0 (compressed), but not exactly 1.0 across a sustained
+        range of samples (the hallmark of hard clipping).
+        """
+        # Generate a stereo sine wave at +6 dBFS (linear amplitude ~2.0)
+        amplitude = 10 ** (6.0 / 20.0)  # ~1.995
+        t = np.linspace(0, 2.0, int(SR * 2.0), endpoint=False)
+        mono = (np.sin(2 * np.pi * 440.0 * t) * amplitude).astype(np.float32)
+        audio = np.column_stack([mono, mono])
+
+        # Verify precondition: peak is above 1.0 (> 0 dBFS)
+        input_peak = float(np.max(np.abs(audio)))
+        assert input_peak > 1.5, f"Precondition: input peak {input_peak:.3f} should be > 1.5"
+
+        # Run through compressor with moderate settings
+        board = Pedalboard([
+            Compressor(
+                threshold_db=-20.0,
+                ratio=4.0,
+                attack_ms=5.0,
+                release_ms=100.0,
+            )
+        ])
+        result = process_with_pedalboard(audio, board, SR)
+
+        output_peak = float(np.max(np.abs(result)))
+
+        # Check for hard clipping: if the output has a sustained flat region
+        # at exactly 1.0, that indicates hard clipping.
+        # Count samples that are within a tiny epsilon of 1.0 — a properly
+        # compressed signal should not have many.
+        clipped_mask = np.abs(np.abs(result) - 1.0) < 0.001
+        clipped_fraction = float(np.mean(clipped_mask))
+
+        # A hard-clipped signal would have > 10% of samples at exactly 1.0.
+        # A properly compressed signal should have very few (if any).
+        is_hard_clipped = clipped_fraction > 0.10
+
+        if is_hard_clipped:
+            # pedalboard.Compressor hard-clips at 0 dBFS.
+            # This documents the behavior as a known issue. If this assertion
+            # fires, a pre-gain reduction is needed before feeding hot signals
+            # into multiband compression. The multiband compressor's band
+            # splitting can produce bands that peak above 0 dBFS even when
+            # the input is below 0 dBFS.
+            pytest.fail(
+                f"pedalboard.Compressor hard-clips at 0 dBFS: "
+                f"{clipped_fraction:.1%} of samples clipped to +/-1.0. "
+                f"Input peak: {input_peak:.3f}, output peak: {output_peak:.3f}. "
+                f"KNOWN ISSUE: A pre-gain reduction may be needed before "
+                f"multiband compression to prevent band peaks from exceeding 0 dBFS."
+            )
+
+        # If we get here, pedalboard handles hot signals correctly
+        # (compresses rather than clips). Verify compression actually happened.
+        assert output_peak < input_peak, (
+            f"Compressor should reduce peak: input={input_peak:.3f}, output={output_peak:.3f}"
         )
