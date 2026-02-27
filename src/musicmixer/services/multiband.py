@@ -16,6 +16,7 @@ Band layout:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -67,10 +68,10 @@ DEFAULT_BAND_SETTINGS: dict[str, BandSettings] = {
     ),
     "high": BandSettings(
         name="high",
-        threshold_db=-24.0,
+        threshold_db=-20.0,
         ratio=2.0,
-        attack_ms=3.0,
-        release_ms=80.0,
+        attack_ms=5.0,
+        release_ms=120.0,
     ),
 }
 
@@ -243,15 +244,20 @@ def multiband_compress(
     # Step 4: Recombine by summation
     output = sum(compressed_bands.values())
 
+    # NaN guard: if compression produced NaN, fall back to uncompressed input
+    if np.any(np.isnan(output)):
+        logger.error("NaN detected in multiband output, falling back to uncompressed input")
+        return audio
+
     # Step 5: Restore pre-compression integrated LUFS
-    if input_lufs > LUFS_FLOOR:
+    if not math.isinf(input_lufs) and input_lufs > LUFS_FLOOR:
         if output.ndim == 1:
             lufs_output_audio = np.column_stack([output, output])
         else:
             lufs_output_audio = output
         output_lufs = meter.integrated_loudness(lufs_output_audio)
 
-        if output_lufs > LUFS_FLOOR:
+        if not math.isinf(output_lufs) and output_lufs > LUFS_FLOOR:
             gain_db = input_lufs - output_lufs
             gain_db = float(np.clip(gain_db, -12.0, 12.0))
             output = output * (10 ** (gain_db / 20.0))

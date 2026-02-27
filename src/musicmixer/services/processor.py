@@ -8,6 +8,7 @@ All audio stays float32 throughout. Never convert to int16 mid-pipeline.
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 import tempfile
 from pathlib import Path
@@ -566,7 +567,7 @@ def lufs_normalize_constrained(
     meter = pyln.Meter(sr)
     current_lufs = meter.integrated_loudness(audio)
 
-    if current_lufs == float("-inf"):
+    if math.isinf(current_lufs):
         logger.warning("Cannot normalize silent audio")
         return audio
 
