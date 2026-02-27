@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     # Sound quality enhancement flags (default-off for A/B)
     ab_static_mastering_v1: bool = False
+    ab_multiband_comp_v1: bool = False
 
     model_config = SettingsConfigDict(env_file=".env")
 
