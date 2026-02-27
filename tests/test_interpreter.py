@@ -1,10 +1,19 @@
-"""Tests for musicmixer.services.interpreter -- deterministic fallback plan."""
+"""Tests for musicmixer.services.interpreter -- deterministic fallback plan + prompt caching."""
+
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
-from musicmixer.models import AudioMetadata, RemixPlan, Section
-from musicmixer.services.interpreter import default_arrangement, generate_fallback_plan
+from musicmixer.models import AudioMetadata, LyricLine, LyricsData, RemixPlan, Section
+from musicmixer.services.interpreter import (
+    _build_few_shot_messages,
+    _build_system_prompt,
+    _build_system_prompt_blocks,
+    default_arrangement,
+    generate_fallback_plan,
+    interpret_prompt,
+)
 
 
 def _make_metadata(bpm: float = 120.0, duration: float = 240.0) -> AudioMetadata:
@@ -178,3 +187,367 @@ class TestDefaultArrangement:
         sections = default_arrangement(200)
         breakdown = [s for s in sections if s.label == "breakdown"][0]
         assert 0.0 < breakdown.stem_gains["drums"] <= 0.3
+
+
+# ---------------------------------------------------------------------------
+# Helpers for prompt caching tests
+# ---------------------------------------------------------------------------
+
+def _make_lyrics(is_synced: bool = True, lines: list[LyricLine] | None = None) -> LyricsData:
+    """Create synthetic lyrics data for testing."""
+    if lines is None:
+        lines = [
+            LyricLine(text="Hello world", timestamp_seconds=5.0, bar_number=2),
+            LyricLine(text="Second line", timestamp_seconds=10.0, bar_number=4),
+        ]
+    return LyricsData(
+        artist="Test Artist",
+        title="Test Song",
+        source="lrclib",
+        is_synced=is_synced,
+        lines=lines,
+        raw_text="Hello world\nSecond line",
+    )
+
+
+def _default_prompt_args(
+    bpm_a: float = 120.0,
+    bpm_b: float = 118.0,
+    duration_a: float = 240.0,
+    duration_b: float = 210.0,
+    stretch_pct: float | None = None,
+    lyrics_a: LyricsData | None = None,
+    lyrics_b: LyricsData | None = None,
+) -> dict:
+    """Build kwargs dict for _build_system_prompt / _build_system_prompt_blocks."""
+    meta_a = _make_metadata(bpm=bpm_a, duration=duration_a)
+    meta_b = _make_metadata(bpm=bpm_b, duration=duration_b)
+    from musicmixer.services.interpreter import _compute_key_guidance, estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
+    _key_available, key_detail = _compute_key_guidance(meta_a, meta_b)
+    target_bpm = estimate_target_bpm(vocal_bpm=meta_a.bpm, instrumental_bpm=meta_b.bpm)
+    total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+    return dict(
+        song_a_meta=meta_a,
+        song_b_meta=meta_b,
+        key_matching_available=_key_available,
+        key_matching_detail=key_detail,
+        total_available_beats=total_available_beats,
+        stretch_pct=stretch_pct,
+        lyrics_a=lyrics_a,
+        lyrics_b=lyrics_b,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 tests: _build_system_prompt_blocks
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSystemPromptBlocks:
+    """Tests for _build_system_prompt_blocks()."""
+
+    def test_returns_two_blocks(self):
+        """Returns exactly 2 content block dicts."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        assert isinstance(blocks, list)
+        assert len(blocks) == 2
+
+    def test_first_block_has_cache_control(self):
+        """First block has cache_control: {type: ephemeral}."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        assert blocks[0]["type"] == "text"
+        assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_second_block_no_cache_control(self):
+        """Second block does NOT have cache_control."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        assert blocks[1]["type"] == "text"
+        assert "cache_control" not in blocks[1]
+
+    def test_static_block_is_constant(self):
+        """Different songs/BPMs produce identical block[0] text (cached block never changes)."""
+        args1 = _default_prompt_args(bpm_a=90.0, bpm_b=140.0, duration_a=180.0, duration_b=300.0)
+        args2 = _default_prompt_args(bpm_a=120.0, bpm_b=100.0, duration_a=240.0, duration_b=200.0)
+        blocks1 = _build_system_prompt_blocks(**args1)
+        blocks2 = _build_system_prompt_blocks(**args2)
+        assert blocks1[0]["text"] == blocks2[0]["text"]
+
+    def test_dynamic_block_varies_with_song_data(self):
+        """Dynamic block changes when song metadata changes."""
+        args1 = _default_prompt_args(bpm_a=90.0, bpm_b=140.0)
+        args2 = _default_prompt_args(bpm_a=120.0, bpm_b=100.0)
+        blocks1 = _build_system_prompt_blocks(**args1)
+        blocks2 = _build_system_prompt_blocks(**args2)
+        assert blocks1[1]["text"] != blocks2[1]["text"]
+
+    def test_dynamic_block_contains_song_metadata(self):
+        """Song names/BPMs appear in block[1] only, not block[0]."""
+        args = _default_prompt_args(bpm_a=95.0, bpm_b=125.0)
+        blocks = _build_system_prompt_blocks(**args)
+        # BPM values appear in dynamic block (song data)
+        assert "95 BPM" in blocks[1]["text"]
+        assert "125 BPM" in blocks[1]["text"]
+        # BPM values should NOT appear in static block
+        assert "95 BPM" not in blocks[0]["text"]
+        assert "125 BPM" not in blocks[0]["text"]
+
+    def test_blocks_contain_all_sections_from_original(self):
+        """Combined blocks text contains the same sections as the original prompt.
+
+        We verify content-equivalence: both outputs contain the same section texts,
+        just in different order. We check key identifying strings from each section.
+        """
+        args = _default_prompt_args()
+        original = _build_system_prompt(**args)
+        blocks = _build_system_prompt_blocks(**args)
+        combined = blocks[0]["text"] + "\n\n" + blocks[1]["text"]
+
+        # Key strings that uniquely identify each section
+        section_markers = [
+            "You are a music remix planner",           # Section 1
+            "CRITICAL MIXING RULES",                   # Section 2
+            "MIXING ADVISORY",                         # Section 3
+            "TRANSITIONS:",                            # Section 4
+            "Template A (Standard Mashup)",            # Section 5
+            "SECTION RULES:",                          # Section 6
+            "GENRE GUIDANCE",                          # Section 7
+            "TEMPO MATCHING:",                         # Section 8
+            "HANDLING AMBIGUOUS PROMPTS",              # Section 9
+            "STEM SEPARATION ARTIFACTS",               # Section 10
+            "EXPLANATION: Write 2-3",                  # Section 11
+            "SONG DATA:",                              # Section 12
+            "1 bar = 4 beats",                         # Section 13
+        ]
+        for marker in section_markers:
+            assert marker in original, f"Marker missing from original: {marker}"
+            assert marker in combined, f"Marker missing from blocks: {marker}"
+
+    @pytest.mark.parametrize("variant,kwargs", [
+        ("no_lyrics_no_stretch", dict()),
+        ("with_lyrics", dict(lyrics_a=_make_lyrics())),
+        ("with_stretch_above_12", dict(stretch_pct=15.0)),
+        ("with_key_detail", dict(bpm_a=100.0, bpm_b=105.0)),
+    ])
+    def test_blocks_content_matches_original_parameterized(self, variant, kwargs):
+        """Block texts joined contain the same section content as old function for all variants.
+
+        Note: the sections are reordered in the blocks version, so we compare
+        sets of sections rather than byte-identical joined strings.
+        """
+        args = _default_prompt_args(**kwargs)
+        original = _build_system_prompt(**args)
+        blocks = _build_system_prompt_blocks(**args)
+        combined = blocks[0]["text"] + "\n\n" + blocks[1]["text"]
+
+        # Extract sections from both (split on double-newline)
+        original_sections = set(original.split("\n\n"))
+        combined_sections = set(combined.split("\n\n"))
+
+        assert original_sections == combined_sections, (
+            f"Variant {variant}: section sets differ.\n"
+            f"Only in original: {original_sections - combined_sections}\n"
+            f"Only in blocks: {combined_sections - original_sections}"
+        )
+
+    def test_stretch_advisory_in_dynamic_block(self):
+        """When stretch_pct > 12, the stretch warning appears in dynamic block only."""
+        args = _default_prompt_args(stretch_pct=18.5)
+        blocks = _build_system_prompt_blocks(**args)
+        assert "STRETCH WARNING (18.5%)" in blocks[1]["text"]
+        assert "STRETCH WARNING" not in blocks[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 tests: _build_few_shot_messages cache_control
+# ---------------------------------------------------------------------------
+
+
+class TestFewShotMessagesCaching:
+    """Tests for cache_control on few-shot messages."""
+
+    def test_few_shot_last_message_has_cache_control(self):
+        """Last few-shot message's content block has cache_control: {type: ephemeral}."""
+        messages = _build_few_shot_messages()
+        last_msg = messages[-1]
+        assert last_msg["role"] == "user"
+        # The last content block in the last message
+        last_content_block = last_msg["content"][-1]
+        assert last_content_block["cache_control"] == {"type": "ephemeral"}
+
+    def test_few_shot_messages_always_6stem(self):
+        """All 6 stems present in every section's stem_gains in the few-shot examples."""
+        messages = _build_few_shot_messages()
+        expected_stems = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+        for msg in messages:
+            if msg["role"] == "assistant" and isinstance(msg["content"], list):
+                for block in msg["content"]:
+                    if block.get("type") == "tool_use":
+                        for section in block["input"].get("sections", []):
+                            assert set(section["stem_gains"].keys()) == expected_stems, (
+                                f"Missing stems in example section {section['label']}: "
+                                f"got {set(section['stem_gains'].keys())}"
+                            )
+
+    def test_few_shot_non_last_messages_no_cache_control(self):
+        """Only the last message has cache_control; earlier tool_results do not."""
+        messages = _build_few_shot_messages()
+        # Check all but the last message
+        for msg in messages[:-1]:
+            if isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if isinstance(block, dict):
+                        assert "cache_control" not in block, (
+                            f"Unexpected cache_control in non-last message: {block}"
+                        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 tests: API call integration + cache stats logging
+# ---------------------------------------------------------------------------
+
+
+class TestInterpretPromptCaching:
+    """Tests for interpret_prompt() with prompt caching integration."""
+
+    def test_interpret_prompt_passes_blocks_to_api(self):
+        """interpret_prompt() passes list[dict] with 2 entries to system= kwarg."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        # Build a mock response that mimics Anthropic's API
+        mock_tool_use = MagicMock()
+        mock_tool_use.type = "tool_use"
+        mock_tool_use.id = "test_id"
+        mock_tool_use.input = {
+            "vocal_source": "song_a",
+            "start_time_vocal": 0.0,
+            "end_time_vocal": 200.0,
+            "start_time_instrumental": 0.0,
+            "end_time_instrumental": 200.0,
+            "sections": [
+                {"label": "intro", "start_beat": 0, "end_beat": 32,
+                 "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5},
+                 "transition_in": "fade", "transition_beats": 4},
+                {"label": "verse", "start_beat": 32, "end_beat": 128,
+                 "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 0.7, "guitar": 0.3, "piano": 0.2, "other": 0.3},
+                 "transition_in": "crossfade", "transition_beats": 4},
+                {"label": "breakdown", "start_beat": 128, "end_beat": 192,
+                 "stem_gains": {"vocals": 0.3, "drums": 0.3, "bass": 0.5, "guitar": 0.6, "piano": 0.5, "other": 0.4},
+                 "transition_in": "crossfade", "transition_beats": 4},
+                {"label": "drop", "start_beat": 192, "end_beat": 352,
+                 "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.3, "piano": 0.2, "other": 0.3},
+                 "transition_in": "cut", "transition_beats": 0},
+                {"label": "outro", "start_beat": 352, "end_beat": 416,
+                 "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.4, "piano": 0.3, "other": 0.4},
+                 "transition_in": "crossfade", "transition_beats": 8},
+            ],
+            "tempo_source": "song_b",
+            "key_source": "none",
+            "explanation": "Test explanation.",
+            "warnings": [],
+        }
+
+        mock_response = MagicMock()
+        mock_response.stop_reason = "tool_use"
+        mock_response.content = [mock_tool_use]
+        mock_response.model = "claude-sonnet-4-20250514"
+        mock_response.usage = MagicMock()
+        mock_response.usage.cache_read_input_tokens = 1000
+        mock_response.usage.cache_creation_input_tokens = 5000
+
+        with patch("musicmixer.services.interpreter.settings") as mock_settings, \
+             patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
+            mock_settings.stem_backend = "modal"
+            mock_settings.anthropic_api_key = "test-key"
+            mock_settings.llm_model = "claude-sonnet-4-20250514"
+            mock_settings.llm_timeout_seconds = 30
+            mock_settings.llm_max_retries = 1
+
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = mock_response
+            mock_anthropic.Anthropic.return_value = mock_client
+
+            plan = interpret_prompt("test prompt", meta_a, meta_b)
+
+            # Verify the system= kwarg was a list of dicts
+            call_kwargs = mock_client.messages.create.call_args
+            system_arg = call_kwargs.kwargs["system"]
+
+            assert isinstance(system_arg, list), f"system= should be list, got {type(system_arg)}"
+            assert len(system_arg) == 2, f"system= should have 2 blocks, got {len(system_arg)}"
+            assert system_arg[0]["type"] == "text"
+            assert system_arg[0]["cache_control"] == {"type": "ephemeral"}
+            assert system_arg[1]["type"] == "text"
+            assert "cache_control" not in system_arg[1]
+
+    def test_cache_stats_logging_no_crash(self):
+        """Cache stats logging works even when usage object lacks cache fields."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        mock_tool_use = MagicMock()
+        mock_tool_use.type = "tool_use"
+        mock_tool_use.id = "test_id"
+        mock_tool_use.input = {
+            "vocal_source": "song_a",
+            "start_time_vocal": 0.0,
+            "end_time_vocal": 200.0,
+            "start_time_instrumental": 0.0,
+            "end_time_instrumental": 200.0,
+            "sections": [
+                {"label": "intro", "start_beat": 0, "end_beat": 32,
+                 "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5},
+                 "transition_in": "fade", "transition_beats": 4},
+                {"label": "verse", "start_beat": 32, "end_beat": 128,
+                 "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 0.7, "guitar": 0.3, "piano": 0.2, "other": 0.3},
+                 "transition_in": "crossfade", "transition_beats": 4},
+                {"label": "drop", "start_beat": 128, "end_beat": 352,
+                 "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.3, "piano": 0.2, "other": 0.3},
+                 "transition_in": "cut", "transition_beats": 0},
+                {"label": "outro", "start_beat": 352, "end_beat": 416,
+                 "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.4, "piano": 0.3, "other": 0.4},
+                 "transition_in": "crossfade", "transition_beats": 8},
+            ],
+            "tempo_source": "song_b",
+            "key_source": "none",
+            "explanation": "Test.",
+            "warnings": [],
+        }
+
+        mock_response = MagicMock()
+        mock_response.stop_reason = "tool_use"
+        mock_response.content = [mock_tool_use]
+        mock_response.model = "claude-sonnet-4-20250514"
+        # Simulate old SDK without cache fields -- use a plain object
+        mock_usage = type("Usage", (), {"input_tokens": 100, "output_tokens": 50})()
+        mock_response.usage = mock_usage
+
+        with patch("musicmixer.services.interpreter.settings") as mock_settings, \
+             patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
+            mock_settings.stem_backend = "modal"
+            mock_settings.anthropic_api_key = "test-key"
+            mock_settings.llm_model = "claude-sonnet-4-20250514"
+            mock_settings.llm_timeout_seconds = 30
+            mock_settings.llm_max_retries = 1
+
+            mock_client = MagicMock()
+            mock_client.messages.create.return_value = mock_response
+            mock_anthropic.Anthropic.return_value = mock_client
+
+            # Should not raise even without cache_read_input_tokens / cache_creation_input_tokens
+            plan = interpret_prompt("test prompt", meta_a, meta_b)
+            assert isinstance(plan, RemixPlan)
+
+    def test_stem_backend_local_raises(self):
+        """interpret_prompt() raises ValueError when stem_backend is local."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        with patch("musicmixer.services.interpreter.settings") as mock_settings:
+            mock_settings.stem_backend = "local"
+
+            with pytest.raises(ValueError, match="stem_backend='local' is not supported"):
+                interpret_prompt("test prompt", meta_a, meta_b)
