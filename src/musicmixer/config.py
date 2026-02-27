@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 20
     llm_max_retries: int = 1
 
+    # YouTube
+    youtube_enabled: bool = True
+    youtube_max_duration_seconds: int = 900  # 15 minutes
+
     # Day 3.5 audio-quality A/B flags (default-off)
     ab_control_day3: bool = True
     ab_autolvl_tune_v1: bool = False
