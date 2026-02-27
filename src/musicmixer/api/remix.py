@@ -2,6 +2,7 @@
 
 Day 2: Async pipeline with SSE progress events.
 - POST /api/remix          -- Accept uploads, start pipeline in background, return session_id
+- POST /api/remix/youtube  -- Accept YouTube URLs, download + pipeline in background
 - GET  /api/remix/{id}/progress -- SSE stream of pipeline progress events
 - GET  /api/remix/{id}/status   -- JSON snapshot of current session state
 - GET  /api/remix/{id}/audio    -- Serve the rendered remix MP3
@@ -17,12 +18,14 @@ import json
 import logging
 import queue
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 
 from musicmixer.config import settings
 from musicmixer.models import SessionState
@@ -68,6 +71,254 @@ def _pipeline_wrapper(
         }, session=session)
     finally:
         processing_lock.release()
+
+
+# ---------------------------------------------------------------------------
+# YouTube URL validation (SSRF prevention)
+# ---------------------------------------------------------------------------
+
+_YOUTUBE_ALLOWED_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "youtu.be",
+    "music.youtube.com",
+}
+
+
+def _validate_youtube_url(url: str) -> str:
+    """Validate a YouTube URL for SSRF safety. Returns the validated URL.
+
+    Validation order matters (step 3 before step 5 prevents userinfo bypass).
+
+    Raises HTTPException(422) on invalid URLs.
+    """
+    # 1. Parse URL
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        raise HTTPException(422, "Invalid URL format")
+
+    # 2. Reject non-https schemes (allow http, upgrade mentally but don't rewrite)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(422, "Only HTTP/HTTPS YouTube URLs are accepted")
+
+    # 3. Reject URLs containing @ in netloc (prevents userinfo bypass like youtube.com@evil.com)
+    if "@" in (parsed.netloc or ""):
+        raise HTTPException(422, "Invalid URL — only YouTube links are accepted")
+
+    # 4. Reject IP literals and non-standard ports
+    hostname = parsed.hostname
+    if hostname is None:
+        raise HTTPException(422, "Invalid URL — missing hostname")
+
+    if parsed.port is not None and parsed.port not in (80, 443):
+        raise HTTPException(422, "Invalid URL — only YouTube links are accepted")
+
+    # Check for IP literals (v4 and v6)
+    # Simple check: if hostname starts with digit or contains ':', it's likely an IP
+    if hostname[0].isdigit() or ":" in hostname:
+        raise HTTPException(422, "Invalid URL — only YouTube links are accepted")
+
+    # 5. Validate hostname against allowlist
+    if hostname not in _YOUTUBE_ALLOWED_HOSTS:
+        raise HTTPException(422, "Invalid URL — only YouTube links are accepted")
+
+    return url
+
+
+# ---------------------------------------------------------------------------
+# YouTube remix request model
+# ---------------------------------------------------------------------------
+
+class YouTubeRemixRequest(BaseModel):
+    url_a: str  # YouTube URL for song A
+    url_b: str  # YouTube URL for song B
+    prompt: str  # Remix prompt
+
+
+# ---------------------------------------------------------------------------
+# YouTube pipeline wrapper (download + existing pipeline)
+# ---------------------------------------------------------------------------
+
+def _youtube_pipeline_wrapper(
+    session_id: str,
+    url_a: str,
+    url_b: str,
+    prompt: str,
+    session: SessionState,
+    processing_lock,
+) -> None:
+    """Downloads YouTube audio, then runs the pipeline. Releases processing_lock on exit."""
+    try:
+        session.status = "processing"
+        from musicmixer.services.pipeline import emit_progress, run_pipeline
+        from musicmixer.services.youtube import download_youtube_audio
+
+        upload_dir = settings.data_dir / "uploads" / session_id
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Download Song A (5-25% progress) ---
+        emit_progress(session.events, {
+            "step": "downloading",
+            "detail": "Downloading song A from YouTube...",
+            "progress": 0.05,
+        }, session=session)
+
+        def _progress_a(fraction: float, status: str) -> None:
+            # Map fraction 0-1 to progress 0.05-0.25
+            progress = 0.05 + fraction * 0.20
+            emit_progress(session.events, {
+                "step": "downloading",
+                "detail": f"Downloading song A: {status}",
+                "progress": round(progress, 3),
+            }, session=session)
+
+        result_a = _run_sync(download_youtube_audio(
+            url=url_a,
+            output_dir=upload_dir,
+            progress_callback=_progress_a,
+        ))
+
+        emit_progress(session.events, {
+            "step": "downloading",
+            "detail": "Song A downloaded!",
+            "progress": 0.25,
+        }, session=session)
+
+        # --- Download Song B (25-45% progress) ---
+        emit_progress(session.events, {
+            "step": "downloading",
+            "detail": "Downloading song B from YouTube...",
+            "progress": 0.25,
+        }, session=session)
+
+        def _progress_b(fraction: float, status: str) -> None:
+            # Map fraction 0-1 to progress 0.25-0.45
+            progress = 0.25 + fraction * 0.20
+            emit_progress(session.events, {
+                "step": "downloading",
+                "detail": f"Downloading song B: {status}",
+                "progress": round(progress, 3),
+            }, session=session)
+
+        result_b = _run_sync(download_youtube_audio(
+            url=url_b,
+            output_dir=upload_dir,
+            progress_callback=_progress_b,
+        ))
+
+        emit_progress(session.events, {
+            "step": "downloading",
+            "detail": "Both songs downloaded!",
+            "progress": 0.45,
+        }, session=session)
+
+        logger.info(
+            "Session %s: YouTube downloads complete. A=%r (%ds, %s %dkbps), B=%r (%ds, %s %dkbps)",
+            session_id,
+            result_a.title, int(result_a.duration_seconds),
+            result_a.source_codec, result_a.source_bitrate,
+            result_b.title, int(result_b.duration_seconds),
+            result_b.source_codec, result_b.source_bitrate,
+        )
+
+        # Build source quality strings for metadata propagation
+        source_quality_a = f"youtube-{result_a.source_codec}-{result_a.source_bitrate}kbps"
+        source_quality_b = f"youtube-{result_b.source_codec}-{result_b.source_bitrate}kbps"
+
+        logger.info(
+            "Session %s: Source quality: A=%s, B=%s",
+            session_id, source_quality_a, source_quality_b,
+        )
+
+        # --- Run existing pipeline (45-100%) ---
+        # The pipeline's own progress events map into the remaining 45-100% range.
+        # We pass the WAV paths directly — the pipeline doesn't know they came from YouTube.
+        run_pipeline(
+            session_id=session_id,
+            song_a_path=str(result_a.wav_path),
+            song_b_path=str(result_b.wav_path),
+            prompt=prompt,
+            event_queue=session.events,
+            session=session,
+            song_a_original_filename=result_a.title,
+            song_b_original_filename=result_b.title,
+        )
+
+    except BaseException as exc:
+        logger.exception("Session %s: YouTube pipeline failed", session_id)
+        session.status = "error"
+        from musicmixer.services.pipeline import emit_progress
+
+        emit_progress(session.events, {
+            "step": "error",
+            "detail": str(exc),
+            "progress": 0,
+        }, session=session)
+    finally:
+        processing_lock.release()
+
+
+def _run_sync(coro):
+    """Run an async coroutine synchronously from a thread (no running event loop)."""
+    import asyncio as _asyncio
+    loop = _asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+@router.post("/remix/youtube")
+def create_youtube_remix(
+    request: Request,
+    body: YouTubeRemixRequest,
+):
+    """Accept two YouTube URLs, download audio, and start remix pipeline.
+
+    Both URLs must be valid YouTube links. Returns session_id immediately.
+    Only one remix can be processed at a time. Returns 409 if another is in progress.
+    """
+    if not settings.youtube_enabled:
+        raise HTTPException(403, "YouTube input is disabled")
+
+    # Validate both URLs (SSRF prevention) before doing any work
+    _validate_youtube_url(body.url_a)
+    _validate_youtube_url(body.url_b)
+
+    # Fail-fast: check processing lock BEFORE downloading (don't waste time if busy)
+    processing_lock = request.app.state.processing_lock
+    if not processing_lock.acquire(blocking=False):
+        raise HTTPException(409, "Another remix is being processed")
+
+    try:
+        # Generate session ID
+        session_id = str(uuid.uuid4())
+
+        # Create session state
+        session = SessionState()
+        with request.app.state.sessions_lock:
+            request.app.state.sessions[session_id] = session
+
+        # Submit YouTube download + pipeline to background executor
+        request.app.state.executor.submit(
+            _youtube_pipeline_wrapper,
+            session_id,
+            body.url_a,
+            body.url_b,
+            body.prompt,
+            session,
+            processing_lock,
+        )
+
+        return {"session_id": session_id}
+
+    except HTTPException:
+        raise
+    except Exception:
+        processing_lock.release()
+        raise
 
 
 @router.post("/remix")
