@@ -8,7 +8,6 @@ import pytest
 from musicmixer.models import AudioMetadata, LyricLine, LyricsData, RemixPlan, Section
 from musicmixer.services.interpreter import (
     _build_few_shot_messages,
-    _build_system_prompt,
     _build_system_prompt_blocks,
     default_arrangement,
     generate_fallback_plan,
@@ -219,7 +218,7 @@ def _default_prompt_args(
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
 ) -> dict:
-    """Build kwargs dict for _build_system_prompt / _build_system_prompt_blocks."""
+    """Build kwargs dict for _build_system_prompt_blocks."""
     meta_a = _make_metadata(bpm=bpm_a, duration=duration_a)
     meta_b = _make_metadata(bpm=bpm_b, duration=duration_b)
     from musicmixer.services.interpreter import _compute_key_guidance, estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
@@ -294,14 +293,13 @@ class TestBuildSystemPromptBlocks:
         assert "95 BPM" not in blocks[0]["text"]
         assert "125 BPM" not in blocks[0]["text"]
 
-    def test_blocks_contain_all_sections_from_original(self):
-        """Combined blocks text contains the same sections as the original prompt.
+    def test_blocks_contain_all_expected_sections(self):
+        """Combined blocks text contains all expected section markers.
 
-        We verify content-equivalence: both outputs contain the same section texts,
-        just in different order. We check key identifying strings from each section.
+        Verifies that every section of the system prompt is present across
+        the two blocks (static + dynamic).
         """
         args = _default_prompt_args()
-        original = _build_system_prompt(**args)
         blocks = _build_system_prompt_blocks(**args)
         combined = blocks[0]["text"] + "\n\n" + blocks[1]["text"]
 
@@ -322,7 +320,6 @@ class TestBuildSystemPromptBlocks:
             "1 bar = 4 beats",                         # Section 13
         ]
         for marker in section_markers:
-            assert marker in original, f"Marker missing from original: {marker}"
             assert marker in combined, f"Marker missing from blocks: {marker}"
 
     @pytest.mark.parametrize("variant,kwargs", [
@@ -331,26 +328,31 @@ class TestBuildSystemPromptBlocks:
         ("with_stretch_above_12", dict(stretch_pct=15.0)),
         ("with_key_detail", dict(bpm_a=100.0, bpm_b=105.0)),
     ])
-    def test_blocks_content_matches_original_parameterized(self, variant, kwargs):
-        """Block texts joined contain the same section content as old function for all variants.
-
-        Note: the sections are reordered in the blocks version, so we compare
-        sets of sections rather than byte-identical joined strings.
-        """
+    def test_blocks_contain_all_sections_parameterized(self, variant, kwargs):
+        """All expected section markers present in blocks output for all variants."""
         args = _default_prompt_args(**kwargs)
-        original = _build_system_prompt(**args)
         blocks = _build_system_prompt_blocks(**args)
         combined = blocks[0]["text"] + "\n\n" + blocks[1]["text"]
 
-        # Extract sections from both (split on double-newline)
-        original_sections = set(original.split("\n\n"))
-        combined_sections = set(combined.split("\n\n"))
-
-        assert original_sections == combined_sections, (
-            f"Variant {variant}: section sets differ.\n"
-            f"Only in original: {original_sections - combined_sections}\n"
-            f"Only in blocks: {combined_sections - original_sections}"
-        )
+        # These markers must be present regardless of variant
+        required_markers = [
+            "You are a music remix planner",
+            "CRITICAL MIXING RULES",
+            "MIXING ADVISORY",
+            "TRANSITIONS:",
+            "SECTION RULES:",
+            "GENRE GUIDANCE",
+            "TEMPO MATCHING:",
+            "HANDLING AMBIGUOUS PROMPTS",
+            "STEM SEPARATION ARTIFACTS",
+            "EXPLANATION: Write 2-3",
+            "SONG DATA:",
+            "1 bar = 4 beats",
+        ]
+        for marker in required_markers:
+            assert marker in combined, (
+                f"Variant {variant}: marker missing from blocks: {marker}"
+            )
 
     def test_stretch_advisory_in_dynamic_block(self):
         """When stretch_pct > 12, the stretch warning appears in dynamic block only."""
