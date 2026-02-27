@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     ab_vocal_makeup_v1: bool = False
     ab_mp3_export_path_v1: bool = False
 
+    # Sound quality enhancement flags (default-off for A/B)
+    ab_per_stem_eq_v1: bool = False
+    ab_resonance_detection_v1: bool = False
+
     model_config = SettingsConfigDict(env_file=".env")
 
 
