@@ -218,6 +218,13 @@ def run_pipeline(
 
     meta_a = analyze_audio(song_a_path)
     meta_b = analyze_audio(song_b_path)
+
+    # Propagate source quality metadata (YouTube inputs carry codec/bitrate info)
+    if source_quality_a is not None:
+        meta_a.source_quality = source_quality_a
+    if source_quality_b is not None:
+        meta_b.source_quality = source_quality_b
+
     logger.info(
         "Session %s: Song A BPM=%.1f, Song B BPM=%.1f",
         session_id, meta_a.bpm, meta_b.bpm,
@@ -401,7 +408,7 @@ def run_pipeline(
             _v_bpm, _i_bpm = meta_b.bpm, meta_a.bpm
         else:
             _v_bpm, _i_bpm = meta_a.bpm, meta_b.bpm
-        _pi_approx_bpm = _est_bpm(_v_bpm, _i_bpm)
+        _pi_approx_bpm = _est_bpm(_v_bpm, _i_bpm, plan.tempo_source)
         _pi_est_duration = _pi_total_beats * 60 / _pi_approx_bpm if _pi_approx_bpm > 0 else 0
         logger.info(
             "Session %s: Arrangement: %d sections, %d beats, est %.0fs at %.0f BPM",
@@ -506,6 +513,11 @@ def run_pipeline(
     inst_audio = _filter_inactive(inst_audio, "instrumental")
 
     # === STEP 7.7: Vocal pre-filter bandpass ===
+    emit_progress(event_queue, {
+        "step": "processing",
+        "detail": "Pre-filtering vocals...",
+        "progress": 0.59,
+    }, session=session)
     # Apply 150Hz bandpass to vocal stems before tempo stretching.
     # Removes low-frequency bleed (bass rumble, kick artifacts) and
     # high-frequency separation noise, giving rubberband's R3 engine
@@ -708,6 +720,11 @@ def run_pipeline(
         )
 
     # === STEP 11.8: Pre-limit drum and bass transients ===
+    emit_progress(event_queue, {
+        "step": "processing",
+        "detail": "Taming drum transients...",
+        "progress": 0.82,
+    }, session=session)
     # Drum transients have 12-15 dB crest factor, consuming all headroom
     # at the mix bus. Pre-limiting reduces crest factor so the LUFS
     # normalizer can actually boost to target. Ceiling/release are tunable
@@ -865,6 +882,11 @@ def run_pipeline(
     logger.info("Session %s: LUFS after auto-level: %.1f", session_id, _lufs_post_autolevel)
 
     # === STEPS 14/14.5/15/15.5: Mastering chain (mutual exclusion) ===
+    emit_progress(event_queue, {
+        "step": "rendering",
+        "detail": "Mastering: peak limiting...",
+        "progress": 0.89,
+    }, session=session)
     if settings.ab_static_mastering_v1:
         # === STEP 14.5: Static mastering chain ===
         # Constrained LUFS normalize (-12 LUFS) then limiter (-1.0 dBTP).
@@ -907,6 +929,11 @@ def run_pipeline(
         logger.info("Session %s: LUFS after limiter: %.1f", session_id, _lufs_post_limiter)
 
         # === STEP 15: Peak-constrained LUFS normalization ===
+        emit_progress(event_queue, {
+            "step": "rendering",
+            "detail": "Mastering: normalizing loudness...",
+            "progress": 0.91,
+        }, session=session)
         # Applies the minimum of (LUFS gain, peak-safe gain) so we never boost
         # past the ceiling. Eliminates the old normalize-then-trim loop that was
         # undoing LUFS gains entirely.
@@ -924,6 +951,11 @@ def run_pipeline(
         mixed = soft_clip(mixed, safety_ceiling, knee_db=2.0)
 
     # === STEP 16: Fades ===
+    emit_progress(event_queue, {
+        "step": "rendering",
+        "detail": "Applying fades...",
+        "progress": 0.93,
+    }, session=session)
     skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
     # Renderer no longer applies a terminal fade-out; keep one authoritative
     # final fade stage here in the pipeline for every remix.
