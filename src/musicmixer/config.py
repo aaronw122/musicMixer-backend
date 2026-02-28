@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     # Stem separation
     stem_backend: str = "modal"  # "modal" or "local"
 
+    # Stem cache
+    stem_cache_enabled: bool = True
+    stem_cache_max_gb: float = 10.0
+    stem_cache_dir: Path = Path("data/stem_cache")
+
     # Output
     output_format: str = "mp3"
     output_bitrate: str = "320k"
