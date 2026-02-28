@@ -549,13 +549,10 @@ def run_pipeline(
     # === STEP 7.75: Broad preset EQ (before tempo stretch) ===
     # Apply corrective EQ profiles per stem type. Only broad cuts/boosts (Q~1-3)
     # are safe before stretching.
-    vocal_eq_kwargs = {"halve_hf_boosts": True} if is_lossy_vocal_source else {}
-    inst_eq_kwargs = {"halve_hf_boosts": True} if is_lossy_inst_source else {}
     for stem_type, audio in vocal_audio.items():
         _pre = vocal_audio[stem_type]
         _t0 = time.monotonic()
-        _result = apply_corrective_eq(audio, sr, stem_type,
-            apply_preset=True, **vocal_eq_kwargs)
+        _result = apply_corrective_eq(audio, sr, stem_type, apply_preset=True)
         _elapsed = time.monotonic() - _t0
         if _elapsed > DSP_STEP_TIMEOUT_S:
             logger.error(
@@ -569,8 +566,7 @@ def run_pipeline(
     for stem_type, audio in inst_audio.items():
         _pre = inst_audio[stem_type]
         _t0 = time.monotonic()
-        _result = apply_corrective_eq(audio, sr, stem_type,
-            apply_preset=True, **inst_eq_kwargs)
+        _result = apply_corrective_eq(audio, sr, stem_type, apply_preset=True)
         _elapsed = time.monotonic() - _t0
         if _elapsed > DSP_STEP_TIMEOUT_S:
             logger.error(
@@ -591,10 +587,7 @@ def run_pipeline(
         _eq_lufs = _eq_meter.integrated_loudness(audio)
         logger.info("Session %s: LUFS after preset EQ (inst/%s): %.1f", session_id, stem_type, _eq_lufs)
 
-    logger.info(
-        "Session %s: Preset EQ applied (lossy_vocal=%s, lossy_inst=%s)",
-        session_id, is_lossy_vocal_source, is_lossy_inst_source,
-    )
+    logger.info("Session %s: Preset EQ applied", session_id)
 
     # === STEP 8: Compute tempo plan ===
     target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings, stretch_pct = compute_tempo_plan(

@@ -36,8 +36,7 @@ Q_BOOST = 2.0
 # Preset EQ Profiles
 # ---------------------------------------------------------------------------
 
-# Each profile is a list of (PluginClass, kwargs) tuples. The `_gain_db` key
-# in kwargs is used to identify HF boosts for the halve_hf_boosts feature.
+# Each profile is a list of (PluginClass, kwargs) tuples.
 # Filters are applied in order.
 
 _EQ_PRESETS: dict[str, list[tuple[type, dict[str, Any]]]] = {
@@ -81,36 +80,17 @@ _EQ_PRESETS: dict[str, list[tuple[type, dict[str, Any]]]] = {
     ],
 }
 
-# HF boost threshold: frequencies at or above this are considered "high frequency"
-# for the halve_hf_boosts feature (lossy YouTube sources).
-_HF_THRESHOLD_HZ = 2000.0
-
-
-def _build_preset_board(stem_type: str, halve_hf_boosts: bool = False) -> Pedalboard:
+def _build_preset_board(stem_type: str) -> Pedalboard:
     """Build a Pedalboard from the preset profile for a given stem type.
 
     Args:
         stem_type: One of vocals, drums, bass, guitar, piano, other.
-        halve_hf_boosts: When True, multiply all HF boost gains by 0.5
-            (for lossy YouTube sources to avoid amplifying codec artifacts).
 
     Returns:
         Configured Pedalboard instance.
     """
     preset = _EQ_PRESETS.get(stem_type, _EQ_PRESETS["other"])
-    plugins = []
-
-    for plugin_cls, kwargs in preset:
-        kw = dict(kwargs)  # copy to avoid mutating the preset
-
-        # Apply halve_hf_boosts: halve positive gain_db on HF filters
-        if halve_hf_boosts and "gain_db" in kw and kw["gain_db"] > 0:
-            freq = kw.get("cutoff_frequency_hz", 0)
-            if freq >= _HF_THRESHOLD_HZ:
-                kw["gain_db"] = kw["gain_db"] * 0.5
-
-        plugins.append(plugin_cls(**kw))
-
+    plugins = [plugin_cls(**kwargs) for plugin_cls, kwargs in preset]
     return Pedalboard(plugins)
 
 
@@ -124,7 +104,6 @@ def apply_corrective_eq(
     sr: int,
     stem_type: str,
     apply_preset: bool = True,
-    halve_hf_boosts: bool = False,
     **kwargs,
 ) -> np.ndarray:
     """Apply corrective EQ to a stem.
@@ -138,9 +117,7 @@ def apply_corrective_eq(
         stem_type: One of vocals, drums, bass, guitar, piano, other.
             Unknown types fall back to "other".
         apply_preset: Whether to apply the preset EQ profile.
-        halve_hf_boosts: When True, multiply all HF boost gains by 0.5
-            (for lossy YouTube sources).
-        **kwargs: Accepted for backward compatibility (e.g. apply_resonance_cuts).
+        **kwargs: Accepted for backward compatibility.
 
     Returns:
         Processed audio with same shape and dtype as input.
@@ -154,7 +131,7 @@ def apply_corrective_eq(
 
     # Preset EQ (broad cuts/boosts)
     if apply_preset:
-        board = _build_preset_board(stem_type, halve_hf_boosts=halve_hf_boosts)
+        board = _build_preset_board(stem_type)
         result = process_with_pedalboard(result, board, sr)
         logger.debug("Applied preset EQ for stem_type='%s'", stem_type)
 
