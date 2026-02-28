@@ -8,7 +8,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import queue
+
+logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
 from musicmixer.models import SessionState
 from musicmixer.services.pipeline import run_pipeline

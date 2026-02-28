@@ -300,7 +300,7 @@ class TestCircuitBreaker:
         # Now: succeed (reset counter)
         mock_planner.generate_candidates = MagicMock(return_value=[selected])
         mock_constraints.validate_candidate = MagicMock(return_value=(True, None))
-        mock_model.select_best = MagicMock(return_value=(selected, "heuristic"))
+        mock_model.select_best = MagicMock(return_value=(selected, []))
 
         with patch.dict("sys.modules", {
             "musicmixer.services.candidate_planner": mock_planner,
@@ -357,7 +357,7 @@ class TestCircuitBreaker:
         mock_constraints = MagicMock()
         mock_constraints.validate_candidate = MagicMock(return_value=(True, None))
         mock_model = MagicMock()
-        mock_model.select_best = MagicMock(return_value=(selected, "model"))
+        mock_model.select_best = MagicMock(return_value=(selected, []))
 
         with patch.dict("sys.modules", {
             "musicmixer.services.candidate_planner": mock_planner,
@@ -366,7 +366,7 @@ class TestCircuitBreaker:
         }):
             result = run_taste_stage(meta_a, meta_b, "test", fallback_plan=fallback)
             assert result.fallback_triggered is False
-            assert result.selection_method == "model"
+            assert result.selection_method == "heuristic"
 
 
 class TestSuccessfulRun:
@@ -386,7 +386,7 @@ class TestSuccessfulRun:
         mock_constraints = MagicMock()
         mock_constraints.validate_candidate = MagicMock(return_value=(True, None))
         mock_model = MagicMock()
-        mock_model.select_best = MagicMock(return_value=(candidate_1, "heuristic"))
+        mock_model.select_best = MagicMock(return_value=(candidate_1, []))
 
         with patch.dict("sys.modules", {
             "musicmixer.services.candidate_planner": mock_planner,
