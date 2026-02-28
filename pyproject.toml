@@ -30,6 +30,9 @@ dependencies = [
 analysis = [
     "essentia; python_version < '3.12'",
 ]
+ml = [
+    "catboost>=1.2.0",
+]
 
 [tool.uv]
 package = true
