@@ -32,6 +32,7 @@ class TestSeparateStemsDispatcher:
 
         with patch("musicmixer.services.separation.settings") as mock_settings:
             mock_settings.stem_backend = "modal"
+            mock_settings.stem_cache_enabled = False
             result = separate_stems(tmp_path / "input.wav", tmp_path / "out")
 
         mock_modal.assert_called_once()
@@ -46,6 +47,7 @@ class TestSeparateStemsDispatcher:
 
         with patch("musicmixer.services.separation.settings") as mock_settings:
             mock_settings.stem_backend = "local"
+            mock_settings.stem_cache_enabled = False
             result = separate_stems(tmp_path / "input.wav", tmp_path / "out")
 
         mock_local.assert_called_once()
