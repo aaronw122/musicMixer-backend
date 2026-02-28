@@ -602,26 +602,16 @@ def run_pipeline(
         and inst_meta.key is not None
         and inst_meta.scale is not None
     ):
-        if plan.key_source != "none":
-            # Explicit key_source: compute shift to align vocal to instrumental key
-            pitch_shift_semitones = compute_key_transposition_with_confidence(
-                vocal_key=vocal_meta.key,
-                vocal_scale=vocal_meta.scale,
-                instrumental_key=inst_meta.key,
-                instrumental_scale=inst_meta.scale,
-                vocal_key_confidence=vocal_meta.key_confidence,
-                instrumental_key_confidence=inst_meta.key_confidence,
-            )
-        else:
-            # Auto-transpose heuristic: check for dissonance even when key_source="none"
-            pitch_shift_semitones = compute_key_transposition_with_confidence(
-                vocal_key=vocal_meta.key,
-                vocal_scale=vocal_meta.scale,
-                instrumental_key=inst_meta.key,
-                instrumental_scale=inst_meta.scale,
-                vocal_key_confidence=vocal_meta.key_confidence,
-                instrumental_key_confidence=inst_meta.key_confidence,
-            )
+        # Handles both explicit key_source and auto-transpose (key_source="none"):
+        # the function itself applies confidence gating and dissonance detection.
+        pitch_shift_semitones = compute_key_transposition_with_confidence(
+            vocal_key=vocal_meta.key,
+            vocal_scale=vocal_meta.scale,
+            instrumental_key=inst_meta.key,
+            instrumental_scale=inst_meta.scale,
+            vocal_key_confidence=vocal_meta.key_confidence,
+            instrumental_key_confidence=inst_meta.key_confidence,
+        )
 
         logger.info(
             "Session %s: Key transposition: vocal=%s %s (conf=%.2f), "

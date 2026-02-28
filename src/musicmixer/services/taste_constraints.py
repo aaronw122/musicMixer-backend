@@ -369,19 +369,6 @@ _RELATIVE_MINOR_OFFSET = 3  # minor root + 3 = relative major root
 _DISSONANT_INTERVALS = {1, 2, 6}
 
 
-def _parse_key_string(key_str: str) -> tuple[str, str] | None:
-    """Parse a key string like 'F# minor' or 'E major' into (note, scale).
-
-    Also accepts already-split forms. Returns None if unparseable.
-    """
-    parts = key_str.strip().split()
-    if len(parts) == 2:
-        note, scale = parts[0], parts[1].lower()
-        if note in _NOTE_TO_SEMITONE and scale in ("major", "minor"):
-            return note, scale
-    return None
-
-
 def _root_pitch_class(key: str, scale: str) -> int | None:
     """Get the effective root pitch class, normalizing relative major/minor.
 
@@ -409,8 +396,9 @@ def compute_key_transposition(
 
     Treats relative major/minor as compatible (C major <-> A minor = 0 shift).
 
-    Uses _key_semitone_distance ONLY for dissonance detection (checking if
-    the unsigned interval falls in the dissonant set {1, 2, 6}).
+    Dissonance is checked on normalized pitch class roots (minor keys
+    normalized to relative major before comparison). The unsigned interval
+    between roots is checked against the dissonant set {1, 2, 6}.
 
     For the actual signed shift, computes:
         signed_shift = (target_root - source_root + 6) % 12 - 6
