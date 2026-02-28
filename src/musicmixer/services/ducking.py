@@ -95,16 +95,10 @@ def spectral_duck(
     if n_frames <= 0:
         return result
 
-    vocal_energy = np.array(
-        [
-            np.sqrt(
-                np.mean(
-                    vocal_filtered[i * frame_len : (i + 1) * frame_len] ** 2
-                )
-            )
-            for i in range(n_frames)
-        ]
-    )
+    # Reshape into (n_frames, frame_len) matrix for vectorized RMS.
+    # Truncate to n_frames * frame_len to avoid leftover samples.
+    frames = vocal_filtered[: n_frames * frame_len].reshape(n_frames, frame_len)
+    vocal_energy = np.sqrt(np.mean(frames**2, axis=1))
 
     # Noise-floor-relative threshold with hysteresis.
     # The absolute floor (1e-5) prevents perpetual ducking with very clean
