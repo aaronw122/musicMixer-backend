@@ -392,6 +392,28 @@ def run_pipeline(
 
     logger.info("Session %s: [4/17] plan ready (vocals=%s, %d sections, fallback=%s)", session_id, plan.vocal_source, len(plan.sections), plan.used_fallback)
 
+    # === STEP 4.5: Taste training stage (candidate generation + scoring) ===
+    if settings.ab_taste_model_v1:
+        from musicmixer.services.taste_stage import run_taste_stage
+        taste_result = run_taste_stage(
+            meta_a=meta_a,
+            meta_b=meta_b,
+            prompt=prompt,
+            fallback_plan=plan,  # use LLM/fallback plan as safety net
+        )
+        if not taste_result.fallback_triggered:
+            plan = taste_result.selected_plan
+        logger.info(
+            "Session %s: Taste stage: %d candidates, %d after filter, method=%s, "
+            "latency=%.0fms, fallback=%s",
+            session_id,
+            taste_result.candidates_generated,
+            taste_result.candidates_after_filter,
+            taste_result.selection_method,
+            taste_result.total_latency_ms,
+            taste_result.fallback_triggered,
+        )
+
     # Post-interpret arrangement logging
     if plan.sections:
         _pi_total_beats = plan.sections[-1].end_beat
