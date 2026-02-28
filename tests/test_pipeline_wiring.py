@@ -128,7 +128,9 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
         mock_settings.ab_autolvl_tune_v1 = False
         mock_settings.ab_vocal_makeup_v1 = False
         mock_settings.ab_mp3_export_path_v1 = False
+        mock_settings.ab_taste_model_v1 = False
         mock_settings.ab_control_day3 = True
+        mock_settings.anthropic_api_key = ""  # Prevent LLM API calls in tests
 
         # Apply settings overrides (AB flags, etc.)
         if settings_overrides:

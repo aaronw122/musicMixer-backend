@@ -16,12 +16,45 @@ def separate_stems(
 ) -> dict[str, Path]:
     """Separate audio into stems. Returns mapping of stem name to WAV file path.
 
-    Dispatches to Modal (cloud GPU) or local backend based on settings.stem_backend.
+    Checks the stem cache first (keyed by SHA-256 of input file). On cache
+    hit, copies cached stems to *output_dir* and returns immediately. On
+    cache miss, dispatches to Modal or local backend, then caches the result.
     """
-    if settings.stem_backend == "modal":
-        return _separate_modal(audio_path, output_dir, progress_callback)
+    from musicmixer.services.stem_cache import (
+        cache_stems,
+        get_cache_key,
+        get_cached_stems,
+    )
+
+    # Check stem cache
+    if settings.stem_cache_enabled:
+        cache_key = get_cache_key(audio_path)
+        if get_cached_stems(cache_key, output_dir):
+            if progress_callback:
+                progress_callback("Stems loaded from cache")
+            # Build stem_paths from the copied files
+            stem_paths = {}
+            for wav in output_dir.glob("*.wav"):
+                stem_paths[wav.stem] = wav
+            logger.info("Using cached stems for %s (%s)", audio_path.name, cache_key[:12])
+            return stem_paths
     else:
-        return _separate_local(audio_path, output_dir, progress_callback)
+        cache_key = None
+
+    # Cache miss -- run separation
+    if settings.stem_backend == "modal":
+        result = _separate_modal(audio_path, output_dir, progress_callback)
+    else:
+        result = _separate_local(audio_path, output_dir, progress_callback)
+
+    # Cache the result for future use
+    if cache_key is not None:
+        try:
+            cache_stems(cache_key, output_dir)
+        except Exception:
+            logger.warning("Failed to cache stems for %s", audio_path.name, exc_info=True)
+
+    return result
 
 
 def _separate_modal(

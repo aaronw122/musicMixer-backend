@@ -17,9 +17,11 @@ import functools
 import json
 import logging
 import queue
+import threading
 import time
 import urllib.parse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -149,7 +151,14 @@ def _youtube_pipeline_wrapper(
     session: SessionState,
     processing_lock,
 ) -> None:
-    """Downloads YouTube audio, then runs the pipeline. Releases processing_lock on exit."""
+    """Downloads YouTube audio in parallel, then runs the pipeline.
+
+    Both downloads are independent so we use a 2-thread pool to overlap them.
+    A lock-guarded monotonic progress tracker prevents progress values from
+    jumping backward when the two callbacks interleave.
+
+    Releases processing_lock on exit.
+    """
     try:
         session.status = "processing"
         from musicmixer.services.pipeline import emit_progress, run_pipeline
@@ -158,61 +167,76 @@ def _youtube_pipeline_wrapper(
         upload_dir = settings.data_dir / "uploads" / session_id
         upload_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Download Song A (5-25% progress) ---
-        emit_progress(session.events, {
-            "step": "downloading",
-            "detail": "Downloading song A from YouTube...",
-            "progress": 0.05,
-        }, session=session)
+        # --- Monotonic progress tracker ---
+        # Both downloads report into the 0.05-0.45 range.  Song A maps to
+        # 0.05-0.25 and Song B maps to 0.25-0.45 — but because they run
+        # concurrently, raw values can arrive out-of-order.  We only emit
+        # when the new value exceeds the high-water mark.
+        _progress_lock = threading.Lock()
+        _progress_hwm = 0.0  # high-water mark
 
-        def _progress_a(fraction: float, status: str) -> None:
-            # Map fraction 0-1 to progress 0.05-0.25
-            progress = 0.05 + fraction * 0.20
+        def _emit_monotonic(detail: str, progress: float) -> None:
+            nonlocal _progress_hwm
+            with _progress_lock:
+                if progress <= _progress_hwm:
+                    return
+                _progress_hwm = progress
             emit_progress(session.events, {
                 "step": "downloading",
-                "detail": f"Downloading song A: {status}",
+                "detail": detail,
                 "progress": round(progress, 3),
             }, session=session)
 
-        result_a = _run_sync(download_youtube_audio(
-            url=url_a,
-            output_dir=upload_dir,
-            progress_callback=_progress_a,
-        ))
+        # --- Emit initial downloading event ---
+        _emit_monotonic("Downloading songs from YouTube...", 0.05)
 
-        emit_progress(session.events, {
-            "step": "downloading",
-            "detail": "Song A downloaded!",
-            "progress": 0.25,
-        }, session=session)
-
-        # --- Download Song B (25-45% progress) ---
-        emit_progress(session.events, {
-            "step": "downloading",
-            "detail": "Downloading song B from YouTube...",
-            "progress": 0.25,
-        }, session=session)
+        # --- Progress callbacks ---
+        def _progress_a(fraction: float, status: str) -> None:
+            # Map fraction 0-1 to progress 0.05-0.25
+            progress = 0.05 + fraction * 0.20
+            _emit_monotonic(f"Downloading song A: {status}", progress)
 
         def _progress_b(fraction: float, status: str) -> None:
             # Map fraction 0-1 to progress 0.25-0.45
             progress = 0.25 + fraction * 0.20
-            emit_progress(session.events, {
-                "step": "downloading",
-                "detail": f"Downloading song B: {status}",
-                "progress": round(progress, 3),
-            }, session=session)
+            _emit_monotonic(f"Downloading song B: {status}", progress)
 
-        result_b = _run_sync(download_youtube_audio(
-            url=url_b,
-            output_dir=upload_dir,
-            progress_callback=_progress_b,
-        ))
+        # --- Download helpers (run async fn in a fresh event loop per thread) ---
+        def _download_a():
+            return _run_sync(download_youtube_audio(
+                url=url_a,
+                output_dir=upload_dir,
+                progress_callback=_progress_a,
+            ))
 
-        emit_progress(session.events, {
-            "step": "downloading",
-            "detail": "Both songs downloaded!",
-            "progress": 0.45,
-        }, session=session)
+        def _download_b():
+            return _run_sync(download_youtube_audio(
+                url=url_b,
+                output_dir=upload_dir,
+                progress_callback=_progress_b,
+            ))
+
+        # --- Parallel downloads ---
+        with ThreadPoolExecutor(max_workers=2) as dl_executor:
+            future_a = dl_executor.submit(_download_a)
+            future_b = dl_executor.submit(_download_b)
+
+            try:
+                result_a = future_a.result(timeout=300)
+            except Exception:
+                # If Song A fails, cancel Song B and re-raise
+                future_b.cancel()
+                dl_executor.shutdown(wait=False, cancel_futures=True)
+                raise
+
+            try:
+                result_b = future_b.result(timeout=300)
+            except Exception:
+                # Song B failed after Song A succeeded
+                dl_executor.shutdown(wait=False, cancel_futures=True)
+                raise
+
+        _emit_monotonic("Both songs downloaded!", 0.45)
 
         logger.info(
             "Session %s: YouTube downloads complete. A=%r (%ds, %s %dkbps), B=%r (%ds, %s %dkbps)",
