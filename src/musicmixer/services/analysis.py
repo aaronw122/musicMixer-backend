@@ -534,6 +534,20 @@ def _detect_key_essentia(audio_path: Path) -> tuple[str, str, float]:
     return str(key), str(scale), float(confidence)
 
 
+def _detect_key_essentia_array(audio: np.ndarray) -> tuple[str, str, float]:
+    """Detect key using essentia KeyExtractor on a pre-loaded 44.1 kHz array.
+
+    Returns (key, scale, confidence).
+    Raises ImportError or RuntimeError if essentia is unavailable or fails.
+    """
+    if not _HAS_ESSENTIA:
+        raise ImportError("essentia not available")
+
+    key_extractor = es.KeyExtractor()
+    key, scale, confidence = key_extractor(audio)
+    return str(key), str(scale), float(confidence)
+
+
 def _detect_key_librosa(audio_path: Path) -> tuple[str, str, float]:
     """Detect key using librosa chroma_cqt (fallback).
 
@@ -541,6 +555,57 @@ def _detect_key_librosa(audio_path: Path) -> tuple[str, str, float]:
     the sharpness of the chroma profile peak.
     """
     y, sr = librosa.load(str(audio_path), sr=22050)
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+
+    # Average chroma profile across time
+    chroma_profile = np.mean(chroma, axis=1)
+
+    # Key names (C, C#, D, ...)
+    key_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+    # Find the dominant pitch class
+    dominant_idx = int(np.argmax(chroma_profile))
+    key = key_names[dominant_idx]
+
+    # Determine major/minor by comparing major and minor profiles
+    # Krumhansl-Kessler profiles
+    major_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+    minor_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+
+    # Correlate with rotated profiles
+    best_corr_major = -1.0
+    best_corr_minor = -1.0
+    for shift in range(12):
+        rotated_major = np.roll(major_profile, shift)
+        rotated_minor = np.roll(minor_profile, shift)
+        corr_major = float(np.corrcoef(chroma_profile, rotated_major)[0, 1])
+        corr_minor = float(np.corrcoef(chroma_profile, rotated_minor)[0, 1])
+        if corr_major > best_corr_major:
+            best_corr_major = corr_major
+        if corr_minor > best_corr_minor:
+            best_corr_minor = corr_minor
+
+    if best_corr_minor > best_corr_major:
+        scale = "minor"
+    else:
+        scale = "major"
+
+    # Confidence: ratio of peak to mean in chroma profile
+    if np.mean(chroma_profile) > 0:
+        confidence = float(np.max(chroma_profile) / np.mean(chroma_profile)) / 2.0
+        confidence = min(confidence, 1.0)
+    else:
+        confidence = 0.0
+
+    return key, scale, confidence
+
+
+def _detect_key_librosa_array(y: np.ndarray, sr: int = 22050) -> tuple[str, str, float]:
+    """Detect key using librosa chroma_cqt on a pre-loaded array (fallback).
+
+    Returns (key, scale, confidence). Confidence is derived from
+    the sharpness of the chroma profile peak.
+    """
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
 
     # Average chroma profile across time
@@ -634,6 +699,116 @@ def detect_modulation(audio_path: Path) -> bool:
     except Exception:
         logger.debug("Modulation detection failed", exc_info=True)
         return False
+
+
+def _detect_modulation_essentia_array(audio: np.ndarray) -> bool:
+    """Detect modulation using essentia on a pre-loaded 44.1 kHz array."""
+    split_point = int(len(audio) * 0.6)
+    key_extractor = es.KeyExtractor()
+    key_first, scale_first, _ = key_extractor(audio[:split_point])
+    key_last, scale_last, _ = key_extractor(audio[split_point:])
+    return key_first != key_last or scale_first != scale_last
+
+
+def _detect_modulation_librosa_array(y: np.ndarray, sr: int = 22050) -> bool:
+    """Detect modulation using librosa on a pre-loaded array."""
+    split_point = int(len(y) * 0.6)
+    chroma_first = np.mean(librosa.feature.chroma_cqt(y=y[:split_point], sr=sr), axis=1)
+    chroma_last = np.mean(librosa.feature.chroma_cqt(y=y[split_point:], sr=sr), axis=1)
+    key_first = int(np.argmax(chroma_first))
+    key_last = int(np.argmax(chroma_last))
+    return key_first != key_last
+
+
+def analyze_audio_full(audio_path: Path) -> AudioMetadata:
+    """Consolidated audio analysis: BPM, key, scale, modulation in one pass.
+
+    Loads the audio file ONCE at 44.1 kHz (needed for essentia key detection),
+    then downsamples to 22050 Hz in-memory for BPM detection. Eliminates the
+    redundant file loads that previously occurred across analyze_audio(),
+    detect_key(), and detect_modulation().
+
+    Returns AudioMetadata with key/scale/confidence/modulation already populated.
+    """
+    # --- Single load at 44.1 kHz ---
+    y_44k, _ = librosa.load(str(audio_path), sr=KEY_DETECTION_SR)
+
+    # --- Downsample to 22050 Hz in-memory for BPM detection ---
+    y_22k = librosa.resample(y_44k, orig_sr=KEY_DETECTION_SR, target_sr=ANALYSIS_SR)
+
+    # --- BPM detection (on 22050 Hz data, same as original analyze_audio) ---
+    tempo, beat_frames = librosa.beat.beat_track(y=y_22k, sr=ANALYSIS_SR, units="frames")
+    bpm = float(np.atleast_1d(tempo)[0])
+
+    duration = float(librosa.get_duration(y=y_22k, sr=ANALYSIS_SR))
+    total_beats = round(bpm * duration / 60 / 4) * 4  # Round to nearest bar
+
+    # BPM confidence via tempogram peak sharpness
+    tempogram = librosa.feature.tempogram(y=y_22k, sr=ANALYSIS_SR)
+    tempo_profile = np.mean(tempogram, axis=1)
+    if np.max(tempo_profile) > 0:
+        bpm_confidence = float(np.max(tempo_profile) / np.mean(tempo_profile))
+        bpm_confidence = min(bpm_confidence / 10.0, 1.0)
+    else:
+        bpm_confidence = 0.0
+
+    # Mean RMS from original mix audio (spec section 8)
+    mean_rms = float(np.sqrt(np.mean(y_22k ** 2)))
+
+    # --- Key detection (on 44.1 kHz data for essentia, 22050 Hz for librosa fallback) ---
+    key: Optional[str] = None
+    scale: Optional[str] = None
+    key_confidence: Optional[float] = None
+
+    try:
+        if _HAS_ESSENTIA:
+            key, scale, key_confidence = _detect_key_essentia_array(y_44k)
+        else:
+            key, scale, key_confidence = _detect_key_librosa_array(y_22k, sr=ANALYSIS_SR)
+    except Exception:
+        # Fall back to librosa array variant
+        try:
+            key, scale, key_confidence = _detect_key_librosa_array(y_22k, sr=ANALYSIS_SR)
+        except Exception:
+            logger.warning("Key detection failed for %s", audio_path.name, exc_info=True)
+
+    # --- Modulation detection (reuse loaded arrays) ---
+    has_modulation = False
+    try:
+        if _HAS_ESSENTIA:
+            has_modulation = _detect_modulation_essentia_array(y_44k)
+        else:
+            has_modulation = _detect_modulation_librosa_array(y_22k, sr=ANALYSIS_SR)
+    except Exception:
+        logger.debug("Modulation detection failed for %s", audio_path.name, exc_info=True)
+
+    logger.info(
+        "Full audio analysis complete: path=%s bpm=%.1f confidence=%.2f "
+        "duration=%.1fs beats=%d rms=%.4f key=%s scale=%s key_conf=%.2f modulation=%s",
+        audio_path.name,
+        bpm,
+        bpm_confidence,
+        duration,
+        total_beats,
+        mean_rms,
+        key,
+        scale,
+        key_confidence if key_confidence is not None else 0.0,
+        has_modulation,
+    )
+
+    return AudioMetadata(
+        bpm=bpm,
+        bpm_confidence=bpm_confidence,
+        beat_frames=beat_frames,
+        duration_seconds=duration,
+        total_beats=max(total_beats, 4),
+        mean_rms=mean_rms,
+        key=key,
+        scale=scale,
+        key_confidence=key_confidence,
+        has_modulation=has_modulation,
+    )
 
 
 # ---------------------------------------------------------------------------
