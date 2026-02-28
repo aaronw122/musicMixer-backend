@@ -759,7 +759,7 @@ def run_pipeline(
             attack_ms=10.0,      # Preserve plosive transients
             release_ms=80.0,     # Fast release: recover quickly between phrases
             makeup_db=vocal_makeup_db,
-            gate_floor_db=-50.0, # Low gate: only ignore true silence
+            gate_floor_db=-35.0, # Raised gate: prevent makeup gain on reverb tails/artifacts
         )
         logger.info(
             "Session %s: Vocal compression applied (makeup_db=%.1f)",
@@ -979,7 +979,7 @@ def run_pipeline(
             mixed, sr,
             ceiling_dbtp=-1.0,
             lookahead_ms=5.0,
-            release_ms=50.0,
+            release_ms=120.0,
         )
 
         # Log final LUFS for verification

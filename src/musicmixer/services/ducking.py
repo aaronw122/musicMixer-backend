@@ -127,9 +127,24 @@ def spectral_duck(
     else:
         mask_overlap = raw_mask[:min_len]
 
-    # Exponential IIR smoothing: 30ms attack, 150ms release
+    # Hold: after vocal activity drops, keep mask active for hold_ms before
+    # starting release. Prevents rapid on/off cycling on intermittent vocals
+    # (e.g. 21 Savage pausing between bars).
+    hold_ms = 200.0
+    hold_samples = int(hold_ms / 1000.0 * sr)
+    if hold_samples > 0:
+        # Max filter extends each active region by hold_samples.
+        # Positive origin shifts the window RIGHT (forward in time), creating
+        # a trailing hold that extends ~200ms after vocal drops. O(n) via scipy.
+        from scipy.ndimage import maximum_filter1d
+        mask_overlap = maximum_filter1d(
+            mask_overlap, size=hold_samples, origin=+(hold_samples // 2 - 1)
+        )
+
+    # Exponential IIR smoothing: 30ms attack, 400ms release
+    # 400ms release gives a full quarter-note recovery at 85 BPM
     attack_alpha = 1 - math.exp(-1.0 / (0.03 * sr))
-    release_alpha = 1 - math.exp(-1.0 / (0.15 * sr))
+    release_alpha = 1 - math.exp(-1.0 / (0.40 * sr))
 
     # Two-pass lfilter approximation (runs in <0.05s vs 5-15s for naive loop)
     attack_smoothed = lfilter(
