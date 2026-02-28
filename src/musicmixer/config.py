@@ -40,20 +40,8 @@ class Settings(BaseSettings):
     youtube_enabled: bool = True
     youtube_max_duration_seconds: int = 900  # 15 minutes
 
-    # Day 3.5 audio-quality A/B flags (default-off)
-    ab_control_day3: bool = True
-    ab_autolvl_tune_v1: bool = False
-    ab_vocal_makeup_v1: bool = False
-    ab_mp3_export_path_v1: bool = False
-
-    # Sound quality enhancement flags (default-off for A/B)
-    ab_per_stem_eq_v1: bool = False
-    ab_resonance_detection_v1: bool = False
-    ab_multiband_comp_v1: bool = False
-    ab_static_mastering_v1: bool = False
-
     # Taste training (candidate generation + scoring)
-    ab_taste_model_v1: bool = False
+    ab_taste_model_v1: bool = True
 
     model_config = SettingsConfigDict(env_file=".env")
 

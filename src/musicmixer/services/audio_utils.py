@@ -1,6 +1,6 @@
 """Shared DSP utilities for pedalboard-based audio processing.
 
-Used by eq.py, multiband.py, and mastering.py.
+Used by eq.py and mastering.py.
 """
 
 from __future__ import annotations

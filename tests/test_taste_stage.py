@@ -173,14 +173,6 @@ class TestFlagGating:
             mock_settings.data_dir = tmp_path
             mock_settings.stem_backend = "modal"
             mock_settings.lyrics_lookup_enabled = False
-            mock_settings.ab_per_stem_eq_v1 = False
-            mock_settings.ab_resonance_detection_v1 = False
-            mock_settings.ab_multiband_comp_v1 = False
-            mock_settings.ab_static_mastering_v1 = False
-            mock_settings.ab_autolvl_tune_v1 = False
-            mock_settings.ab_vocal_makeup_v1 = False
-            mock_settings.ab_mp3_export_path_v1 = False
-            mock_settings.ab_control_day3 = True
             mock_settings.ab_taste_model_v1 = False  # Flag OFF
 
             from musicmixer.services.pipeline import run_pipeline
@@ -507,7 +499,6 @@ class TestTasteStageLog:
             model_version="catboost-v0.1",
             flag_config={
                 "ab_taste_model_v1": True,
-                "ab_per_stem_eq_v1": False,
             },
             candidates_generated=10,
             candidates_after_filter=8,

@@ -1,8 +1,7 @@
-"""Static mastering chain: constrained LUFS normalization + true-peak limiter.
+"""Mastering chain: constrained LUFS normalization + true-peak limiter.
 
-Replaces the standard limiter chain (steps 14/15/15.5) when
-ab_static_mastering_v1 is enabled. Applies operations in standard
-mastering order:
+The sole mastering path for the remix pipeline (step 14). Applies
+operations in standard mastering order:
 
 1. Optional low-pass filter (for lossy sources)
 2. Constrained LUFS normalization at -12 LUFS (with +3 dB headroom)
