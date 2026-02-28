@@ -22,7 +22,7 @@ from pathlib import Path
 import anthropic
 
 from musicmixer.config import settings
-from musicmixer.models import AudioMetadata, LyricsData, RemixPlan, Section
+from musicmixer.models import VOCAL_SOURCE, AudioMetadata, LyricsData, RemixPlan, Section
 from musicmixer.services.tempo import compute_stretch_pct, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -63,17 +63,12 @@ REMIX_PLAN_TOOL: dict = {
     "input_schema": {
         "type": "object",
         "required": [
-            "vocal_source", "start_time_vocal", "end_time_vocal",
+            "start_time_vocal", "end_time_vocal",
             "start_time_instrumental", "end_time_instrumental",
             "sections", "tempo_source", "key_source",
             "explanation", "warnings",
         ],
         "properties": {
-            "vocal_source": {
-                "type": "string",
-                "enum": ["song_a", "song_b"],
-                "description": "Which song provides the vocals. The other song provides ALL instrumentals.",
-            },
             "start_time_vocal": {
                 "type": "number",
                 "minimum": 0,
@@ -206,14 +201,13 @@ def _build_system_prompt_blocks(
     section_1 = f"""You are a music remix planner. You decide how to combine two songs into a mashup remix.
 
 CONSTRAINTS:
-- Vocals ALWAYS come from one song. All instrumentals ({stem_list} minus vocals) ALWAYS come from the other song.
+- Vocals ALWAYS come from Song A. Instrumentals ALWAYS come from Song B. This is fixed — do not reference vocal_source in your output.
 - You CANNOT mix stems across songs (e.g., no "drums from Song A with bass from Song B").
 - You CANNOT add effects, generate new sounds, or use vocals from both songs.
 - "other" contains synths, strings, wind instruments, and anything not captured by the {stem_count - 1} named stems.
 - If the user asks for something impossible, acknowledge it in the `warnings` field and produce the best plan within these limits.
 
 CAPABILITIES:
-- Choose which song provides vocals (vocal_source)
 - Select source regions from each song (start/end times in seconds)
 - Design a section-based arrangement with per-stem volume control (0.0-1.0 for each of: {stem_list})
 - Choose transitions between sections (fade, crossfade, cut)
@@ -619,23 +613,7 @@ def _build_cross_song_layer(
                 f"Reduce Song B stems ~{abs(loudness_diff):.0f} dB."
             )
 
-    # Vocal source recommendation
-    vp_a = getattr(meta_a, "vocal_prominence_db", None)
-    vp_b = getattr(meta_b, "vocal_prominence_db", None)
-    if vp_a is not None and vp_b is not None:
-        if vp_a > vp_b:
-            lines.append(
-                f"Vocal source: Song A (+{vp_a:.0f} dB, cleaner). "
-                f"Song B vocals have more bleed (+{vp_b:.0f} dB)."
-            )
-        else:
-            lines.append(
-                f"Vocal source: Song B (+{vp_b:.0f} dB, cleaner). "
-                f"Song A vocals have more bleed (+{vp_a:.0f} dB)."
-            )
-
-    # Instrumental sections from the recommended instrumental source
-    # (default: Song B provides instrumentals)
+    # Instrumental sections from Song B (fixed: Song B provides instrumentals)
     struct_b = getattr(meta_b, "song_structure", None)
     if struct_b and struct_b.sections:
         inst_sections = [
@@ -738,7 +716,6 @@ def _build_few_shot_messages() -> list[dict]:
                 "Song B: guitar: high-energy, full. drums: high-energy, full. bass: medium-energy, mid. vocals: medium-energy, mid. piano: low-energy, sparse. (other: minimal)\n\n"
                 "=== LAYER 4: CROSS-SONG ===\n"
                 "Loudness: Song A ~5 dB louder. Reduce Song A stems ~5 dB.\n"
-                "Vocal source: Song A (+8 dB, clean). Song B has more bleed (+3 dB).\n"
                 "Instrumental source: Song B clean sections at bars 1-8, 41-72, 89-103.\n\n"
                 "=== LAYER 5: LYRICS ===\n"
                 "Use these lyrics to avoid cutting mid-phrase, identify hooks, and match themes to the prompt.\n\n"
@@ -766,7 +743,6 @@ def _build_few_shot_messages() -> list[dict]:
                     "id": "example_1",
                     "name": "create_remix_plan",
                     "input": {
-                        "vocal_source": "song_a",
                         "start_time_vocal": 0.0,
                         "end_time_vocal": 220.0,
                         "start_time_instrumental": 0.0,
@@ -801,7 +777,7 @@ def _build_few_shot_messages() -> list[dict]:
                 'Song A: "Slow Jam" -- 88 BPM, Gmin, 3:45, 82 bars.\n'
                 "Vocals: moderate, +4 dB above instrumental. Energy: moderate dynamics.\n"
                 'Song B: "Upbeat Track" -- 125 BPM, Amin, 3:30, 109 bars.\n'
-                "Vocals: dominant, +7 dB above instrumental, clean separation. Energy: wide dynamic range.\n\n"
+                "Energy: wide dynamic range.\n\n"
                 "=== LAYER 2: SECTION MAP ===\n"
                 "Song B (109 bars):\n"
                 "    1-8    8b  0:00-0:15 | intro          | low              | sparse     | vox:no    | GOOD INSTRUMENTAL SOURCE\n"
@@ -814,7 +790,7 @@ def _build_few_shot_messages() -> list[dict]:
                 "Vocal gaps: 1-8, 49-64, 97-109\n\n"
                 "=== LAYER 4: CROSS-SONG ===\n"
                 "Loudness: similar levels.\n"
-                "Vocal source: Song B (+7 dB, cleaner)."
+                "Instrumental source: Song B clean sections at bars 1-8, 49-64, 97-109."
             ),
         },
         {
@@ -825,11 +801,10 @@ def _build_few_shot_messages() -> list[dict]:
                     "id": "example_2",
                     "name": "create_remix_plan",
                     "input": {
-                        "vocal_source": "song_b",
                         "start_time_vocal": 0.0,
-                        "end_time_vocal": 210.0,
+                        "end_time_vocal": 225.0,
                         "start_time_instrumental": 0.0,
-                        "end_time_instrumental": 225.0,
+                        "end_time_instrumental": 210.0,
                         "sections": [
                             {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.8, "guitar": 0.5, "piano": 0.4, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
                             {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.8, "drums": 0.7, "bass": 0.8, "guitar": 0.3, "piano": 0.3, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
@@ -840,15 +815,15 @@ def _build_few_shot_messages() -> list[dict]:
                         ],
                         "tempo_source": "song_a",
                         "key_source": "none",
-                        "explanation": "I chose Song B's vocals since they have better separation (+7 dB). The instrumental comes from Song A's laid-back 88 BPM groove. I used Song B's vocal gaps for the instrumental intro and breakdown, giving contrast before the vocal drop.",
-                        "warnings": ["These songs have very different tempos, so the vocals have been slowed down to fit the beat. They may sound a bit different from the original."],
+                        "explanation": "Song A's laid-back vocals at 88 BPM pair well with Song B's energetic instrumental. I used Song B's clean instrumental sections (bars 1-8, 49-64) for the intro and breakdown, giving contrast before the vocal drop.",
+                        "warnings": ["These songs have very different tempos, so Song B's instrumental has been stretched to match Song A's tempo. Some artifacts may be audible."],
                     },
                 }
             ],
         },
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "example_2", "content": "Plan accepted."}]},
 
-        # Example 3: Contradictory prompt, extreme tempo mismatch
+        # Example 3: Contradictory prompt (vocals from both songs), extreme tempo mismatch
         {
             "role": "user",
             "content": (
@@ -857,10 +832,9 @@ def _build_few_shot_messages() -> list[dict]:
                 'Song A: "Fast EDM" -- 140 BPM, F#min, 3:00, 105 bars.\n'
                 "Vocals: buried, +1 dB above instrumental, bleed expected. Energy: compressed.\n"
                 'Song B: "Slow RnB" -- 72 BPM, Bbmaj, 4:00, 72 bars.\n'
-                "Vocals: dominant, +9 dB above instrumental, clean separation. Energy: moderate dynamics.\n\n"
+                "Energy: moderate dynamics.\n\n"
                 "=== LAYER 4: CROSS-SONG ===\n"
                 "Loudness: Song A ~4 dB louder.\n"
-                "Vocal source: Song B (+9 dB, much cleaner).\n"
                 "Tempo stretch: 48.6%."
             ),
         },
@@ -872,7 +846,6 @@ def _build_few_shot_messages() -> list[dict]:
                     "id": "example_3",
                     "name": "create_remix_plan",
                     "input": {
-                        "vocal_source": "song_b",
                         "start_time_vocal": 20.0,
                         "end_time_vocal": 100.0,
                         "start_time_instrumental": 0.0,
@@ -883,12 +856,12 @@ def _build_few_shot_messages() -> list[dict]:
                             {"label": "drop", "start_beat": 24, "end_beat": 40, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
                             {"label": "outro", "start_beat": 40, "end_beat": 48, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.4, "guitar": 0.3, "piano": 0.4, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
                         ],
-                        "tempo_source": "song_a",
+                        "tempo_source": "song_b",
                         "key_source": "none",
-                        "explanation": "I used Song B's vocals since they have much better separation (+9 dB vs +1 dB). The drums-only verse creates contrast before the full drop. I kept it short due to the extreme tempo difference.",
+                        "explanation": "Song A's vocals are used over Song B's slower R&B instrumental. The drums-only intro at Song B's tempo creates a laid-back groove before the vocal drop. I kept it short due to the extreme tempo difference.",
                         "warnings": [
-                            "I can only use vocals from one song at a time -- I chose Song B since its vocals are much cleaner (+9 dB separation vs Song A's +1 dB).",
-                            "These songs have extremely different tempos (48.6% stretch). The vocals have been sped up significantly and may sound different from the original.",
+                            "I can only use vocals from one song -- Song A's vocals are used as the fixed vocal source. Song A's vocal separation is low (+1 dB), so expect some instrumental bleed.",
+                            "These songs have extremely different tempos (48.6% stretch). The instrumental has been sped up significantly and may sound different from the original.",
                         ],
                     },
                 }
@@ -920,7 +893,7 @@ def _parse_remix_plan(
         ))
 
     return RemixPlan(
-        vocal_source=raw["vocal_source"],
+        vocal_source=VOCAL_SOURCE,
         start_time_vocal=float(raw["start_time_vocal"]),
         end_time_vocal=float(raw["end_time_vocal"]),
         start_time_instrumental=float(raw["start_time_instrumental"]),
@@ -946,9 +919,9 @@ def _validate_remix_plan(
     """Validate and fix the LLM's remix plan. Fixes issues in-place where possible."""
     clamped_fields: list[str] = []
 
-    # Time range validation
-    vocal_meta = song_a_meta if plan.vocal_source == "song_a" else song_b_meta
-    inst_meta = song_b_meta if plan.vocal_source == "song_a" else song_a_meta
+    # Time range validation — Song A always provides vocals, Song B always provides instrumentals
+    vocal_meta = song_a_meta
+    inst_meta = song_b_meta
 
     plan.start_time_vocal = max(0, plan.start_time_vocal)
     plan.end_time_vocal = min(vocal_meta.duration_seconds, plan.end_time_vocal)
@@ -1039,14 +1012,8 @@ def _validate_remix_plan(
     if clamped_fields:
         logger.info("Section validation clamped fields: %s", clamped_fields)
 
-    # Duration validation -- post-LLM, we know vocal_source and tempo_source
-    if plan.vocal_source == "song_b":
-        _vocal_bpm = song_b_meta.bpm
-        _inst_bpm = song_a_meta.bpm
-    else:
-        _vocal_bpm = song_a_meta.bpm
-        _inst_bpm = song_b_meta.bpm
-    target_bpm = estimate_target_bpm(_vocal_bpm, _inst_bpm, plan.tempo_source)
+    # Duration validation — Song A is always vocal, Song B is always instrumental
+    target_bpm = estimate_target_bpm(song_a_meta.bpm, song_b_meta.bpm, plan.tempo_source)
 
     # Pre-render logging: arrangement stats before duration validation
     total_beats = sections[-1].end_beat if sections else 0
@@ -1188,8 +1155,7 @@ def interpret_prompt(
         song_a_meta, song_b_meta,
     )
 
-    # Compute total available beats (from instrumental source, approximated).
-    # Pre-LLM: assume song_a=vocal as default.
+    # Compute total available beats (Song A=vocal, Song B=instrumental).
     target_bpm = estimate_target_bpm(
         vocal_bpm=song_a_meta.bpm,
         instrumental_bpm=song_b_meta.bpm,
@@ -1260,10 +1226,31 @@ def interpret_prompt(
 
         latency_ms = (time.monotonic() - start) * 1000
 
-        # Log cache stats
-        cache_read = getattr(response.usage, "cache_read_input_tokens", 0)
-        cache_created = getattr(response.usage, "cache_creation_input_tokens", 0)
-        logger.info(f"Cache stats: read={cache_read}, created={cache_created}")
+        # Log cache stats and cost
+        usage = response.usage
+        input_tokens = usage.input_tokens
+        output_tokens = usage.output_tokens
+        cache_read = getattr(usage, "cache_read_input_tokens", 0)
+        cache_created = getattr(usage, "cache_creation_input_tokens", 0)
+
+        # Sonnet 4 pricing: $3/MTok input, $15/MTok output,
+        # $0.30/MTok cache read, $3.75/MTok cache write
+        uncached_input = input_tokens - cache_read - cache_created
+        cost_input = uncached_input * 3.0 / 1_000_000
+        cost_cache_read = cache_read * 0.30 / 1_000_000
+        cost_cache_write = cache_created * 3.75 / 1_000_000
+        cost_output = output_tokens * 15.0 / 1_000_000
+        cost_total = cost_input + cost_cache_read + cost_cache_write + cost_output
+
+        logger.info(
+            "LLM cost: $%.4f (in=%d/$%.4f, cache_read=%d/$%.4f, "
+            "cache_write=%d/$%.4f, out=%d/$%.4f)",
+            cost_total,
+            uncached_input, cost_input,
+            cache_read, cost_cache_read,
+            cache_created, cost_cache_write,
+            output_tokens, cost_output,
+        )
 
         # Check stop reason
         if response.stop_reason == "max_tokens":
@@ -1370,12 +1357,12 @@ def interpret_prompt(
 def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> RemixPlan:
     """Generate a deterministic remix plan from audio analysis metadata.
 
-    Defaults: vocals from song_a, instrumentals from song_b.
+    Fixed convention: Song A provides vocals, Song B provides instrumentals.
     Uses the region starting at 25% into each song, capped at TARGET_REMIX_DURATION_SECONDS.
     Tempo target is the instrumental song's BPM.
     """
-    # Vocal source defaults to song_a (Day 2 -- no vocal_prominence_db yet)
-    vocal_src = "song_a"
+    # Fixed convention: Song A provides vocals
+    vocal_src = VOCAL_SOURCE
     vocal_meta = meta_a
     inst_meta = meta_b
 
