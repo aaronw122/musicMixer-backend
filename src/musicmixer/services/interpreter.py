@@ -1226,10 +1226,31 @@ def interpret_prompt(
 
         latency_ms = (time.monotonic() - start) * 1000
 
-        # Log cache stats
-        cache_read = getattr(response.usage, "cache_read_input_tokens", 0)
-        cache_created = getattr(response.usage, "cache_creation_input_tokens", 0)
-        logger.info(f"Cache stats: read={cache_read}, created={cache_created}")
+        # Log cache stats and cost
+        usage = response.usage
+        input_tokens = usage.input_tokens
+        output_tokens = usage.output_tokens
+        cache_read = getattr(usage, "cache_read_input_tokens", 0)
+        cache_created = getattr(usage, "cache_creation_input_tokens", 0)
+
+        # Sonnet 4 pricing: $3/MTok input, $15/MTok output,
+        # $0.30/MTok cache read, $3.75/MTok cache write
+        uncached_input = input_tokens - cache_read - cache_created
+        cost_input = uncached_input * 3.0 / 1_000_000
+        cost_cache_read = cache_read * 0.30 / 1_000_000
+        cost_cache_write = cache_created * 3.75 / 1_000_000
+        cost_output = output_tokens * 15.0 / 1_000_000
+        cost_total = cost_input + cost_cache_read + cost_cache_write + cost_output
+
+        logger.info(
+            "LLM cost: $%.4f (in=%d/$%.4f, cache_read=%d/$%.4f, "
+            "cache_write=%d/$%.4f, out=%d/$%.4f)",
+            cost_total,
+            uncached_input, cost_input,
+            cache_read, cost_cache_read,
+            cache_created, cost_cache_write,
+            output_tokens, cost_output,
+        )
 
         # Check stop reason
         if response.stop_reason == "max_tokens":
