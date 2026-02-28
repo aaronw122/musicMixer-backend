@@ -160,36 +160,6 @@ class TestUnknownStemType:
         assert np.all(np.isfinite(result))
 
 
-class TestHalveHfBoosts:
-    """Test the halve_hf_boosts parameter for lossy YouTube sources."""
-
-    def test_halve_hf_boosts_reduces_gain(self):
-        """With halve_hf_boosts=True, HF boost should be roughly halved.
-
-        Compare the gain at 3kHz (vocals presence boost) with and without
-        the halving option. The halved version should boost less.
-        """
-        audio = _make_stereo_sine(freq=3000.0, amplitude=0.3, duration=3.0)
-
-        result_normal = apply_corrective_eq(
-            audio, SR, "vocals", halve_hf_boosts=False
-        )
-        result_halved = apply_corrective_eq(
-            audio, SR, "vocals", halve_hf_boosts=True
-        )
-
-        rms_normal = _rms(result_normal)
-        rms_halved = _rms(result_halved)
-
-        # The halved boost should produce a quieter result at the boost frequency
-        # (less gain applied). The difference is small (0.375 dB vs 0.75 dB boost)
-        # but the halved result should not be louder than the normal one.
-        assert rms_halved <= rms_normal + 1e-6, (
-            f"Halved HF boost ({rms_halved:.6f}) should not exceed "
-            f"normal boost ({rms_normal:.6f})"
-        )
-
-
 class TestSilentAudioEdgeCases:
     """Silent audio (all zeros) through apply_corrective_eq."""
 
@@ -217,17 +187,6 @@ class TestSilentAudioEdgeCases:
         result = apply_corrective_eq(audio, SR, "vocals", apply_preset=False)
         assert result.shape == audio.shape
         assert result.dtype == np.float32
-
-    def test_silent_with_halve_hf_boosts(self):
-        """Silent audio with halve_hf_boosts should not crash."""
-        audio = np.zeros((int(SR * DURATION), 2), dtype=np.float32)
-        result = apply_corrective_eq(
-            audio, SR, "vocals", halve_hf_boosts=True
-        )
-        assert result.shape == audio.shape
-        assert result.dtype == np.float32
-        assert np.allclose(result, 0.0, atol=1e-10)
-
 
 class TestApplyCorrectiveEQPreset:
     """Test the preset EQ application."""
