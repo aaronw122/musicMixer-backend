@@ -603,46 +603,48 @@ def run_pipeline(
         session_id, target_bpm, stretch_vocals, stretch_instrumentals,
     )
 
-    # === STEP 9: Tempo match via rubberband ===
+    # === STEP 9: Tempo match via rubberband (parallel) ===
     logger.info("Session %s: [9/17] tempo matching via rubberband...", session_id)
+
+    total_stems_to_stretch = (
+        (len(vocal_audio) if stretch_vocals else 0)
+        + (len(inst_audio) if stretch_instrumentals else 0)
+    )
+
+    # Emit batch-level progress BEFORE the pool starts (avoids 5-10s silent gap in SSE stream)
     emit_progress(event_queue, {
         "step": "processing",
-        "detail": "Matching tempo...",
+        "detail": f"Matching tempo (all {total_stems_to_stretch} stems in parallel)...",
         "progress": 0.62,
     }, session=session)
 
-    total_stems_to_stretch = 0
-    if stretch_vocals:
-        total_stems_to_stretch += len(vocal_audio)
-    if stretch_instrumentals:
-        total_stems_to_stretch += len(inst_audio)
+    with ThreadPoolExecutor(max_workers=6) as rb_executor:
+        futures = {}
+        if stretch_vocals:
+            for stem_name in list(vocal_audio.keys()):
+                futures[("vocal", stem_name)] = rb_executor.submit(
+                    rubberband_process, vocal_audio[stem_name], sr,
+                    vocal_meta.bpm, target_bpm, is_vocal=(stem_name == "vocals"),
+                )
+        if stretch_instrumentals:
+            for stem_name in list(inst_audio.keys()):
+                futures[("inst", stem_name)] = rb_executor.submit(
+                    rubberband_process, inst_audio[stem_name], sr,
+                    inst_meta.bpm, target_bpm,
+                )
+        for (group, stem_name), future in futures.items():
+            result = future.result(timeout=120)
+            if group == "vocal":
+                vocal_audio[stem_name] = result
+            else:
+                inst_audio[stem_name] = result
 
-    stretched_count = 0
-
-    if stretch_vocals:
-        for stem_name in list(vocal_audio.keys()):
-            stretched_count += 1
-            emit_progress(event_queue, {
-                "step": "processing",
-                "detail": f"Matching tempo ({stretched_count}/{total_stems_to_stretch} stems)...",
-                "progress": 0.62 + (stretched_count / max(total_stems_to_stretch, 1)) * 0.13,
-            }, session=session)
-            vocal_audio[stem_name] = rubberband_process(
-                vocal_audio[stem_name], sr, vocal_meta.bpm, target_bpm,
-                is_vocal=(stem_name == "vocals"),
-            )
-
-    if stretch_instrumentals:
-        for stem_name in list(inst_audio.keys()):
-            stretched_count += 1
-            emit_progress(event_queue, {
-                "step": "processing",
-                "detail": f"Matching tempo ({stretched_count}/{total_stems_to_stretch} stems)...",
-                "progress": 0.62 + (stretched_count / max(total_stems_to_stretch, 1)) * 0.13,
-            }, session=session)
-            inst_audio[stem_name] = rubberband_process(
-                inst_audio[stem_name], sr, inst_meta.bpm, target_bpm,
-            )
+    # Emit completion progress AFTER all futures resolve
+    emit_progress(event_queue, {
+        "step": "processing",
+        "detail": "Tempo matched!",
+        "progress": 0.75,
+    }, session=session)
 
     # === STEP 10: Post-stretch beat grid ===
     # Scale the instrumental's original beat grid proportionally as fallback
