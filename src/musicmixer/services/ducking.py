@@ -133,12 +133,12 @@ def spectral_duck(
     hold_ms = 200.0
     hold_samples = int(hold_ms / 1000.0 * sr)
     if hold_samples > 0:
-        # Forward-looking max filter extends each active region by hold_samples.
-        # origin shifts the window so it extends forward (trailing hold), not
-        # symmetrically. O(n) via scipy.
+        # Max filter extends each active region by hold_samples.
+        # Positive origin shifts the window RIGHT (forward in time), creating
+        # a trailing hold that extends ~200ms after vocal drops. O(n) via scipy.
         from scipy.ndimage import maximum_filter1d
         mask_overlap = maximum_filter1d(
-            mask_overlap, size=hold_samples, origin=-(hold_samples // 2)
+            mask_overlap, size=hold_samples, origin=+(hold_samples // 2 - 1)
         )
 
     # Exponential IIR smoothing: 30ms attack, 400ms release
