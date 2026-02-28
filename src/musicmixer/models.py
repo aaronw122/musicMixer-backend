@@ -174,7 +174,7 @@ class AudioMetadata:
 @dataclass
 class Section:
     """A section of the remix arrangement."""
-    label: str                      # "intro" | "build" | "main" | "breakdown" | "outro"
+    label: str                      # "intro" | "verse" | "breakdown" | "drop" | "outro"
     start_beat: int                 # Beat-aligned (snapped to grid)
     end_beat: int
     stem_gains: dict[str, float]   # {"vocals": 1.0, "drums": 0.7, "bass": 0.8, ...}

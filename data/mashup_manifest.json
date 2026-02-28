@@ -1,0 +1,132 @@
+[
+  {
+    "id": "mashup_001",
+    "url": "https://www.youtube.com/watch?v=lTx3G6h2xyA",
+    "title": "Madeon - Pop Culture (live mashup)",
+    "artist": "Madeon",
+    "genre_hint": "edm",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "39 songs mashed live on a Launchpad. Viral 2011 video, 60M+ views."
+  },
+  {
+    "id": "mashup_002",
+    "url": "https://www.youtube.com/watch?v=nwAYpLVyeFU",
+    "title": "Numb/Encore",
+    "artist": "Jay-Z / Linkin Park",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "From Collision Course EP. Grammy-winning mashup of Numb and Encore."
+  },
+  {
+    "id": "mashup_003",
+    "url": "https://www.youtube.com/watch?v=jjBBQVwAXUo",
+    "title": "Points of Authority / 99 Problems / One Step Closer",
+    "artist": "Jay-Z / Linkin Park",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "Triple mashup from Collision Course EP."
+  },
+  {
+    "id": "mashup_004",
+    "url": "https://www.youtube.com/watch?v=iNzrwh2Z2hQ",
+    "title": "United State of Pop 2009 (Blame It on the Pop)",
+    "artist": "DJ Earworm",
+    "genre_hint": "pop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "Top 25 Billboard hits of 2009 mashed together."
+  },
+  {
+    "id": "mashup_005",
+    "url": "https://www.youtube.com/watch?v=LoQYw49saqc",
+    "title": "Girl Talk - Oh No (Feed the Animals)",
+    "artist": "Girl Talk",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "Opening track from Feed the Animals (2008). Dense sample collage."
+  },
+  {
+    "id": "mashup_006",
+    "url": "https://www.youtube.com/watch?v=4bBCDnxHTbE",
+    "title": "Girl Talk - Play Your Part (Pt. 1) (Feed the Animals)",
+    "artist": "Girl Talk",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "From Feed the Animals. Mixes classic rock with hip-hop vocals."
+  },
+  {
+    "id": "mashup_007",
+    "url": "https://www.youtube.com/watch?v=DZu_lLFaXgM",
+    "title": "Girl Talk - This Is the Remix (All Day)",
+    "artist": "Girl Talk",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "From All Day (2010). 373 samples across the full album."
+  },
+  {
+    "id": "mashup_008",
+    "url": "https://www.youtube.com/watch?v=NY1RsDpRu5g",
+    "title": "Encore (Grey Album)",
+    "artist": "Danger Mouse",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "Jay-Z's Black Album vocals over Beatles White Album samples."
+  },
+  {
+    "id": "mashup_009",
+    "url": "https://www.youtube.com/watch?v=RkEXGgdqMz8",
+    "title": "United State of Pop 2008 (Viva la Pop)",
+    "artist": "DJ Earworm",
+    "genre_hint": "pop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "Top 25 hits of 2008 built on Coldplay's Viva la Vida backbone."
+  },
+  {
+    "id": "mashup_010",
+    "url": "https://www.youtube.com/watch?v=E7sP6t1QyrE",
+    "title": "Girl Talk - Set It Off (Feed the Animals)",
+    "artist": "Girl Talk",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "From Feed the Animals. Classic rock and hip-hop blend."
+  },
+  {
+    "id": "mashup_011",
+    "url": "https://www.youtube.com/watch?v=KEI4qSrkPAs",
+    "title": "United State of Pop 2010 (Don't Stop the Pop)",
+    "artist": "DJ Earworm",
+    "genre_hint": "pop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "Top 25 Billboard hits of 2010 mashup."
+  },
+  {
+    "id": "mashup_012",
+    "url": "https://www.youtube.com/watch?v=Jn0112FO0Gs",
+    "title": "Dirt Off Your Shoulder / Lying from You",
+    "artist": "Jay-Z / Linkin Park",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "From Collision Course EP. Hip-hop meets nu-metal."
+  },
+  {
+    "id": "mashup_013",
+    "url": "https://www.youtube.com/watch?v=3LgN1MY1vps",
+    "title": "Girl Talk - Smash Your Head (Feed the Animals)",
+    "artist": "Girl Talk",
+    "genre_hint": "hiphop",
+    "source_a_url": null,
+    "source_b_url": null,
+    "notes": "From Feed the Animals. Dense multi-genre sample mashup."
+  }
+]

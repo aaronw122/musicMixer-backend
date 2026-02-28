@@ -11,8 +11,9 @@ build/
 .env
 .env.*
 
-# Runtime data
-data/
+# Runtime data (uploads, stems, remixes, etc.)
+data/*
+!data/mashup_manifest.json
 
 # IDE
 .idea/
