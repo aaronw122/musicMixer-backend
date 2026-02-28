@@ -237,6 +237,8 @@ class TestBandpassFilter:
         )
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestRubberband:
     @pytest.mark.skipif(not RUBBERBAND_AVAILABLE, reason="rubberband CLI not installed")
     def test_skip_at_unity(self):
@@ -663,6 +665,8 @@ class TestExportMp3:
 
         assert "-af" not in seen["cmd"]
 
+    @pytest.mark.slow
+    @pytest.mark.timeout(30)
     @pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg not installed")
     def test_export(self, tmp_dir: Path):
         """Verify MP3 file is created and non-empty."""

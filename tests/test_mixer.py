@@ -5,6 +5,8 @@ import soundfile as sf
 import pytest
 from pathlib import Path
 
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(30)]
+
 
 def _make_sine_wav(path: Path, freq: float = 440.0, duration: float = 1.0, sr: int = 44100, amplitude: float = 0.5) -> Path:
     """Create a short sine wave WAV file (float32, stereo)."""
