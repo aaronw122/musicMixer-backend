@@ -12,6 +12,7 @@ mastering order:
 from __future__ import annotations
 
 import logging
+import time
 
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
@@ -49,28 +50,35 @@ def master_static(
     Returns:
         Mastered audio as float32 in the same shape as input.
     """
+    t_chain = time.monotonic()
+
     # 1. Optional low-pass filter for lossy sources
     if lossy_lpf_hz is not None:
+        t0 = time.monotonic()
         audio = _gentle_lowpass(audio, sr, lossy_lpf_hz)
-        logger.info("Mastering: applied LPF at %.0f Hz for lossy source", lossy_lpf_hz)
+        logger.info("master_static: LPF at %.0f Hz took %.2fs", lossy_lpf_hz, time.monotonic() - t0)
 
     # 2. Constrained LUFS normalization with +3 dB headroom.
     #    The +3 dB headroom is intentional: the limiter immediately follows
     #    and catches peaks that overshoot the ceiling. This lets the normalizer
     #    push the signal closer to the target LUFS without being overly
     #    constrained by peak headroom.
+    t0 = time.monotonic()
     audio = lufs_normalize_constrained(
         audio, sr,
         target_lufs=target_lufs,
         ceiling_dbtp=ceiling_dbtp,
         headroom_db=3.0,
     )
+    logger.info("master_static: LUFS normalize took %.2fs", time.monotonic() - t0)
 
     # 3. True-peak limiter at the ceiling
+    t0 = time.monotonic()
     audio = true_peak_limit(audio, sr, ceiling_dbtp=ceiling_dbtp)
+    logger.info("master_static: true-peak limiter took %.2fs", time.monotonic() - t0)
 
-    logger.info("Mastering: chain complete (target=%.1f LUFS, ceiling=%.1f dBTP)",
-                target_lufs, ceiling_dbtp)
+    logger.info("master_static: chain complete in %.2fs (target=%.1f LUFS, ceiling=%.1f dBTP)",
+                time.monotonic() - t_chain, target_lufs, ceiling_dbtp)
 
     return audio
 

@@ -347,6 +347,47 @@ class TestResonanceEligibility:
         np.testing.assert_allclose(result, audio, atol=1e-6)
 
 
+class TestSilentAudioEdgeCases:
+    """Fix 14: Silent audio (all zeros) through apply_corrective_eq."""
+
+    def test_silent_stereo_returns_zeros(self):
+        """All-zero stereo input should return all zeros without error."""
+        audio = np.zeros((int(SR * DURATION), 2), dtype=np.float32)
+        result = apply_corrective_eq(audio, SR, "vocals", apply_resonance_cuts=False)
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+        assert np.allclose(result, 0.0, atol=1e-10), (
+            f"Silent input should produce silent output, max abs = {np.max(np.abs(result))}"
+        )
+
+    def test_silent_mono_returns_zeros(self):
+        """All-zero mono input should return all zeros without error."""
+        audio = np.zeros(int(SR * DURATION), dtype=np.float32)
+        result = apply_corrective_eq(audio, SR, "drums", apply_resonance_cuts=False)
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+        assert np.allclose(result, 0.0, atol=1e-10)
+
+    def test_silent_with_resonance_detection(self):
+        """Silent audio through resonance detection should not crash."""
+        audio = np.zeros((int(SR * DURATION), 2), dtype=np.float32)
+        result = apply_corrective_eq(
+            audio, SR, "vocals", apply_preset=False, apply_resonance_cuts=True
+        )
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+
+    def test_silent_with_halve_hf_boosts(self):
+        """Silent audio with halve_hf_boosts should not crash."""
+        audio = np.zeros((int(SR * DURATION), 2), dtype=np.float32)
+        result = apply_corrective_eq(
+            audio, SR, "vocals", apply_resonance_cuts=False, halve_hf_boosts=True
+        )
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+        assert np.allclose(result, 0.0, atol=1e-10)
+
+
 class TestApplyCorrectiveEQTwoPasses:
     """Test the two-pass usage pattern (preset before stretch, resonance after)."""
 

@@ -6,10 +6,19 @@ Complete 15-step chain: separation -> analysis -> plan -> processing -> render -
 
 import logging
 import queue
+import time
 
 from musicmixer.models import LyricsData, SessionState
 
 logger = logging.getLogger(__name__)
+
+# Maximum wall-clock time (seconds) for any single DSP step on the enhanced
+# pipeline path.  If a step exceeds this, its output is discarded and
+# processing continues with the pre-step signal state.  This is a post-hoc
+# check, not a preemptive kill -- a degenerate step will still block for
+# the full duration.  The guard's value is (1) logging which step was slow,
+# and (2) not applying potentially corrupted output.
+DSP_STEP_TIMEOUT_S = 120.0
 
 
 def emit_progress(
@@ -51,6 +60,7 @@ def run_pipeline(
     song_b_original_filename: str = "",
     source_quality_a: str | None = None,
     source_quality_b: str | None = None,
+    force_vocal_source: str | None = None,
 ) -> None:
     """Complete Day 2 pipeline: separation, analysis, tempo matching, arrangement, export.
 
@@ -365,6 +375,10 @@ def run_pipeline(
 
     plan = interpret_prompt(prompt, meta_a, meta_b, lyrics_a=lyrics_a_data, lyrics_b=lyrics_b_data)
 
+    if force_vocal_source is not None:
+        plan.vocal_source = force_vocal_source
+        logger.info("Session %s: Forced vocal_source=%s", session_id, force_vocal_source)
+
     if plan.used_fallback:
         logger.warning(
             "Session %s: LLM failed, using deterministic fallback",
@@ -545,11 +559,35 @@ def run_pipeline(
         vocal_eq_kwargs = {"halve_hf_boosts": True} if is_lossy_vocal_source else {}
         inst_eq_kwargs = {"halve_hf_boosts": True} if is_lossy_inst_source else {}
         for stem_type, audio in vocal_audio.items():
-            vocal_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+            _pre = vocal_audio[stem_type]
+            _t0 = time.monotonic()
+            _result = apply_corrective_eq(audio, sr, stem_type,
                 apply_preset=True, apply_resonance_cuts=False, **vocal_eq_kwargs)
+            _elapsed = time.monotonic() - _t0
+            if _elapsed > DSP_STEP_TIMEOUT_S:
+                logger.error(
+                    "Session %s: DSP step 'preset_eq vocal/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                    session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
+                )
+                vocal_audio[stem_type] = _pre
+            else:
+                vocal_audio[stem_type] = _result
+                logger.info("Session %s: preset_eq vocal/%s took %.2fs", session_id, stem_type, _elapsed)
         for stem_type, audio in inst_audio.items():
-            inst_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+            _pre = inst_audio[stem_type]
+            _t0 = time.monotonic()
+            _result = apply_corrective_eq(audio, sr, stem_type,
                 apply_preset=True, apply_resonance_cuts=False, **inst_eq_kwargs)
+            _elapsed = time.monotonic() - _t0
+            if _elapsed > DSP_STEP_TIMEOUT_S:
+                logger.error(
+                    "Session %s: DSP step 'preset_eq inst/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                    session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
+                )
+                inst_audio[stem_type] = _pre
+            else:
+                inst_audio[stem_type] = _result
+                logger.info("Session %s: preset_eq inst/%s took %.2fs", session_id, stem_type, _elapsed)
 
         # LUFS checkpoint: after preset EQ
         _eq_meter = pyln.Meter(sr)
@@ -662,11 +700,35 @@ def run_pipeline(
     # they confuse rubberband's transient detector and cause ringing artifacts.
     if settings.ab_per_stem_eq_v1 and settings.ab_resonance_detection_v1:
         for stem_type, audio in vocal_audio.items():
-            vocal_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+            _pre = vocal_audio[stem_type]
+            _t0 = time.monotonic()
+            _result = apply_corrective_eq(audio, sr, stem_type,
                 apply_preset=False, apply_resonance_cuts=True)
+            _elapsed = time.monotonic() - _t0
+            if _elapsed > DSP_STEP_TIMEOUT_S:
+                logger.error(
+                    "Session %s: DSP step 'resonance_eq vocal/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                    session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
+                )
+                vocal_audio[stem_type] = _pre
+            else:
+                vocal_audio[stem_type] = _result
+                logger.info("Session %s: resonance_eq vocal/%s took %.2fs", session_id, stem_type, _elapsed)
         for stem_type, audio in inst_audio.items():
-            inst_audio[stem_type] = apply_corrective_eq(audio, sr, stem_type,
+            _pre = inst_audio[stem_type]
+            _t0 = time.monotonic()
+            _result = apply_corrective_eq(audio, sr, stem_type,
                 apply_preset=False, apply_resonance_cuts=True)
+            _elapsed = time.monotonic() - _t0
+            if _elapsed > DSP_STEP_TIMEOUT_S:
+                logger.error(
+                    "Session %s: DSP step 'resonance_eq inst/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                    session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
+                )
+                inst_audio[stem_type] = _pre
+            else:
+                inst_audio[stem_type] = _result
+                logger.info("Session %s: resonance_eq inst/%s took %.2fs", session_id, stem_type, _elapsed)
         logger.info(
             "Session %s: Resonance notch cuts applied (ab_resonance_detection_v1=%s)",
             session_id, settings.ab_resonance_detection_v1,
@@ -832,7 +894,19 @@ def run_pipeline(
 
     # === STEP 13.3: Multiband compression (after bus sum, before auto-leveler) ===
     if settings.ab_multiband_comp_v1:
-        mixed = multiband_compress(mixed, sr)
+        _pre_multiband = mixed
+        _t0 = time.monotonic()
+        _multiband_result = multiband_compress(mixed, sr)
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > DSP_STEP_TIMEOUT_S:
+            logger.error(
+                "Session %s: DSP step 'multiband_compress' exceeded %.0fs timeout (%.1fs), skipping",
+                session_id, DSP_STEP_TIMEOUT_S, _elapsed,
+            )
+            mixed = _pre_multiband
+        else:
+            mixed = _multiband_result
+            logger.info("Session %s: multiband_compress took %.2fs", session_id, _elapsed)
         # LUFS checkpoint: after multiband compression
         _lufs_post_multiband = _meter.integrated_loudness(mixed)
         logger.info("Session %s: LUFS after multiband compression: %.1f", session_id, _lufs_post_multiband)
@@ -894,7 +968,19 @@ def run_pipeline(
         master_kwargs: dict = dict(target_lufs=-12.0, ceiling_dbtp=-1.0)
         if is_lossy_source_a or is_lossy_source_b:
             master_kwargs["lossy_lpf_hz"] = 16000  # gentle LPF at spectral ceiling
-        mixed = master_static(mixed, sr, **master_kwargs)
+        _pre_master = mixed
+        _t0 = time.monotonic()
+        _master_result = master_static(mixed, sr, **master_kwargs)
+        _elapsed = time.monotonic() - _t0
+        if _elapsed > DSP_STEP_TIMEOUT_S:
+            logger.error(
+                "Session %s: DSP step 'master_static' exceeded %.0fs timeout (%.1fs), skipping",
+                session_id, DSP_STEP_TIMEOUT_S, _elapsed,
+            )
+            mixed = _pre_master
+        else:
+            mixed = _master_result
+            logger.info("Session %s: master_static took %.2fs", session_id, _elapsed)
 
         # LUFS checkpoint: after static mastering
         _lufs_post_master = _meter.integrated_loudness(mixed)
@@ -906,6 +992,44 @@ def run_pipeline(
         # above the limiter ceiling, causing audible distortion.
         safety_ceiling = 10 ** (-1.0 / 20.0)
         mixed = soft_clip(mixed, safety_ceiling, knee_db=2.0)
+
+        # === STEP 14.7: Post-soft-clip LUFS correction (iterate-and-converge) ===
+        # master_static normalizes + limits, but the limiter eats 2-3 dB of
+        # integrated loudness. The soft clip shaves a bit more. This loop
+        # measures the actual LUFS and applies a bounded correction + a light
+        # second limiter pass to catch any re-introduced peaks.
+        TARGET_MASTER_LUFS = -12.0
+        _lufs_meter = pyln.Meter(sr)
+        _meas = np.column_stack([mixed, mixed]) if mixed.ndim == 1 else mixed
+        post_clip_lufs = _lufs_meter.integrated_loudness(_meas)
+
+        if post_clip_lufs > -70.0 and post_clip_lufs < TARGET_MASTER_LUFS - 1.0:
+            correction_db = TARGET_MASTER_LUFS - post_clip_lufs
+            correction_db = min(correction_db, 3.0)  # safety cap: never boost more than 3 dB
+
+            # Apply correction unconditionally -- do NOT cap by peak headroom.
+            # The second limiter pass below will handle any peaks that exceed ceiling.
+            mixed = mixed * (10 ** (correction_db / 20.0))
+            logger.info(
+                "Session %s: post-soft-clip LUFS correction +%.1f dB (%.1f -> ~%.1f LUFS)",
+                session_id, correction_db, post_clip_lufs, post_clip_lufs + correction_db,
+            )
+
+            # Second (lighter) limiter pass to catch re-introduced peaks.
+            mixed = true_peak_limit(
+                mixed, sr,
+                ceiling_dbtp=-1.0,
+                lookahead_ms=1.5,
+                release_ms=50.0,
+            )
+
+            # Log final LUFS for verification
+            _meas_final = np.column_stack([mixed, mixed]) if mixed.ndim == 1 else mixed
+            final_lufs = _lufs_meter.integrated_loudness(_meas_final)
+            logger.info(
+                "Session %s: final LUFS after correction + re-limit: %.1f",
+                session_id, final_lufs,
+            )
     else:
         # === STEP 14: Look-ahead peak limiter (standard path) ===
         # Key insight: limit to a LOWER ceiling than the final -1.0 dBTP target.
