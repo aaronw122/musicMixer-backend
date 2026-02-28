@@ -236,6 +236,59 @@ class TestMasterStaticLossyLPF:
             )
 
 
+class TestMasterStaticSilentAndMono:
+    """Fix 14: Silent audio and mono input edge cases for master_static."""
+
+    def test_silent_stereo_returns_zeros(self):
+        """All-zero stereo input should return all zeros without error."""
+        audio = np.zeros((int(SR * DURATION), 2), dtype=np.float32)
+        result = master_static(audio, SR)
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+        # Silent input -> silent output (no gain can be applied to silence)
+        assert np.allclose(result, 0.0, atol=1e-10), (
+            f"Silent input should produce silent output, max abs = {np.max(np.abs(result))}"
+        )
+
+    def test_silent_stereo_with_lossy_lpf(self):
+        """Silent audio with lossy_lpf_hz should not crash."""
+        audio = np.zeros((int(SR * DURATION), 2), dtype=np.float32)
+        result = master_static(audio, SR, lossy_lpf_hz=16000)
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+        assert np.allclose(result, 0.0, atol=1e-10)
+
+    def test_mono_input_handled_correctly(self):
+        """Mono input (N,) should be processed without crash and return same shape."""
+        t = np.linspace(0, DURATION, int(SR * DURATION), endpoint=False)
+        audio = (np.sin(2 * np.pi * 440.0 * t) * 0.5).astype(np.float32)
+        assert audio.ndim == 1, "Precondition: input must be mono"
+
+        result = master_static(audio, SR)
+
+        assert result.ndim == 1, "Mono input should produce mono output"
+        assert result.dtype == np.float32
+        assert len(result) == len(audio)
+        # Output should not be all zeros (the sine wave should be processed)
+        assert np.max(np.abs(result)) > 0.01, (
+            "Mono sine wave should produce non-silent output"
+        )
+
+    def test_mono_input_peak_within_ceiling(self):
+        """Mono input true peak should not exceed the ceiling."""
+        t = np.linspace(0, 5.0, int(SR * 5.0), endpoint=False)
+        audio = (np.sin(2 * np.pi * 440.0 * t) * 0.8).astype(np.float32)
+        ceiling_dbtp = -1.0
+        ceiling_linear = 10 ** (ceiling_dbtp / 20.0)
+
+        result = master_static(audio, SR, ceiling_dbtp=ceiling_dbtp)
+        measured_peak = true_peak(result)
+
+        assert measured_peak <= ceiling_linear * 1.05, (
+            f"Mono true peak {measured_peak:.4f} exceeds ceiling {ceiling_linear:.4f}"
+        )
+
+
 class TestMasterStaticCustomTargets:
     """Verify that custom target parameters are respected."""
 

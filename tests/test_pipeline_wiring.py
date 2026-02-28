@@ -685,3 +685,162 @@ class TestPipelineWithSoundQualityFlags:
         assert peak <= ceiling_linear + 0.05, (
             f"True peak {peak:.4f} grossly exceeds ceiling {ceiling_linear:.4f}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix 9: Lossy-source processing path tests
+# ---------------------------------------------------------------------------
+
+
+class TestLossySourceWiring:
+    """Verify that source_quality flags flow through the pipeline correctly.
+
+    Tests that lossy YouTube source metadata produces the correct downstream
+    kwargs (halve_hf_boosts for EQ, lossy_lpf_hz for mastering).
+    """
+
+    def test_lossy_source_a_passes_halve_hf_boosts_to_vocal_eq(self, pipeline_tmp):
+        """source_quality_a='youtube-opus-128kbps' + ab_per_stem_eq_v1=True
+        should pass halve_hf_boosts=True to apply_corrective_eq for vocal stems.
+
+        Default plan.vocal_source is 'song_a', so lossy Song A maps to lossy vocals.
+        """
+        captured_calls = []
+
+        original_eq = None
+
+        def _capture_eq(audio, sr, stem_type, **kwargs):
+            captured_calls.append({"stem_type": stem_type, "kwargs": kwargs})
+            return original_eq(audio, sr, stem_type, **kwargs)
+
+        import musicmixer.services.eq as eq_mod
+        original_eq = eq_mod.apply_corrective_eq
+
+        with patch("musicmixer.services.eq.apply_corrective_eq", side_effect=_capture_eq):
+            _run_pipeline_with_mock_separation(
+                pipeline_tmp,
+                settings_overrides={
+                    "ab_per_stem_eq_v1": True,
+                },
+                source_quality_a="youtube-opus-128kbps",
+            )
+
+        # Find calls for vocals with apply_preset=True (the pre-stretch pass)
+        vocal_preset_calls = [
+            c for c in captured_calls
+            if c["stem_type"] == "vocals"
+            and c["kwargs"].get("apply_preset") is True
+        ]
+
+        assert len(vocal_preset_calls) > 0, (
+            "Expected at least one apply_corrective_eq call for 'vocals' with apply_preset=True"
+        )
+
+        # Verify halve_hf_boosts=True was passed for vocal stems
+        for call in vocal_preset_calls:
+            assert call["kwargs"].get("halve_hf_boosts") is True, (
+                f"Expected halve_hf_boosts=True for vocal EQ, got kwargs: {call['kwargs']}"
+            )
+
+    def test_lossy_source_b_with_vocal_source_b_maps_lossy_to_vocals(self, pipeline_tmp):
+        """source_quality_b='youtube-opus-128kbps' with plan.vocal_source='song_b'
+        should pass halve_hf_boosts=True to vocal EQ.
+
+        We force vocal_source='song_b' by patching the interpreter to return a plan
+        with vocal_source='song_b'.
+        """
+        captured_calls = []
+
+        original_eq = None
+
+        def _capture_eq(audio, sr, stem_type, **kwargs):
+            captured_calls.append({"stem_type": stem_type, "kwargs": kwargs})
+            return original_eq(audio, sr, stem_type, **kwargs)
+
+        import musicmixer.services.eq as eq_mod
+        original_eq = eq_mod.apply_corrective_eq
+
+        # Patch the interpreter to return vocal_source='song_b'
+        from musicmixer.models import RemixPlan, Section
+
+        def mock_interpret(prompt, meta_a, meta_b, **kwargs):
+            plan = RemixPlan(
+                vocal_source="song_b",
+                tempo_source="song_a",
+                explanation="Test plan with song_b vocals",
+                start_time_vocal=0.0,
+                end_time_vocal=15.0,
+                start_time_instrumental=0.0,
+                end_time_instrumental=15.0,
+                key_source="none",
+                sections=[
+                    Section(
+                        label="main",
+                        start_beat=0,
+                        end_beat=32,
+                        stem_gains={"vocals": 1.0, "drums": 0.8, "bass": 0.8, "other": 0.5},
+                        transition_in="cut",
+                        transition_beats=0,
+                    ),
+                ],
+            )
+            return plan
+
+        with (
+            patch("musicmixer.services.eq.apply_corrective_eq", side_effect=_capture_eq),
+            patch("musicmixer.services.interpreter.interpret_prompt", side_effect=mock_interpret),
+        ):
+            _run_pipeline_with_mock_separation(
+                pipeline_tmp,
+                settings_overrides={
+                    "ab_per_stem_eq_v1": True,
+                },
+                source_quality_b="youtube-opus-128kbps",
+            )
+
+        # Find vocal EQ calls with preset pass
+        vocal_preset_calls = [
+            c for c in captured_calls
+            if c["stem_type"] == "vocals"
+            and c["kwargs"].get("apply_preset") is True
+        ]
+
+        assert len(vocal_preset_calls) > 0, (
+            "Expected at least one apply_corrective_eq call for 'vocals' with apply_preset=True"
+        )
+
+        # Verify halve_hf_boosts=True was passed since vocal source is song_b (the lossy one)
+        for call in vocal_preset_calls:
+            assert call["kwargs"].get("halve_hf_boosts") is True, (
+                f"Expected halve_hf_boosts=True for vocal EQ when vocal_source=song_b "
+                f"and source_quality_b is lossy, got kwargs: {call['kwargs']}"
+            )
+
+    def test_lossy_source_passes_lossy_lpf_to_master_static(self, pipeline_tmp):
+        """Either source being lossy + ab_static_mastering_v1=True
+        should pass lossy_lpf_hz=16000 to master_static.
+        """
+        captured_kwargs = {}
+
+        original_master = None
+
+        def _capture_master(audio, sr, **kwargs):
+            captured_kwargs.update(kwargs)
+            return original_master(audio, sr, **kwargs)
+
+        from musicmixer.services import mastering as mastering_mod
+        original_master = mastering_mod.master_static
+
+        with patch("musicmixer.services.mastering.master_static", side_effect=_capture_master):
+            _run_pipeline_with_mock_separation(
+                pipeline_tmp,
+                settings_overrides={
+                    "ab_static_mastering_v1": True,
+                },
+                source_quality_a="youtube-opus-128kbps",
+            )
+
+        assert captured_kwargs.get("lossy_lpf_hz") == 16000, (
+            f"Expected lossy_lpf_hz=16000 passed to master_static, "
+            f"got: {captured_kwargs}"
+        )
