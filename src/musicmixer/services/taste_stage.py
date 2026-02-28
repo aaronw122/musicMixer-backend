@@ -147,7 +147,7 @@ def _run_taste_pipeline(
 
     valid_candidates = []
     for candidate in candidates:
-        is_valid, _reason = validate_candidate(candidate, meta_a, meta_b)
+        is_valid, _violations = validate_candidate(candidate, meta_a, meta_b)
         if is_valid:
             valid_candidates.append(candidate)
 
@@ -172,7 +172,8 @@ def _run_taste_pipeline(
             total_latency_ms=gen_latency_ms,
         )
 
-    selected_plan, selection_method = select_best(valid_candidates, meta_a, meta_b, prompt)
+    selected_plan, _scored = select_best(valid_candidates, meta_a, meta_b)
+    selection_method = "heuristic"  # hardcoded: heuristic scorer is active in Phase 0-1
     score_latency_ms = (time.monotonic() - score_start) * 1000
     total_latency_ms = gen_latency_ms + score_latency_ms
 
