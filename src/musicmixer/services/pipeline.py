@@ -418,11 +418,7 @@ def run_pipeline(
     if plan.sections:
         _pi_total_beats = plan.sections[-1].end_beat
         from musicmixer.services.tempo import estimate_target_bpm as _est_bpm
-        if plan.vocal_source == "song_b":
-            _v_bpm, _i_bpm = meta_b.bpm, meta_a.bpm
-        else:
-            _v_bpm, _i_bpm = meta_a.bpm, meta_b.bpm
-        _pi_approx_bpm = _est_bpm(_v_bpm, _i_bpm, plan.tempo_source)
+        _pi_approx_bpm = _est_bpm(meta_a.bpm, meta_b.bpm, plan.tempo_source)
         _pi_est_duration = _pi_total_beats * 60 / _pi_approx_bpm if _pi_approx_bpm > 0 else 0
         logger.info(
             "Session %s: Arrangement: %d sections, %d beats, est %.0fs at %.0f BPM",
@@ -430,25 +426,19 @@ def run_pipeline(
         )
 
     # === STEP 5: Determine vocal/instrumental sources ===
-    if plan.vocal_source == "song_a":
-        vocal_stems_paths = song_a_stems
-        inst_stems_paths = song_b_stems
-        vocal_meta = meta_a
-        inst_meta = meta_b
-    else:
-        vocal_stems_paths = song_b_stems
-        inst_stems_paths = song_a_stems
-        vocal_meta = meta_b
-        inst_meta = meta_a
+    # Fixed convention: Song A always provides vocals, Song B always provides instrumentals.
+    vocal_stems_paths = song_a_stems
+    inst_stems_paths = song_b_stems
+    vocal_meta = meta_a
+    inst_meta = meta_b
 
     # === Source-quality-aware processing: derive per-song lossy flags ===
     is_lossy_source_a = source_quality_a is not None and source_quality_a.startswith("youtube")
     is_lossy_source_b = source_quality_b is not None and source_quality_b.startswith("youtube")
 
-    # Dynamically map lossy flags to vocal/instrumental based on plan.vocal_source.
-    # When vocals come from song B, the lossy flags must be swapped.
-    is_lossy_vocal_source = is_lossy_source_a if plan.vocal_source == "song_a" else is_lossy_source_b
-    is_lossy_inst_source = is_lossy_source_b if plan.vocal_source == "song_a" else is_lossy_source_a
+    # Song A = vocal source, Song B = instrumental source (fixed convention)
+    is_lossy_vocal_source = is_lossy_source_a
+    is_lossy_inst_source = is_lossy_source_b
 
     emit_progress(event_queue, {
         "step": "processing",

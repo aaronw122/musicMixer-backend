@@ -22,6 +22,7 @@ import soundfile as sf
 from scipy.signal import find_peaks
 
 from musicmixer.models import (
+    VOCAL_SOURCE,
     AudioMetadata,
     CrossSongRelationships,
     EnergyBuckets,
@@ -1495,14 +1496,11 @@ def compute_relationships(
     prom_a_db = prom_a if prom_a is not None else 0.0
     prom_b_db = prom_b if prom_b is not None else 0.0
 
-    # Determine vocal source (higher prominence = cleaner vocals)
-    if prom_a_db >= prom_b_db:
-        vocal_source = "song_a"
-    else:
-        vocal_source = "song_b"
+    # Fixed convention: Song A always provides vocals, Song B always provides instrumentals.
+    vocal_source = VOCAL_SOURCE
 
-    # Instrumental sections (from the non-vocal source)
-    instrumental_source_meta = meta_b if vocal_source == "song_a" else meta_a
+    # Instrumental sections from Song B (fixed instrumental source)
+    instrumental_source_meta = meta_b
     instrumental_sections: list[str] = []
     if instrumental_source_meta.song_structure:
         for sec in instrumental_source_meta.song_structure.sections:
@@ -1531,15 +1529,8 @@ def compute_relationships(
                 "may cause masking in mid-frequencies"
             )
 
-    # Stretch percentage -- use shared tempo module (single source of truth).
-    # vocal_source is already determined above.
-    if vocal_source == "song_b":
-        _vocal_bpm = meta_b.bpm
-        _inst_bpm = meta_a.bpm
-    else:
-        _vocal_bpm = meta_a.bpm
-        _inst_bpm = meta_b.bpm
-    stretch_pct = compute_stretch_pct(vocal_bpm=_vocal_bpm, instrumental_bpm=_inst_bpm)
+    # Stretch percentage -- Song A is always vocal, Song B is always instrumental.
+    stretch_pct = compute_stretch_pct(vocal_bpm=meta_a.bpm, instrumental_bpm=meta_b.bpm)
 
     return CrossSongRelationships(
         loudness_diff_db=round(loudness_diff, 1),
