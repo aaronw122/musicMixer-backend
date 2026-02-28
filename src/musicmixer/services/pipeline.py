@@ -749,7 +749,7 @@ def run_pipeline(
         "progress": 0.80,
     }, session=session)
 
-    vocal_makeup_db = 3.0
+    vocal_makeup_db = 1.5
     if "vocals" in vocal_audio:
         vocal_audio["vocals"] = compress_dynamic_range(
             vocal_audio["vocals"],

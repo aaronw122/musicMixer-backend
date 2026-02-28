@@ -314,8 +314,9 @@ def cross_song_level_match(
 
     # Vocals and instrumentals at equal LUFS. Per-section stem_gains in the
     # arrangement handle the artistic balance (vocals forward in chorus, etc.).
-    # +2 dB compromise: +3 clipped with compressor makeup, 0 buried vocals. Revisit with spectral ducking (Day 4).
-    vocal_offset_db = 2.0
+    # +1 dB offset: ducking now handles vocal clarity, so less static boost needed.
+    # Previous +2 dB stacked with compressor makeup to amplify separation artifacts.
+    vocal_offset_db = 1.0
     target_vocal_lufs = instrumental_lufs + vocal_offset_db
     gain_db = target_vocal_lufs - vocal_lufs
     gain_db = float(np.clip(gain_db, -12.0, 12.0))
