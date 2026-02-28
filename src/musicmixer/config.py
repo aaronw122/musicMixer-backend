@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     youtube_max_duration_seconds: int = 900  # 15 minutes
 
     # Taste training (candidate generation + scoring)
-    ab_taste_model_v1: bool = True
+    ab_taste_model_v1: bool = False
 
     model_config = SettingsConfigDict(env_file=".env")
 
