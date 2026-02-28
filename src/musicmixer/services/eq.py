@@ -42,10 +42,9 @@ Q_BOOST = 2.0
 _EQ_PRESETS: dict[str, list[tuple[type, dict[str, Any]]]] = {
     "vocals": [
         (HighpassFilter, {"cutoff_frequency_hz": 80.0}),
-        (PeakFilter, {"cutoff_frequency_hz": 250.0, "gain_db": -1.5, "q": Q_CUT}),
-        (PeakFilter, {"cutoff_frequency_hz": 800.0, "gain_db": -1.5, "q": Q_CUT}),
+        (PeakFilter, {"cutoff_frequency_hz": 250.0, "gain_db": -0.5, "q": Q_CUT}),
+        (PeakFilter, {"cutoff_frequency_hz": 800.0, "gain_db": -0.75, "q": Q_CUT}),
         (PeakFilter, {"cutoff_frequency_hz": 3000.0, "gain_db": 0.75, "q": Q_BOOST}),
-        (LowpassFilter, {"cutoff_frequency_hz": 16000.0}),
     ],
     "drums": [
         (HighpassFilter, {"cutoff_frequency_hz": 30.0}),
