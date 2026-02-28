@@ -121,15 +121,7 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
         # causes boolean comparisons to behave unpredictably.
         mock_settings.stem_backend = "modal"
         mock_settings.lyrics_lookup_enabled = False
-        mock_settings.ab_per_stem_eq_v1 = False
-        mock_settings.ab_resonance_detection_v1 = False
-        mock_settings.ab_multiband_comp_v1 = False
-        mock_settings.ab_static_mastering_v1 = False
-        mock_settings.ab_autolvl_tune_v1 = False
-        mock_settings.ab_vocal_makeup_v1 = False
-        mock_settings.ab_mp3_export_path_v1 = False
         mock_settings.ab_taste_model_v1 = False
-        mock_settings.ab_control_day3 = True
         mock_settings.anthropic_api_key = ""  # Prevent LLM API calls in tests
 
         # Apply settings overrides (AB flags, etc.)
@@ -503,13 +495,8 @@ class TestLoudnessFixPipeline:
 # ---------------------------------------------------------------------------
 
 
-class TestAutoLeveler4State:
-    """Verify all 4 combinations of ab_multiband_comp_v1 x ab_autolvl_tune_v1
-    produce the correct auto-leveler kwargs.
-
-    The AB suite only tests all-off (control) and all-on (enhanced), so
-    intermediate states must be covered here.
-    """
+class TestPipelineAutoLeveler:
+    """Verify auto-leveler uses hardcoded parameters after flag cleanup."""
 
     @pytest.fixture(autouse=True)
     def _patch_auto_level(self):
@@ -523,129 +510,47 @@ class TestAutoLeveler4State:
         with patch("musicmixer.services.processor.auto_level", side_effect=_capture_auto_level):
             yield
 
-    def _get_auto_level_kwargs(self, pipeline_tmp, multiband: bool, autolvl: bool):
-        """Run pipeline with given flags, return captured auto_level kwargs."""
+    def test_hardcoded_params(self, pipeline_tmp):
+        """Auto-leveler should use hardcoded tuned params: 4s/1.5/2.5."""
         self.captured_kwargs = {}
-        _run_pipeline_with_mock_separation(
-            pipeline_tmp,
-            settings_overrides={
-                "ab_multiband_comp_v1": multiband,
-                "ab_autolvl_tune_v1": autolvl,
-            },
-        )
-        return self.captured_kwargs
-
-    def test_both_off(self, pipeline_tmp):
-        """Default: max_boost=2.0, max_cut=3.0, window_sec=3.0."""
-        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=False, autolvl=False)
-        assert kw["max_boost_db"] == 2.0
-        assert kw["max_cut_db"] == 3.0
-        assert kw["window_sec"] == 3.0
-
-    def test_autolvl_only(self, pipeline_tmp):
-        """ab_autolvl_tune_v1 only: max_boost=1.5, max_cut=2.5, window_sec=4.0."""
-        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=False, autolvl=True)
+        _run_pipeline_with_mock_separation(pipeline_tmp)
+        kw = self.captured_kwargs
         assert kw["max_boost_db"] == 1.5
         assert kw["max_cut_db"] == 2.5
         assert kw["window_sec"] == 4.0
 
-    def test_multiband_only(self, pipeline_tmp):
-        """ab_multiband_comp_v1 only: max_boost=1.0, max_cut=1.5, window_sec=3.0.
-        Multiband takes priority for boost/cut."""
-        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=True, autolvl=False)
-        assert kw["max_boost_db"] == 1.0
-        assert kw["max_cut_db"] == 1.5
-        assert kw["window_sec"] == 3.0
-
-    def test_both_on(self, pipeline_tmp):
-        """Both flags: max_boost=1.0, max_cut=1.5, window_sec=4.0.
-        Multiband takes priority for boost/cut; window_sec from autolvl_tune."""
-        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=True, autolvl=True)
-        assert kw["max_boost_db"] == 1.0
-        assert kw["max_cut_db"] == 1.5
-        assert kw["window_sec"] == 4.0
-
     def test_detector_audio_is_always_set(self, pipeline_tmp):
         """detector_audio must always be the instrumental bus (not None)."""
-        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=False, autolvl=False)
-        assert "detector_audio" in kw
-        assert kw["detector_audio"] is not None
+        self.captured_kwargs = {}
+        _run_pipeline_with_mock_separation(pipeline_tmp)
+        assert "detector_audio" in self.captured_kwargs
+        assert self.captured_kwargs["detector_audio"] is not None
 
-    def test_active_floor_is_always_set(self, pipeline_tmp):
-        """active_floor_db must always be set to -40.0."""
-        kw = self._get_auto_level_kwargs(pipeline_tmp, multiband=False, autolvl=False)
-        assert kw["active_floor_db"] == -40.0
-        assert kw["target_percentile"] == 50.0
+    def test_active_floor_is_minus_50(self, pipeline_tmp):
+        """active_floor_db must be -50.0 (lowered to prevent volume drops)."""
+        self.captured_kwargs = {}
+        _run_pipeline_with_mock_separation(pipeline_tmp)
+        assert self.captured_kwargs["active_floor_db"] == -50.0
+        assert self.captured_kwargs["target_percentile"] == 50.0
 
 
-class TestPipelineWithSoundQualityFlags:
-    """Run the full pipeline with new sound quality flags enabled,
-    verify output is valid (MP3 exists, LUFS reasonable, peaks within ceiling).
+class TestPipelineOutputQuality:
+    """Verify the pipeline (with all enhancements baked in) produces valid output.
+
+    After the flag cleanup, EQ and static mastering are always on -- there are
+    no flag combinations to test. These tests verify the single code path
+    produces correct output (MP3 exists, LUFS reasonable, peaks within ceiling).
     """
 
-    def test_all_enhancement_flags_on(self, pipeline_tmp):
-        """Pipeline with all sound quality flags enabled produces valid output."""
-        event_queue, session = _run_pipeline_with_mock_separation(
-            pipeline_tmp,
-            settings_overrides={
-                "ab_per_stem_eq_v1": True,
-                "ab_resonance_detection_v1": True,
-                "ab_multiband_comp_v1": True,
-                "ab_static_mastering_v1": True,
-            },
-        )
-
-        output_path = Path(session.remix_path)
-        assert output_path.exists(), f"Expected remix MP3 at {output_path}"
-        assert output_path.stat().st_size > 0, "Remix MP3 should not be empty"
-        assert session.status == "complete"
-
-    def test_eq_only(self, pipeline_tmp):
-        """Pipeline with only EQ flag enabled produces valid output."""
-        event_queue, session = _run_pipeline_with_mock_separation(
-            pipeline_tmp,
-            settings_overrides={
-                "ab_per_stem_eq_v1": True,
-            },
-        )
-
-        output_path = Path(session.remix_path)
-        assert output_path.exists()
-        assert session.status == "complete"
-
-    def test_static_mastering_only(self, pipeline_tmp):
-        """Pipeline with only static mastering flag produces valid output."""
-        event_queue, session = _run_pipeline_with_mock_separation(
-            pipeline_tmp,
-            settings_overrides={
-                "ab_static_mastering_v1": True,
-            },
-        )
-
-        output_path = Path(session.remix_path)
-        assert output_path.exists()
-        assert session.status == "complete"
-
     def test_output_lufs_within_range(self, pipeline_tmp):
-        """Output LUFS should be within reasonable range when all flags are on."""
+        """Output LUFS should be within reasonable range."""
         import soundfile as sf_mod
 
-        event_queue, session = _run_pipeline_with_mock_separation(
-            pipeline_tmp,
-            settings_overrides={
-                "ab_per_stem_eq_v1": True,
-                "ab_resonance_detection_v1": True,
-                "ab_multiband_comp_v1": True,
-                "ab_static_mastering_v1": True,
-            },
-        )
+        event_queue, session = _run_pipeline_with_mock_separation(pipeline_tmp)
 
-        # Read the output MP3 as WAV for LUFS measurement
-        # (export_mp3 writes to disk; read it back)
         output_path = Path(session.remix_path)
         assert output_path.exists()
 
-        # Use soundfile to read the mp3 (via libsndfile if it supports mp3, else skip)
         try:
             audio, sr = sf_mod.read(str(output_path), dtype="float32")
         except Exception:
@@ -662,15 +567,7 @@ class TestPipelineWithSoundQualityFlags:
         """Output true peak should not grossly exceed -1.0 dBTP ceiling."""
         import soundfile as sf_mod
 
-        event_queue, session = _run_pipeline_with_mock_separation(
-            pipeline_tmp,
-            settings_overrides={
-                "ab_per_stem_eq_v1": True,
-                "ab_resonance_detection_v1": True,
-                "ab_multiband_comp_v1": True,
-                "ab_static_mastering_v1": True,
-            },
-        )
+        event_queue, session = _run_pipeline_with_mock_separation(pipeline_tmp)
 
         output_path = Path(session.remix_path)
         assert output_path.exists()
@@ -702,8 +599,8 @@ class TestLossySourceWiring:
     """
 
     def test_lossy_source_a_passes_halve_hf_boosts_to_vocal_eq(self, pipeline_tmp):
-        """source_quality_a='youtube-opus-128kbps' + ab_per_stem_eq_v1=True
-        should pass halve_hf_boosts=True to apply_corrective_eq for vocal stems.
+        """source_quality_a='youtube-opus-128kbps' should pass
+        halve_hf_boosts=True to apply_corrective_eq for vocal stems.
 
         Default plan.vocal_source is 'song_a', so lossy Song A maps to lossy vocals.
         """
@@ -721,9 +618,6 @@ class TestLossySourceWiring:
         with patch("musicmixer.services.eq.apply_corrective_eq", side_effect=_capture_eq):
             _run_pipeline_with_mock_separation(
                 pipeline_tmp,
-                settings_overrides={
-                    "ab_per_stem_eq_v1": True,
-                },
                 source_quality_a="youtube-opus-128kbps",
             )
 
@@ -744,12 +638,12 @@ class TestLossySourceWiring:
                 f"Expected halve_hf_boosts=True for vocal EQ, got kwargs: {call['kwargs']}"
             )
 
-    def test_lossy_source_b_with_vocal_source_b_maps_lossy_to_vocals(self, pipeline_tmp):
-        """source_quality_b='youtube-opus-128kbps' with plan.vocal_source='song_b'
-        should pass halve_hf_boosts=True to vocal EQ.
+    def test_lossy_source_b_passes_halve_hf_boosts_to_inst_eq(self, pipeline_tmp):
+        """source_quality_b='youtube-opus-128kbps' should pass
+        halve_hf_boosts=True to apply_corrective_eq for instrumental stems.
 
-        We force vocal_source='song_b' by patching the interpreter to return a plan
-        with vocal_source='song_b'.
+        Pipeline uses fixed convention: Song A = vocals, Song B = instrumentals.
+        So lossy Song B maps to lossy instrumentals, not vocals.
         """
         captured_calls = []
 
@@ -762,66 +656,32 @@ class TestLossySourceWiring:
         import musicmixer.services.eq as eq_mod
         original_eq = eq_mod.apply_corrective_eq
 
-        # Patch the interpreter to return vocal_source='song_b'
-        from musicmixer.models import RemixPlan, Section
-
-        def mock_interpret(prompt, meta_a, meta_b, **kwargs):
-            plan = RemixPlan(
-                vocal_source="song_b",
-                tempo_source="song_a",
-                explanation="Test plan with song_b vocals",
-                start_time_vocal=0.0,
-                end_time_vocal=15.0,
-                start_time_instrumental=0.0,
-                end_time_instrumental=15.0,
-                key_source="none",
-                sections=[
-                    Section(
-                        label="main",
-                        start_beat=0,
-                        end_beat=32,
-                        stem_gains={"vocals": 1.0, "drums": 0.8, "bass": 0.8, "other": 0.5},
-                        transition_in="cut",
-                        transition_beats=0,
-                    ),
-                ],
-            )
-            return plan
-
-        with (
-            patch("musicmixer.services.eq.apply_corrective_eq", side_effect=_capture_eq),
-            patch("musicmixer.services.interpreter.interpret_prompt", side_effect=mock_interpret),
-        ):
+        with patch("musicmixer.services.eq.apply_corrective_eq", side_effect=_capture_eq):
             _run_pipeline_with_mock_separation(
                 pipeline_tmp,
-                settings_overrides={
-                    "ab_per_stem_eq_v1": True,
-                },
                 source_quality_b="youtube-opus-128kbps",
             )
 
-        # Find vocal EQ calls with preset pass
-        vocal_preset_calls = [
+        # Find instrumental EQ calls with preset pass (drums, bass, guitar, piano, other)
+        inst_preset_calls = [
             c for c in captured_calls
-            if c["stem_type"] == "vocals"
+            if c["stem_type"] != "vocals"
             and c["kwargs"].get("apply_preset") is True
         ]
 
-        assert len(vocal_preset_calls) > 0, (
-            "Expected at least one apply_corrective_eq call for 'vocals' with apply_preset=True"
+        assert len(inst_preset_calls) > 0, (
+            "Expected at least one apply_corrective_eq call for instrumental stems with apply_preset=True"
         )
 
-        # Verify halve_hf_boosts=True was passed since vocal source is song_b (the lossy one)
-        for call in vocal_preset_calls:
+        # Verify halve_hf_boosts=True was passed for instrumental stems
+        for call in inst_preset_calls:
             assert call["kwargs"].get("halve_hf_boosts") is True, (
-                f"Expected halve_hf_boosts=True for vocal EQ when vocal_source=song_b "
-                f"and source_quality_b is lossy, got kwargs: {call['kwargs']}"
+                f"Expected halve_hf_boosts=True for instrumental EQ when "
+                f"source_quality_b is lossy, got kwargs: {call['kwargs']}"
             )
 
     def test_lossy_source_passes_lossy_lpf_to_master_static(self, pipeline_tmp):
-        """Either source being lossy + ab_static_mastering_v1=True
-        should pass lossy_lpf_hz=16000 to master_static.
-        """
+        """Either source being lossy should pass lossy_lpf_hz=16000 to master_static."""
         captured_kwargs = {}
 
         original_master = None
@@ -836,9 +696,6 @@ class TestLossySourceWiring:
         with patch("musicmixer.services.mastering.master_static", side_effect=_capture_master):
             _run_pipeline_with_mock_separation(
                 pipeline_tmp,
-                settings_overrides={
-                    "ab_static_mastering_v1": True,
-                },
                 source_quality_a="youtube-opus-128kbps",
             )
 
