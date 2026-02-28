@@ -111,6 +111,8 @@ class TestTasteStageResult:
         assert result.fallback_reason == "timeout"
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestFlagGating:
     """When ab_taste_model_v1 is False, taste stage must not be called."""
 
@@ -197,6 +199,7 @@ class TestFlagGating:
             mock_taste.assert_not_called()
 
 
+@pytest.mark.slow
 class TestTimeoutFallback:
     """Timeout wrapper should fall back gracefully on slow execution."""
 

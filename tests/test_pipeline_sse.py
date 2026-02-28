@@ -8,6 +8,8 @@ import time
 import pytest
 from unittest.mock import patch, MagicMock
 
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(30)]
+
 from fastapi.testclient import TestClient
 
 from musicmixer.main import app

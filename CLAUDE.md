@@ -155,7 +155,37 @@ If processing seems stuck, check logs for progress. Stem separation produces no 
 
 ## Testing
 
-No test suite yet (coming Day 4). For now, manual testing:
+~25 test files with ~735 test functions. Tests use `pytest` with `pytest-timeout`.
+
+### Running Tests
+
+**IMPORTANT:** All test commands require `dangerouslyDisableSandbox: true` when run via Bash tool (uv cache access requires it).
+
+```bash
+# Quick check — fast tests only (~10 seconds)
+uv run pytest tests/ -m "not slow" -v
+
+# Full suite (~1-2 minutes)
+uv run pytest tests/ -v
+
+# Single file
+uv run pytest tests/test_processor.py -v
+
+# Override timeout for debugging
+uv run pytest tests/ --timeout=30  # generous timeout
+uv run pytest tests/ --timeout=0   # disable timeout entirely
+```
+
+### Test Categories
+
+- **Fast tests** (default): Unit tests, pure logic, mocked dependencies. Run in <10 seconds.
+- **Slow tests** (`@pytest.mark.slow`): Audio processing, subprocess calls (ffmpeg/rubberband), threading fixtures. Run in 1-2 minutes.
+
+### Timeout Configuration
+
+Global timeout: 10 seconds per test (configured in `pyproject.toml`). Slow-marked tests get 30 seconds. Async tests use `signal` timeout method (via `conftest.py` hook). Override per-run with `--timeout=N`.
+
+### Manual Testing
 
 ```bash
 # Health check

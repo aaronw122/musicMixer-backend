@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(30)]
+
 from fastapi.testclient import TestClient
 
 from musicmixer.main import app

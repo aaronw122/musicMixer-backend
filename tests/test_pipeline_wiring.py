@@ -150,6 +150,8 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
     return event_queue, session
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestFullPipelineWithMocks:
     """Run the full pipeline with mocked separation, verify output MP3 exists."""
 
@@ -163,6 +165,8 @@ class TestFullPipelineWithMocks:
         assert output_path.suffix == ".mp3"
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestPipelineEmitsProgressEvents:
     """Verify the event queue contains events with expected steps in order."""
 
@@ -226,6 +230,8 @@ class TestPipelineEmitsProgressEvents:
         assert complete_event["progress"] == 1.0
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestPipelineSetsSessionState:
     """Verify session state is updated correctly on completion."""
 
@@ -254,6 +260,8 @@ class TestPipelineSetsSessionState:
         assert session.last_event["step"] == "complete"
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestPipelineHandlesSeparationError:
     """Verify that separation errors propagate correctly."""
 
@@ -503,6 +511,8 @@ class TestLoudnessFixPipeline:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestAutoLeveler4State:
     """Verify all 4 combinations of ab_multiband_comp_v1 x ab_autolvl_tune_v1
     produce the correct auto-leveler kwargs.
@@ -578,6 +588,8 @@ class TestAutoLeveler4State:
         assert kw["target_percentile"] == 50.0
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestPipelineWithSoundQualityFlags:
     """Run the full pipeline with new sound quality flags enabled,
     verify output is valid (MP3 exists, LUFS reasonable, peaks within ceiling).
@@ -694,6 +706,8 @@ class TestPipelineWithSoundQualityFlags:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 class TestLossySourceWiring:
     """Verify that source_quality flags flow through the pipeline correctly.
 
