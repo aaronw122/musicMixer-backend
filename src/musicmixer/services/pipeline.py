@@ -129,6 +129,7 @@ def run_pipeline(
     from musicmixer.services.mastering import master_static
     from musicmixer.services.renderer import render_arrangement
     from musicmixer.services.separation import separate_stems
+    from musicmixer.services.taste_constraints import compute_key_transposition_with_confidence
 
     song_a_path = Path(song_a_path)
     song_b_path = Path(song_b_path)
@@ -589,6 +590,47 @@ def run_pipeline(
 
     logger.info("Session %s: Preset EQ applied", session_id)
 
+    # === STEP 7.8: Key transposition computation ===
+    # Compute pitch shift to align vocal key to instrumental key. This runs
+    # after key metadata is available from both sources (analysis at steps 1-2).
+    # The shift is applied via rubberband at step 9.
+    pitch_shift_semitones = 0
+
+    if (
+        vocal_meta.key is not None
+        and vocal_meta.scale is not None
+        and inst_meta.key is not None
+        and inst_meta.scale is not None
+    ):
+        # Handles both explicit key_source and auto-transpose (key_source="none"):
+        # the function itself applies confidence gating and dissonance detection.
+        pitch_shift_semitones = compute_key_transposition_with_confidence(
+            vocal_key=vocal_meta.key,
+            vocal_scale=vocal_meta.scale,
+            instrumental_key=inst_meta.key,
+            instrumental_scale=inst_meta.scale,
+            vocal_key_confidence=vocal_meta.key_confidence,
+            instrumental_key_confidence=inst_meta.key_confidence,
+        )
+
+        logger.info(
+            "Session %s: Key transposition: vocal=%s %s (conf=%.2f), "
+            "inst=%s %s (conf=%.2f), key_source=%s, shift=%+d semitones",
+            session_id,
+            vocal_meta.key, vocal_meta.scale,
+            vocal_meta.key_confidence if vocal_meta.key_confidence is not None else 0.0,
+            inst_meta.key, inst_meta.scale,
+            inst_meta.key_confidence if inst_meta.key_confidence is not None else 0.0,
+            plan.key_source,
+            pitch_shift_semitones,
+        )
+    else:
+        logger.info(
+            "Session %s: Key transposition skipped: missing key data "
+            "(vocal_key=%s, inst_key=%s)",
+            session_id, vocal_meta.key, inst_meta.key,
+        )
+
     # === STEP 8: Compute tempo plan ===
     target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings, stretch_pct = compute_tempo_plan(
         vocal_meta.bpm, inst_meta.bpm, plan.tempo_source,
@@ -618,10 +660,25 @@ def run_pipeline(
         futures = {}
         if stretch_vocals:
             for stem_name in list(vocal_audio.keys()):
+                # Pass pitch shift for vocal stems (rubberband handles combined tempo+pitch)
+                vocal_semitones = pitch_shift_semitones if stem_name == "vocals" else 0
                 futures[("vocal", stem_name)] = rb_executor.submit(
                     rubberband_process, vocal_audio[stem_name], sr,
-                    vocal_meta.bpm, target_bpm, is_vocal=(stem_name == "vocals"),
+                    vocal_meta.bpm, target_bpm,
+                    semitones=vocal_semitones,
+                    is_vocal=(stem_name == "vocals"),
                 )
+        elif pitch_shift_semitones != 0:
+            # No tempo stretch needed, but pitch shift is required.
+            # rubberband handles pitch-only processing fine (time_ratio ~= 1.0).
+            for stem_name in list(vocal_audio.keys()):
+                if stem_name == "vocals":
+                    futures[("vocal", stem_name)] = rb_executor.submit(
+                        rubberband_process, vocal_audio[stem_name], sr,
+                        vocal_meta.bpm, vocal_meta.bpm,  # same BPM = no tempo change
+                        semitones=pitch_shift_semitones,
+                        is_vocal=True,
+                    )
         if stretch_instrumentals:
             for stem_name in list(inst_audio.keys()):
                 futures[("inst", stem_name)] = rb_executor.submit(

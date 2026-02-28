@@ -358,6 +358,154 @@ def _key_semitone_distance(key_a: str, key_b: str) -> int | None:
     return min(diff, 12 - diff)
 
 
+# Relative major/minor pairs: minor key -> relative major root offset (+3 semitones).
+# C minor <-> Eb major, A minor <-> C major, etc.
+_RELATIVE_MINOR_OFFSET = 3  # minor root + 3 = relative major root
+
+
+# Dissonant chromatic intervals (unsigned, 0-6 range from _key_semitone_distance).
+# Full set is {1, 2, 6, 10, 11} but _key_semitone_distance returns 0-6, so
+# 10 and 11 are unreachable. Functionally equivalent to check {1, 2, 6}.
+_DISSONANT_INTERVALS = {1, 2, 6}
+
+
+def _root_pitch_class(key: str, scale: str) -> int | None:
+    """Get the effective root pitch class, normalizing relative major/minor.
+
+    For consonance comparison, we treat relative major/minor as the same
+    tonal center. We normalize minor keys to their relative major root
+    (e.g., A minor -> C, F# minor -> A) so that compatible pairs
+    like C major / A minor produce distance 0.
+    """
+    root = _NOTE_TO_SEMITONE.get(key)
+    if root is None:
+        return None
+    if scale == "minor":
+        # Normalize to relative major root
+        return (root + _RELATIVE_MINOR_OFFSET) % 12
+    return root
+
+
+def compute_key_transposition(
+    vocal_key: str,
+    vocal_scale: str,
+    instrumental_key: str,
+    instrumental_scale: str,
+) -> int:
+    """Compute signed pitch shift (semitones) to align vocal key to instrumental key.
+
+    Treats relative major/minor as compatible (C major <-> A minor = 0 shift).
+
+    Dissonance is checked on normalized pitch class roots (minor keys
+    normalized to relative major before comparison). The unsigned interval
+    between roots is checked against the dissonant set {1, 2, 6}.
+
+    For the actual signed shift, computes:
+        signed_shift = (target_root - source_root + 6) % 12 - 6
+    where roots are normalized pitch classes (relative minor -> major root).
+    This yields range [-6, 5], minimizing absolute shift and preferring
+    downward on ties (e.g., tritone = -6 not +6).
+
+    Caps at +/-4 semitones. If minimum transposition exceeds 4, logs a
+    warning and returns 0.
+
+    Returns:
+        Signed pitch shift in semitones. 0 means no transposition needed.
+    """
+    source_root = _root_pitch_class(vocal_key, vocal_scale)
+    target_root = _root_pitch_class(instrumental_key, instrumental_scale)
+
+    if source_root is None or target_root is None:
+        logger.warning(
+            "Cannot compute key transposition: unrecognized key "
+            "(vocal=%s %s, instrumental=%s %s)",
+            vocal_key, vocal_scale, instrumental_key, instrumental_scale,
+        )
+        return 0
+
+    # Check if transposition is needed at all: use _key_semitone_distance
+    # on the normalized roots to detect dissonance.
+    # We compute distance on normalized roots (relative minor -> major).
+    diff = abs(source_root - target_root)
+    unsigned_dist = min(diff, 12 - diff)
+
+    if unsigned_dist not in _DISSONANT_INTERVALS:
+        # Consonant interval (0, 3, 4, 5 in 0-6 range) -- no shift needed
+        return 0
+
+    # Compute signed shift that minimizes absolute distance, preferring down on ties.
+    signed_shift = (target_root - source_root + 6) % 12 - 6
+
+    # Cap at +/-4 semitones
+    if abs(signed_shift) > 4:
+        logger.warning(
+            "Key transposition would require %+d semitones (vocal=%s %s -> "
+            "instrumental=%s %s), exceeds +/-4 cap. Skipping transposition.",
+            signed_shift, vocal_key, vocal_scale,
+            instrumental_key, instrumental_scale,
+        )
+        return 0
+
+    logger.info(
+        "Key transposition: %s %s -> %s %s = %+d semitones "
+        "(normalized roots: %d -> %d, unsigned dist: %d)",
+        vocal_key, vocal_scale, instrumental_key, instrumental_scale,
+        signed_shift, source_root, target_root, unsigned_dist,
+    )
+
+    return signed_shift
+
+
+def compute_key_transposition_with_confidence(
+    vocal_key: str,
+    vocal_scale: str,
+    instrumental_key: str,
+    instrumental_scale: str,
+    vocal_key_confidence: float | None,
+    instrumental_key_confidence: float | None,
+) -> int:
+    """Compute key transposition with confidence gating.
+
+    Applies same confidence thresholds as _compute_key_guidance() in interpreter.py:
+    - Either key confidence < 0.40: skip transposition entirely (return 0)
+    - Either key confidence < 0.55: halve the shift (round toward zero)
+
+    Returns:
+        Signed pitch shift in semitones after confidence gating.
+    """
+    # Confidence gating: skip if either confidence is too low
+    conf_a = vocal_key_confidence if vocal_key_confidence is not None else 0.0
+    conf_b = instrumental_key_confidence if instrumental_key_confidence is not None else 0.0
+    min_conf = min(conf_a, conf_b)
+
+    if min_conf < 0.40:
+        logger.info(
+            "Key transposition skipped: low confidence (min=%.2f < 0.40, "
+            "vocal_conf=%.2f, inst_conf=%.2f)",
+            min_conf, conf_a, conf_b,
+        )
+        return 0
+
+    raw_shift = compute_key_transposition(
+        vocal_key, vocal_scale, instrumental_key, instrumental_scale,
+    )
+
+    if raw_shift == 0:
+        return 0
+
+    # Moderate confidence: halve the shift, rounding toward zero
+    if min_conf < 0.55:
+        halved = int(raw_shift / 2)  # int() truncates toward zero
+        logger.info(
+            "Key transposition halved due to moderate confidence: "
+            "%+d -> %+d (min_conf=%.2f)",
+            raw_shift, halved, min_conf,
+        )
+        return halved
+
+    return raw_shift
+
+
 def check_transition_bounds(plan: RemixPlan) -> list[ConstraintViolation]:
     """Constraint 7: Transition bounds.
 
