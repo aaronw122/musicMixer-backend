@@ -113,6 +113,88 @@ def analyze_audio(audio_path: Path) -> AudioMetadata:
     )
 
 
+def analyze_audio_full(audio_path: Path) -> AudioMetadata:
+    """Single-load audio analysis: BPM, key, modulation in one pass.
+
+    Loads the audio file ONCE at 44100 Hz (needed for essentia key detection),
+    runs key detection and modulation detection on the high-rate data, then
+    downsamples to 22050 Hz in-memory for BPM / beat detection.
+
+    This replaces three separate calls (``analyze_audio``, ``detect_key``,
+    ``detect_modulation``) that each loaded the file independently.
+
+    Returns an :class:`AudioMetadata` with key/scale/confidence/has_modulation
+    already populated.
+    """
+    # --- 1. Load audio once at 44100 Hz (mono, float32) ---
+    y_44k, _ = librosa.load(str(audio_path), sr=KEY_DETECTION_SR, mono=True)
+
+    # --- 2. Key detection (uses 44100 Hz data) ---
+    key: str | None = None
+    scale: str | None = None
+    key_confidence: float | None = None
+    try:
+        key, scale, key_confidence = detect_key(
+            audio_path, audio_44k=y_44k,
+        )
+    except Exception as exc:
+        logger.warning("Key detection failed for %s: %s", audio_path.name, exc)
+
+    # --- 3. Modulation detection (uses 44100 Hz data) ---
+    has_modulation = detect_modulation(audio_path, audio_44k=y_44k)
+
+    # --- 4. Downsample to 22050 Hz in-memory for BPM detection ---
+    y_22k = librosa.resample(y_44k, orig_sr=KEY_DETECTION_SR, target_sr=ANALYSIS_SR)
+
+    # --- 5. BPM / beat detection (identical logic to analyze_audio) ---
+    sr = ANALYSIS_SR
+    tempo, beat_frames = librosa.beat.beat_track(y=y_22k, sr=sr, units="frames")
+    bpm = float(np.atleast_1d(tempo)[0])
+
+    duration = float(librosa.get_duration(y=y_22k, sr=sr))
+    total_beats = round(bpm * duration / 60 / 4) * 4  # Round to nearest bar
+
+    # BPM confidence via tempogram peak sharpness
+    tempogram = librosa.feature.tempogram(y=y_22k, sr=sr)
+    tempo_profile = np.mean(tempogram, axis=1)
+    if np.max(tempo_profile) > 0:
+        bpm_confidence = float(np.max(tempo_profile) / np.mean(tempo_profile))
+        bpm_confidence = min(bpm_confidence / 10.0, 1.0)
+    else:
+        bpm_confidence = 0.0
+
+    # Mean RMS from original mix audio (spec section 8)
+    mean_rms = float(np.sqrt(np.mean(y_22k ** 2)))
+
+    logger.info(
+        "Full audio analysis complete: path=%s bpm=%.1f confidence=%.2f "
+        "duration=%.1fs beats=%d rms=%.4f key=%s %s (key_conf=%.2f, modulation=%s)",
+        audio_path.name,
+        bpm,
+        bpm_confidence,
+        duration,
+        total_beats,
+        mean_rms,
+        key,
+        scale,
+        key_confidence if key_confidence is not None else 0.0,
+        has_modulation,
+    )
+
+    return AudioMetadata(
+        bpm=bpm,
+        bpm_confidence=bpm_confidence,
+        beat_frames=beat_frames,
+        duration_seconds=duration,
+        total_beats=max(total_beats, 4),
+        mean_rms=mean_rms,
+        key=key,
+        scale=scale,
+        key_confidence=key_confidence,
+        has_modulation=has_modulation,
+    )
+
+
 def reconcile_bpm(
     meta_a: AudioMetadata, meta_b: AudioMetadata
 ) -> tuple[AudioMetadata, AudioMetadata]:
@@ -518,8 +600,15 @@ def detect_vocal_gaps(vocal_active: np.ndarray) -> list[VocalGap]:
 # 2.5 Key detection + modulation
 # ---------------------------------------------------------------------------
 
-def _detect_key_essentia(audio_path: Path) -> tuple[str, str, float]:
+def _detect_key_essentia(
+    audio_path: Path,
+    audio_44k: np.ndarray | None = None,
+) -> tuple[str, str, float]:
     """Detect key using essentia KeyExtractor at 44.1 kHz.
+
+    If *audio_44k* is provided (mono float32 at 44100 Hz), it is used directly
+    instead of loading from disk -- this avoids a redundant file read when the
+    caller has already loaded the audio.
 
     Returns (key, scale, confidence).
     Raises ImportError or RuntimeError if essentia is unavailable or fails.
@@ -527,20 +616,33 @@ def _detect_key_essentia(audio_path: Path) -> tuple[str, str, float]:
     if not _HAS_ESSENTIA:
         raise ImportError("essentia not available")
 
-    loader = es.MonoLoader(filename=str(audio_path), sampleRate=KEY_DETECTION_SR)
-    audio = loader()
+    if audio_44k is not None:
+        audio = audio_44k
+    else:
+        loader = es.MonoLoader(filename=str(audio_path), sampleRate=KEY_DETECTION_SR)
+        audio = loader()
     key_extractor = es.KeyExtractor()
     key, scale, confidence = key_extractor(audio)
     return str(key), str(scale), float(confidence)
 
 
-def _detect_key_librosa(audio_path: Path) -> tuple[str, str, float]:
+def _detect_key_librosa(
+    audio_path: Path,
+    audio_22k: np.ndarray | None = None,
+) -> tuple[str, str, float]:
     """Detect key using librosa chroma_cqt (fallback).
+
+    If *audio_22k* is provided (mono float32 at 22050 Hz), it is used directly
+    instead of loading from disk.
 
     Returns (key, scale, confidence). Confidence is derived from
     the sharpness of the chroma profile peak.
     """
-    y, sr = librosa.load(str(audio_path), sr=22050)
+    if audio_22k is not None:
+        y = audio_22k
+        sr = 22050
+    else:
+        y, sr = librosa.load(str(audio_path), sr=22050)
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
 
     # Average chroma profile across time
@@ -586,31 +688,49 @@ def _detect_key_librosa(audio_path: Path) -> tuple[str, str, float]:
     return key, scale, confidence
 
 
-def detect_key(audio_path: Path) -> tuple[str, str, float]:
+def detect_key(
+    audio_path: Path,
+    audio_44k: np.ndarray | None = None,
+    audio_22k: np.ndarray | None = None,
+) -> tuple[str, str, float]:
     """Detect key of an audio file.
 
     Primary: essentia KeyExtractor at 44.1 kHz.
     Fallback: librosa chroma_cqt.
     If essentia fails, falls back to librosa silently.
 
+    Optional pre-loaded audio arrays (*audio_44k* at 44100 Hz for essentia,
+    *audio_22k* at 22050 Hz for the librosa fallback) avoid redundant disk I/O
+    when the caller has already loaded the file.
+
     Returns (key, scale, confidence).
     """
     try:
-        return _detect_key_essentia(audio_path)
+        return _detect_key_essentia(audio_path, audio_44k=audio_44k)
     except Exception:
         logger.debug("Essentia key detection failed, falling back to librosa")
-        return _detect_key_librosa(audio_path)
+        return _detect_key_librosa(audio_path, audio_22k=audio_22k)
 
 
-def detect_modulation(audio_path: Path) -> bool:
+def detect_modulation(
+    audio_path: Path,
+    audio_44k: np.ndarray | None = None,
+    audio_22k: np.ndarray | None = None,
+) -> bool:
     """Detect key modulation by comparing first 60% and last 40% of the audio.
+
+    Optional pre-loaded audio arrays (*audio_44k* at 44100 Hz for essentia,
+    *audio_22k* at 22050 Hz for the librosa fallback) avoid redundant disk I/O.
 
     Returns True if the keys differ between the two segments.
     """
     try:
         if _HAS_ESSENTIA:
-            loader = es.MonoLoader(filename=str(audio_path), sampleRate=KEY_DETECTION_SR)
-            audio = loader()
+            if audio_44k is not None:
+                audio = audio_44k
+            else:
+                loader = es.MonoLoader(filename=str(audio_path), sampleRate=KEY_DETECTION_SR)
+                audio = loader()
             split_point = int(len(audio) * 0.6)
 
             key_extractor = es.KeyExtractor()
@@ -620,7 +740,11 @@ def detect_modulation(audio_path: Path) -> bool:
             return key_first != key_last or scale_first != scale_last
         else:
             # Librosa fallback for modulation detection
-            y, sr = librosa.load(str(audio_path), sr=22050)
+            if audio_22k is not None:
+                y = audio_22k
+                sr = 22050
+            else:
+                y, sr = librosa.load(str(audio_path), sr=22050)
             split_point = int(len(y) * 0.6)
 
             # Compare chroma profiles of first 60% and last 40%

@@ -98,6 +98,7 @@ def run_pipeline(
     from musicmixer.services.lyrics import lookup_lyrics_for_song, map_lyrics_to_bars, map_plain_lyrics_to_bars
     from musicmixer.services.analysis import (
         analyze_audio,
+        analyze_audio_full,
         analyze_stems,
         compute_relationships,
         detect_key,
@@ -137,8 +138,11 @@ def run_pipeline(
 
     logger.info("Session %s: pipeline started (prompt=%r)", session_id, prompt[:80])
 
-    # === STEP 1: Separate stems (50% of total time) ===
-    logger.info("Session %s: [1/17] separating stems...", session_id)
+    # === STEPS 1+2: Separation + analysis (overlapped) ===
+    # Separation and audio analysis run concurrently.  Analysis operates on the
+    # original uploaded files (not stems), so it can start immediately alongside
+    # separation.  Lyrics lookups also run in the same pool.
+    logger.info("Session %s: [1/17] separating stems + analyzing audio...", session_id)
     emit_progress(event_queue, {
         "step": "separating",
         "detail": "Extracting stems from both songs...",
@@ -148,67 +152,78 @@ def run_pipeline(
     song_a_stems_dir = stems_dir / "song_a"
     song_b_stems_dir = stems_dir / "song_b"
 
-    # --- Parallel lyrics fetch (runs alongside stem separation) ---
-    # Submit lyrics lookups BEFORE stem separation so they run concurrently.
-    # Lyrics only need the filename + audio path, not stems.
+    # --- Submit all concurrent work into a single pool ---
+    # Workers: 2 separation + 2 analysis + (optionally) 2 lyrics = up to 6
     lyrics_a_data: LyricsData | None = None
     lyrics_b_data: LyricsData | None = None
     lyrics_future_a = None
     lyrics_future_b = None
-    lyrics_executor = None
 
+    pool_workers = 4  # 2 separation + 2 analysis
     if settings.lyrics_lookup_enabled:
-        lyrics_executor = ThreadPoolExecutor(max_workers=2)
-        try:
-            lyrics_future_a = lyrics_executor.submit(
-                lookup_lyrics_for_song, song_a_path, song_a_original_filename,
-            )
-            lyrics_future_b = lyrics_executor.submit(
-                lookup_lyrics_for_song, song_b_path, song_b_original_filename,
-            )
-            logger.info("Session %s: Lyrics lookup submitted for both songs", session_id)
-        except Exception:
-            logger.warning("Session %s: Failed to submit lyrics lookups", session_id, exc_info=True)
+        pool_workers = 6
 
-    # Run both separations concurrently
-    with ThreadPoolExecutor(max_workers=2) as sep_executor:
-        future_a = sep_executor.submit(separate_stems, song_a_path, song_a_stems_dir)
-        future_b = sep_executor.submit(separate_stems, song_b_path, song_b_stems_dir)
-        song_a_stems = future_a.result(timeout=900)
-        song_b_stems = future_b.result(timeout=900)
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+        # Separation futures
+        sep_future_a = pool.submit(separate_stems, song_a_path, song_a_stems_dir)
+        sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir)
 
-    # --- Collect lyrics results (after stem separation completes) ---
-    if lyrics_executor is not None:
-        try:
-            if lyrics_future_a is not None:
-                try:
-                    lyrics_a_data = lyrics_future_a.result(timeout=15)
-                except FuturesTimeoutError:
-                    logger.warning("Session %s: Lyrics lookup timed out for Song A", session_id)
-                    lyrics_future_a.cancel()
-                except Exception:
-                    logger.warning("Session %s: Lyrics lookup failed for Song A", session_id, exc_info=True)
+        # Analysis futures (overlapped with separation -- no stem dependency)
+        analysis_future_a = pool.submit(analyze_audio_full, song_a_path)
+        analysis_future_b = pool.submit(analyze_audio_full, song_b_path)
 
-            if lyrics_future_b is not None:
-                try:
-                    lyrics_b_data = lyrics_future_b.result(timeout=15)
-                except FuturesTimeoutError:
-                    logger.warning("Session %s: Lyrics lookup timed out for Song B", session_id)
-                    lyrics_future_b.cancel()
-                except Exception:
-                    logger.warning("Session %s: Lyrics lookup failed for Song B", session_id, exc_info=True)
-        finally:
-            lyrics_executor.shutdown(wait=False)
-
-        for label, data in [("A", lyrics_a_data), ("B", lyrics_b_data)]:
-            if data is not None:
-                logger.info(
-                    "Session %s: Song %s lyrics: %d lines, synced=%s, source=%s (%.0fms)",
-                    session_id, label, len(data.lines), data.is_synced, data.source,
-                    data.lookup_duration_ms,
+        # Lyrics futures (optional, also overlapped)
+        if settings.lyrics_lookup_enabled:
+            try:
+                lyrics_future_a = pool.submit(
+                    lookup_lyrics_for_song, song_a_path, song_a_original_filename,
                 )
-            else:
-                logger.info("Session %s: Song %s lyrics: not found", session_id, label)
+                lyrics_future_b = pool.submit(
+                    lookup_lyrics_for_song, song_b_path, song_b_original_filename,
+                )
+                logger.info("Session %s: Lyrics lookup submitted for both songs", session_id)
+            except Exception:
+                logger.warning("Session %s: Failed to submit lyrics lookups", session_id, exc_info=True)
+
+        # --- Collect analysis results (typically finishes before separation) ---
+        meta_a = analysis_future_a.result(timeout=120)
+        meta_b = analysis_future_b.result(timeout=120)
+
+        logger.info("Session %s: [2/17] analysis done (A=%.1f BPM, B=%.1f BPM)", session_id, meta_a.bpm, meta_b.bpm)
+
+        # --- Collect separation results ---
+        song_a_stems = sep_future_a.result(timeout=900)
+        song_b_stems = sep_future_b.result(timeout=900)
+
+        # --- Collect lyrics results ---
+        if lyrics_future_a is not None:
+            try:
+                lyrics_a_data = lyrics_future_a.result(timeout=15)
+            except FuturesTimeoutError:
+                logger.warning("Session %s: Lyrics lookup timed out for Song A", session_id)
+                lyrics_future_a.cancel()
+            except Exception:
+                logger.warning("Session %s: Lyrics lookup failed for Song A", session_id, exc_info=True)
+
+        if lyrics_future_b is not None:
+            try:
+                lyrics_b_data = lyrics_future_b.result(timeout=15)
+            except FuturesTimeoutError:
+                logger.warning("Session %s: Lyrics lookup timed out for Song B", session_id)
+                lyrics_future_b.cancel()
+            except Exception:
+                logger.warning("Session %s: Lyrics lookup failed for Song B", session_id, exc_info=True)
+
+    # Log lyrics results
+    for label, data in [("A", lyrics_a_data), ("B", lyrics_b_data)]:
+        if data is not None:
+            logger.info(
+                "Session %s: Song %s lyrics: %d lines, synced=%s, source=%s (%.0fms)",
+                session_id, label, len(data.lines), data.is_synced, data.source,
+                data.lookup_duration_ms,
+            )
+        else:
+            logger.info("Session %s: Song %s lyrics: not found", session_id, label)
 
     emit_progress(event_queue, {
         "step": "separating",
@@ -218,16 +233,13 @@ def run_pipeline(
 
     logger.info("Session %s: [1/17] stems done (%d song_a, %d song_b)", session_id, len(song_a_stems), len(song_b_stems))
 
-    # === STEP 2: Analyze both original songs ===
-    logger.info("Session %s: [2/17] analyzing audio...", session_id)
+    # Emit analyzing progress AFTER separation progress to maintain monotonic
+    # step ordering for SSE clients (separating -> analyzing -> processing -> ...)
     emit_progress(event_queue, {
         "step": "analyzing",
         "detail": "Detecting tempo and key...",
         "progress": 0.52,
     }, session=session)
-
-    meta_a = analyze_audio(song_a_path)
-    meta_b = analyze_audio(song_b_path)
 
     # Propagate source quality metadata (YouTube inputs carry codec/bitrate info)
     if source_quality_a is not None:
@@ -236,11 +248,10 @@ def run_pipeline(
         meta_b.source_quality = source_quality_b
 
     logger.info(
-        "Session %s: Song A BPM=%.1f, Song B BPM=%.1f",
-        session_id, meta_a.bpm, meta_b.bpm,
+        "Session %s: Song A BPM=%.1f key=%s %s, Song B BPM=%.1f key=%s %s",
+        session_id, meta_a.bpm, meta_a.key, meta_a.scale,
+        meta_b.bpm, meta_b.key, meta_b.scale,
     )
-
-    logger.info("Session %s: [2/17] analysis done (A=%.1f BPM, B=%.1f BPM)", session_id, meta_a.bpm, meta_b.bpm)
 
     # === STEP 3: Reconcile BPM between songs ===
     logger.info("Session %s: [3/17] reconciling BPM...", session_id)
@@ -257,6 +268,9 @@ def run_pipeline(
     }, session=session)
 
     # === STEP 3.5: Analyze song structure ===
+    # Key detection and modulation are already done by analyze_audio_full above.
+    # Only stem-level structure analysis (which depends on separation output)
+    # runs here.
     logger.info("Session %s: [3.5/17] analyzing song structure...", session_id)
     emit_progress(event_queue, {
         "step": "analyzing",
@@ -264,28 +278,23 @@ def run_pipeline(
         "progress": 0.56,
     }, session=session)
 
-    # Key detection for both songs
-    for label, meta, path in [("A", meta_a, song_a_path), ("B", meta_b, song_b_path)]:
-        try:
-            key, scale, confidence = detect_key(path)
-            meta.key = key
-            meta.scale = scale
-            meta.key_confidence = confidence
-            meta.has_modulation = detect_modulation(path)
+    # Log key detection results (already populated by analyze_audio_full)
+    for label, meta in [("A", meta_a), ("B", meta_b)]:
+        if meta.key is not None:
             logger.info(
                 "Session %s: Song %s key=%s %s (confidence=%.2f, modulation=%s)",
-                session_id, label, key, scale, confidence, meta.has_modulation,
+                session_id, label, meta.key, meta.scale,
+                meta.key_confidence if meta.key_confidence is not None else 0.0,
+                meta.has_modulation,
             )
-        except Exception as e:
-            logger.warning("Session %s: Key detection failed for Song %s: %s", session_id, label, e)
 
-    # Stem-level structure analysis for both songs
-    for label, meta, stems_dir in [
+    # Stem-level structure analysis for both songs (depends on stem output)
+    for label, meta, s_dir in [
         ("A", meta_a, song_a_stems_dir),
         ("B", meta_b, song_b_stems_dir),
     ]:
         try:
-            stem_paths = {name: stems_dir / f"{name}.wav" for name in ["vocals", "drums", "bass", "guitar", "piano", "other"]}
+            stem_paths = {name: s_dir / f"{name}.wav" for name in ["vocals", "drums", "bass", "guitar", "piano", "other"]}
             # Filter to stems that actually exist
             stem_paths = {k: v for k, v in stem_paths.items() if v.exists()}
             if stem_paths:
