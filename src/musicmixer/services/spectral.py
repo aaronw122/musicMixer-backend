@@ -214,19 +214,19 @@ def _resolve_cut_stem(stem_a: str, stem_b: str, center_hz: float) -> str:
     """Determine which stem should be cut in a conflict.
 
     - In the vocal presence range (2-5 kHz), always cut the instrumental stem
-      (stem_b), never the vocal stem.
+      (stem_b), never any vocal-source stem.
     - Otherwise, cut the lower-priority stem.
     """
     in_presence_range = (
         VOCAL_PRESENCE_LOW_HZ <= center_hz <= VOCAL_PRESENCE_HIGH_HZ
     )
-    if in_presence_range and stem_a == "vocals":
-        return stem_b
+    if in_presence_range:
+        return stem_b  # instrumental-source always loses in the vocal presence range
 
     prio_a = STEM_PRIORITY.get(stem_a, 20)
     prio_b = STEM_PRIORITY.get(stem_b, 20)
 
-    # Cut the lower-priority stem; ties go to stem_b (instrumental)
+    # Cut the lower-priority stem; stem_b (instrumental) is cut on ties
     if prio_a >= prio_b:
         return stem_b
     return stem_a
