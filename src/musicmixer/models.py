@@ -182,6 +182,46 @@ class Section:
     transition_beats: int           # Length of transition envelope
 
 
+# ---------------------------------------------------------------------------
+# Spectral analysis (Adaptive EQ)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SpectralProfile:
+    """Frequency-domain profile for a single stem.
+
+    Stores 1/3-octave band energies (31 ISO 266 centers from 20 Hz to 20 kHz)
+    and detected spectral peaks.  Used by the adaptive EQ system to detect
+    per-stem anomalies and cross-stem masking conflicts.
+    """
+    stem_type: str
+    band_centers_hz: np.ndarray       # (31,) ISO 266 1/3-octave centers
+    band_energies_db: np.ndarray      # (31,) smoothed energy per band (dB, relative)
+    peak_frequencies_hz: np.ndarray   # detected spectral peaks (Hz)
+    peak_magnitudes_db: np.ndarray    # magnitude at each peak (dB)
+
+
+@dataclass
+class FrequencyConflict:
+    """A detected masking conflict between two stems in a specific band.
+
+    Generated when both stems exceed the anomaly threshold (+6 dB) in the
+    same 1/3-octave band.  The recommended cut is applied to the lower-
+    priority stem (vocals > bass > drums > guitar/piano/other).
+    """
+    stem_a: str
+    stem_b: str
+    center_hz: float
+    severity_db: float
+    recommended_cut_stem: str
+    recommended_cut_db: float
+    recommended_q: float
+
+
+# ---------------------------------------------------------------------------
+# Remix plan (Steps 5 + 6)
+# ---------------------------------------------------------------------------
+
 @dataclass
 class RemixPlan:
     """Complete remix plan — produced by LLM (Day 3) or deterministic fallback."""
