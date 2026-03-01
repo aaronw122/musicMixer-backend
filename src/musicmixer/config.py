@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     youtube_enabled: bool = True
     youtube_max_duration_seconds: int = 900  # 15 minutes
 
+    # Adaptive EQ (spectral-analysis-driven corrections)
+    adaptive_eq_enabled: bool = False  # ADAPTIVE_EQ_ENABLED env var
+
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
