@@ -5,11 +5,11 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from musicmixer.models import AudioMetadata, EnergyBuckets, LyricLine, LyricsData, RemixPlan, Section, StemAnalysis
+from musicmixer.models import AudioMetadata, EnergyBuckets, IntentPlan, IntentSection, LyricLine, LyricsData, RemixPlan, Section, StemAnalysis
 from musicmixer.services.interpreter import (
     _build_few_shot_messages,
     _build_system_prompt_blocks,
-    _validate_remix_plan,
+    _validate_intent_plan,
     default_arrangement,
     generate_fallback_plan,
     interpret_prompt,
@@ -218,8 +218,6 @@ def _default_prompt_args(
     stretch_pct: float | None = None,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
-    vocal_stem_lufs: dict[str, float] | None = None,
-    inst_stem_lufs: dict[str, float] | None = None,
 ) -> dict:
     """Build kwargs dict for _build_system_prompt_blocks."""
     meta_a = _make_metadata(bpm=bpm_a, duration=duration_a)
@@ -237,8 +235,6 @@ def _default_prompt_args(
         stretch_pct=stretch_pct,
         lyrics_a=lyrics_a,
         lyrics_b=lyrics_b,
-        vocal_stem_lufs=vocal_stem_lufs,
-        inst_stem_lufs=inst_stem_lufs,
     )
 
 
@@ -312,8 +308,9 @@ class TestBuildSystemPromptBlocks:
         section_markers = [
             "You are a music remix planner",           # Section 1
             "CRITICAL MIXING RULES",                   # Section 2
+            "STEM ROLES:",                             # Section 3 (new)
+            "ENERGY LEVELS:",                          # Section 3 (new)
             "MIXING ADVISORY",                         # Section 3
-            "STEM LOUDNESS AWARENESS",                 # Section 3b
             "TRANSITIONS:",                            # Section 4
             "Template A (Standard Mashup)",            # Section 5
             "SECTION RULES:",                          # Section 6
@@ -324,10 +321,24 @@ class TestBuildSystemPromptBlocks:
             "EXPLANATION: Write 2-3",                  # Section 11
             "SONG DATA:",                              # Section 12
             "1 bar = 4 beats",                         # Section 13
-            "STEM GAIN REFERENCE",                     # Gain reference section
         ]
         for marker in section_markers:
             assert marker in combined, f"Marker missing from blocks: {marker}"
+
+    def test_removed_gain_sections_absent(self):
+        """Gain-specific sections are no longer in the system prompt."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        combined = blocks[0]["text"] + "\n\n" + blocks[1]["text"]
+
+        absent_markers = [
+            "STEM GAIN REFERENCE",
+            "STEM LOUDNESS AWARENESS",
+            "ENERGY BUDGET BY SECTION TYPE",
+            "GAIN SCALE (linear amplitude)",
+        ]
+        for marker in absent_markers:
+            assert marker not in combined, f"Removed marker still present: {marker}"
 
     @pytest.mark.parametrize("variant,kwargs", [
         ("no_lyrics_no_stretch", dict()),
@@ -345,8 +356,8 @@ class TestBuildSystemPromptBlocks:
         required_markers = [
             "You are a music remix planner",
             "CRITICAL MIXING RULES",
+            "STEM ROLES:",
             "MIXING ADVISORY",
-            "STEM LOUDNESS AWARENESS",
             "TRANSITIONS:",
             "SECTION RULES:",
             "GENRE GUIDANCE",
@@ -356,7 +367,6 @@ class TestBuildSystemPromptBlocks:
             "EXPLANATION: Write 2-3",
             "SONG DATA:",
             "1 bar = 4 beats",
-            "STEM GAIN REFERENCE",
         ]
         for marker in required_markers:
             assert marker in combined, (
@@ -370,111 +380,17 @@ class TestBuildSystemPromptBlocks:
         assert "STRETCH WARNING (18.5%)" in blocks[1]["text"]
         assert "STRETCH WARNING" not in blocks[0]["text"]
 
-    def test_lufs_guidance_in_static_block(self):
-        """STEM LOUDNESS AWARENESS section appears in static (cached) block."""
+    def test_stem_roles_guidance_in_static_block(self):
+        """STEM ROLES section appears in static (cached) block."""
         args = _default_prompt_args()
         blocks = _build_system_prompt_blocks(**args)
-        assert "STEM LOUDNESS AWARENESS" in blocks[0]["text"]
-        assert "Stems below -25 LUFS" in blocks[0]["text"]
-        assert "Stems below -30 LUFS" in blocks[0]["text"]
-        assert "Stems above -18 LUFS" in blocks[0]["text"]
-
-    def test_lufs_values_not_in_static_block(self):
-        """Per-stem LUFS values should never appear in the static (cached) block."""
-        args = _default_prompt_args(
-            vocal_stem_lufs={"vocals": -16.4},
-            inst_stem_lufs={"drums": -18.8, "bass": -20.2},
-        )
-        blocks = _build_system_prompt_blocks(**args)
-        assert "-16.4 LUFS" not in blocks[0]["text"]
-        assert "-18.8 LUFS" not in blocks[0]["text"]
-
-    def test_works_without_lufs_params(self):
-        """Backward compat: function works when LUFS params are None."""
-        args = _default_prompt_args()
-        # Explicitly ensure LUFS params are None (the default)
-        assert args["vocal_stem_lufs"] is None
-        assert args["inst_stem_lufs"] is None
-        blocks = _build_system_prompt_blocks(**args)
-        assert len(blocks) == 2
-        # LUFS guidance section is still present in static block
-        assert "STEM LOUDNESS AWARENESS" in blocks[0]["text"]
-
-    def test_lufs_values_in_dynamic_block_with_stem_analysis(self):
-        """When LUFS dicts and stem_analysis are provided, LUFS values appear in dynamic block."""
-        meta_a = _make_metadata(bpm=120.0, duration=240.0)
-        meta_b = _make_metadata(bpm=118.0, duration=210.0)
-
-        # Add stem_analysis to both so _build_stem_character produces output
-        buckets = EnergyBuckets(noise_floor=0.02, p10=0.05, p50=0.10, p85=0.20)
-        meta_a.stem_analysis = StemAnalysis(
-            bar_rms={"vocals": np.full(60, 0.15)},
-            combined_energy=np.full(60, 0.5),
-            vocal_active=np.full(60, True),
-            vocal_gaps=[],
-            bucket_thresholds=buckets,
-        )
-        meta_b.stem_analysis = StemAnalysis(
-            bar_rms={
-                "drums": np.full(60, 0.18),
-                "bass": np.full(60, 0.12),
-            },
-            combined_energy=np.full(60, 0.5),
-            vocal_active=np.full(60, False),
-            vocal_gaps=[],
-            bucket_thresholds=buckets,
-        )
-
-        from musicmixer.services.interpreter import _compute_key_guidance, estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
-        _key_available, key_detail = _compute_key_guidance(meta_a, meta_b)
-        target_bpm = estimate_target_bpm(vocal_bpm=meta_a.bpm, instrumental_bpm=meta_b.bpm)
-        total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
-
-        blocks = _build_system_prompt_blocks(
-            song_a_meta=meta_a,
-            song_b_meta=meta_b,
-            key_matching_available=_key_available,
-            key_matching_detail=key_detail,
-            total_available_beats=total_available_beats,
-            vocal_stem_lufs={"vocals": -16.4},
-            inst_stem_lufs={"drums": -18.8, "bass": -22.7},
-        )
-
-        dynamic_text = blocks[1]["text"]
-        assert "-16.4 LUFS" in dynamic_text
-        assert "-18.8 LUFS" in dynamic_text
-        assert "-22.7 LUFS" in dynamic_text
-
-    def test_lufs_values_absent_when_none(self):
-        """When LUFS dicts are None but stem_analysis exists, no LUFS values in output."""
-        meta_a = _make_metadata(bpm=120.0, duration=240.0)
-        buckets = EnergyBuckets(noise_floor=0.02, p10=0.05, p50=0.10, p85=0.20)
-        meta_a.stem_analysis = StemAnalysis(
-            bar_rms={"vocals": np.full(60, 0.15)},
-            combined_energy=np.full(60, 0.5),
-            vocal_active=np.full(60, True),
-            vocal_gaps=[],
-            bucket_thresholds=buckets,
-        )
-        meta_b = _make_metadata(bpm=118.0, duration=210.0)
-
-        from musicmixer.services.interpreter import _compute_key_guidance, estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
-        _key_available, key_detail = _compute_key_guidance(meta_a, meta_b)
-        target_bpm = estimate_target_bpm(vocal_bpm=meta_a.bpm, instrumental_bpm=meta_b.bpm)
-        total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
-
-        blocks = _build_system_prompt_blocks(
-            song_a_meta=meta_a,
-            song_b_meta=meta_b,
-            key_matching_available=_key_available,
-            key_matching_detail=key_detail,
-            total_available_beats=total_available_beats,
-            vocal_stem_lufs=None,
-            inst_stem_lufs=None,
-        )
-
-        dynamic_text = blocks[1]["text"]
-        assert "LUFS)" not in dynamic_text
+        static_text = blocks[0]["text"]
+        assert "STEM ROLES:" in static_text
+        assert '"lead"' in static_text
+        assert '"support"' in static_text
+        assert '"background"' in static_text
+        assert '"texture"' in static_text
+        assert '"silent"' in static_text
 
 
 # ---------------------------------------------------------------------------
@@ -495,18 +411,24 @@ class TestFewShotMessagesCaching:
         assert last_content_block["cache_control"] == {"type": "ephemeral"}
 
     def test_few_shot_messages_always_6stem(self):
-        """All 6 stems present in every section's stem_gains in the few-shot examples."""
+        """All 6 stems present in every section's stem_roles in the few-shot examples."""
         messages = _build_few_shot_messages()
         expected_stems = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+        valid_roles = {"lead", "support", "background", "texture", "silent"}
         for msg in messages:
             if msg["role"] == "assistant" and isinstance(msg["content"], list):
                 for block in msg["content"]:
                     if block.get("type") == "tool_use":
                         for section in block["input"].get("sections", []):
-                            assert set(section["stem_gains"].keys()) == expected_stems, (
+                            assert set(section["stem_roles"].keys()) == expected_stems, (
                                 f"Missing stems in example section {section['label']}: "
-                                f"got {set(section['stem_gains'].keys())}"
+                                f"got {set(section['stem_roles'].keys())}"
                             )
+                            for stem, role in section["stem_roles"].items():
+                                assert role in valid_roles, (
+                                    f"Invalid role '{role}' for stem '{stem}' in "
+                                    f"section '{section['label']}'"
+                                )
 
     def test_few_shot_non_last_messages_no_cache_control(self):
         """Only the last message has cache_control; earlier tool_results do not."""
@@ -534,34 +456,37 @@ class TestInterpretPromptCaching:
         meta_a = _make_metadata(bpm=120.0, duration=240.0)
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
-        # Build a mock response that mimics Anthropic's API
+        # Build a mock response that mimics Anthropic's API with new intent format
         mock_tool_use = MagicMock()
         mock_tool_use.type = "tool_use"
         mock_tool_use.id = "test_id"
         mock_tool_use.input = {
-            "vocal_source": "song_a",
             "start_time_vocal": 0.0,
             "end_time_vocal": 200.0,
             "start_time_instrumental": 0.0,
             "end_time_instrumental": 200.0,
             "sections": [
                 {"label": "intro", "start_beat": 0, "end_beat": 32,
-                 "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5},
+                 "energy": "low",
+                 "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "fade", "transition_beats": 4},
                 {"label": "verse", "start_beat": 32, "end_beat": 128,
-                 "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 0.7, "guitar": 0.3, "piano": 0.2, "other": 0.3},
+                 "energy": "medium",
+                 "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 4},
                 {"label": "breakdown", "start_beat": 128, "end_beat": 192,
-                 "stem_gains": {"vocals": 0.3, "drums": 0.3, "bass": 0.5, "guitar": 0.6, "piano": 0.5, "other": 0.4},
+                 "energy": "low",
+                 "stem_roles": {"vocals": "background", "drums": "background", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 4},
                 {"label": "drop", "start_beat": 192, "end_beat": 352,
-                 "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.3, "piano": 0.2, "other": 0.3},
+                 "energy": "peak",
+                 "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"},
                  "transition_in": "cut", "transition_beats": 0},
                 {"label": "outro", "start_beat": 352, "end_beat": 416,
-                 "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.4, "piano": 0.3, "other": 0.4},
+                 "energy": "low",
+                 "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 8},
             ],
-            "tempo_source": "song_b",
             "key_source": "none",
             "explanation": "Test explanation.",
             "warnings": [],
@@ -600,6 +525,11 @@ class TestInterpretPromptCaching:
             assert system_arg[1]["type"] == "text"
             assert "cache_control" not in system_arg[1]
 
+            # Verify the plan is an IntentPlan
+            assert isinstance(plan, IntentPlan)
+            assert len(plan.sections) >= 2
+            assert all(isinstance(s, IntentSection) for s in plan.sections)
+
     def test_cache_stats_logging_no_crash(self):
         """Cache stats logging works even when usage object lacks cache fields."""
         meta_a = _make_metadata(bpm=120.0, duration=240.0)
@@ -609,26 +539,28 @@ class TestInterpretPromptCaching:
         mock_tool_use.type = "tool_use"
         mock_tool_use.id = "test_id"
         mock_tool_use.input = {
-            "vocal_source": "song_a",
             "start_time_vocal": 0.0,
             "end_time_vocal": 200.0,
             "start_time_instrumental": 0.0,
             "end_time_instrumental": 200.0,
             "sections": [
                 {"label": "intro", "start_beat": 0, "end_beat": 32,
-                 "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5},
+                 "energy": "low",
+                 "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "fade", "transition_beats": 4},
                 {"label": "verse", "start_beat": 32, "end_beat": 128,
-                 "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 0.7, "guitar": 0.3, "piano": 0.2, "other": 0.3},
+                 "energy": "medium",
+                 "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 4},
                 {"label": "drop", "start_beat": 128, "end_beat": 352,
-                 "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.3, "piano": 0.2, "other": 0.3},
+                 "energy": "peak",
+                 "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"},
                  "transition_in": "cut", "transition_beats": 0},
                 {"label": "outro", "start_beat": 352, "end_beat": 416,
-                 "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.4, "piano": 0.3, "other": 0.4},
+                 "energy": "low",
+                 "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 8},
             ],
-            "tempo_source": "song_b",
             "key_source": "none",
             "explanation": "Test.",
             "warnings": [],
@@ -656,7 +588,7 @@ class TestInterpretPromptCaching:
 
             # Should not raise even without cache_read_input_tokens / cache_creation_input_tokens
             plan = interpret_prompt("test prompt", meta_a, meta_b)
-            assert isinstance(plan, RemixPlan)
+            assert isinstance(plan, IntentPlan)
 
     def test_stem_backend_local_raises(self):
         """interpret_prompt() raises ValueError when stem_backend is local."""
@@ -675,69 +607,55 @@ class TestInterpretPromptCaching:
 # ---------------------------------------------------------------------------
 
 
-class TestPromptRevisionText:
-    """Tests verifying the revised system prompt text for fuller mixes."""
+class TestPromptIntentText:
+    """Tests verifying the system prompt uses intent-based role terminology."""
 
-    def test_vocal_instrumental_balance_in_static_block(self):
-        """Static block contains revised Rule 2 about vocal-instrumental balance."""
+    def test_vocal_instrumental_balance_uses_roles(self):
+        """Static block contains Rule 2 about vocal-instrumental balance using role language."""
         args = _default_prompt_args()
         blocks = _build_system_prompt_blocks(**args)
         static_text = blocks[0]["text"]
         assert "VOCAL-INSTRUMENTAL BALANCE" in static_text
-        assert "FULL MIX" in static_text
-        assert "spectral ducking" in static_text
-        assert "BAND PLAYING TOGETHER" in static_text
+        assert "FULL BAND" in static_text
+        assert '"lead"' in static_text
 
-    def test_stem_muting_policy_in_static_block(self):
-        """Static block contains revised stem muting policy."""
+    def test_role_variation_rule_in_static_block(self):
+        """Static block contains Rule 7 about role variation (not gain variation)."""
         args = _default_prompt_args()
         blocks = _build_system_prompt_blocks(**args)
         static_text = blocks[0]["text"]
-        assert "Stem Muting Policy" in static_text
-        assert "COMPLETE REMOVAL" in static_text
-        assert "3+ muted stems = thin mix" in static_text
-        assert "0.25-0.35" in static_text
+        assert "ROLE VARIATION" in static_text
 
-    def test_stem_gain_reference_in_static_block(self):
-        """Static block contains the new Stem Gain Reference section."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        static_text = blocks[0]["text"]
-        assert "STEM GAIN REFERENCE" in static_text
-        assert "GAIN SCALE (linear amplitude)" in static_text
-        assert "ENERGY BUDGET BY SECTION TYPE" in static_text
-        assert "Chorus/Drop: target sum 4.5-5.5" in static_text
-        assert "drum-bass foundation" in static_text
-
-    def test_rule1_updated_minimum_gain(self):
-        """Rule 1 uses updated minimum gain of 0.30-0.35 for other stem."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        static_text = blocks[0]["text"]
-        assert "gain 0.30-0.35" in static_text
-
-    def test_few_shot_gains_are_fuller(self):
-        """Few-shot examples use higher gains (no aggressive muting of instrumentals)."""
+    def test_few_shot_sections_have_energy_and_roles(self):
+        """Few-shot examples use energy + stem_roles (not stem_gains)."""
         messages = _build_few_shot_messages()
+        valid_energies = {"low", "medium", "high", "peak"}
+        valid_roles = {"lead", "support", "background", "texture", "silent"}
         for msg in messages:
             if msg["role"] == "assistant" and isinstance(msg["content"], list):
                 for block in msg["content"]:
                     if block.get("type") == "tool_use":
                         for section in block["input"].get("sections", []):
-                            gains = section["stem_gains"]
-                            # Count muted instrumental stems (gain == 0.0, excluding vocals)
-                            muted_inst = sum(
-                                1 for stem, g in gains.items()
-                                if stem != "vocals" and g == 0.0
+                            assert "stem_roles" in section, (
+                                f"Section '{section['label']}' missing stem_roles"
                             )
-                            # No section should have more than 2 muted instrumental stems
-                            assert muted_inst <= 2, (
-                                f"Section '{section['label']}' has {muted_inst} muted "
-                                f"instrumental stems: {gains}"
+                            assert "energy" in section, (
+                                f"Section '{section['label']}' missing energy"
                             )
+                            assert "stem_gains" not in section, (
+                                f"Section '{section['label']}' still has stem_gains"
+                            )
+                            assert section["energy"] in valid_energies, (
+                                f"Invalid energy '{section['energy']}' in section '{section['label']}'"
+                            )
+                            for stem, role in section["stem_roles"].items():
+                                assert role in valid_roles, (
+                                    f"Invalid role '{role}' for stem '{stem}' "
+                                    f"in section '{section['label']}'"
+                                )
 
-    def test_few_shot_verse_gains_follow_guidance(self):
-        """Verse sections in few-shot examples have gains matching the new guidance."""
+    def test_few_shot_verse_roles_follow_guidance(self):
+        """Verse sections in few-shot examples have vocals as lead and drums/bass as support."""
         messages = _build_few_shot_messages()
         for msg in messages:
             if msg["role"] == "assistant" and isinstance(msg["content"], list):
@@ -745,15 +663,13 @@ class TestPromptRevisionText:
                     if block.get("type") == "tool_use":
                         for section in block["input"].get("sections", []):
                             if section["label"] == "verse":
-                                gains = section["stem_gains"]
-                                if gains["vocals"] > 0.0:  # vocal verse
-                                    # Drums should be 0.75-0.95
-                                    assert 0.70 <= gains["drums"] <= 0.95, (
-                                        f"Verse drums={gains['drums']}, expected 0.75-0.95"
+                                roles = section["stem_roles"]
+                                if roles["vocals"] != "silent":
+                                    assert roles["vocals"] == "lead", (
+                                        f"Verse vocals should be 'lead', got '{roles['vocals']}'"
                                     )
-                                    # Bass should be 0.70-0.90
-                                    assert 0.65 <= gains["bass"] <= 0.90, (
-                                        f"Verse bass={gains['bass']}, expected 0.70-0.90"
+                                    assert roles["drums"] in ("lead", "support"), (
+                                        f"Verse drums should be 'lead' or 'support', got '{roles['drums']}'"
                                     )
 
 
@@ -762,140 +678,146 @@ class TestPromptRevisionText:
 # ---------------------------------------------------------------------------
 
 
-def _make_plan_with_sections(sections: list[Section]) -> RemixPlan:
-    """Create a RemixPlan with the given sections for validation testing."""
-    return RemixPlan(
-        vocal_source="song_a",
+def _make_intent_plan_with_sections(sections: list[IntentSection]) -> IntentPlan:
+    """Create an IntentPlan with the given sections for validation testing."""
+    return IntentPlan(
         start_time_vocal=0.0,
         end_time_vocal=200.0,
         start_time_instrumental=0.0,
         end_time_instrumental=200.0,
         sections=sections,
-        tempo_source="weighted_midpoint",
         key_source="none",
         explanation="Test plan.",
         warnings=[],
-        used_fallback=False,
     )
 
 
-class TestArrangementValidation:
-    """Tests for arrangement quality validation in _validate_remix_plan()."""
+class TestIntentValidation:
+    """Tests for structural validation in _validate_intent_plan()."""
 
-    def test_thin_section_warning(self):
-        """Sections with < 2 active instrumental stems trigger a warning."""
+    def test_contiguous_sections_pass(self):
+        """Contiguous sections pass validation without warnings."""
         meta_a = _make_metadata(bpm=120.0, duration=240.0)
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.4}, "fade", 4),
-            # Only bass is active -- drums, guitar, piano, other all muted
-            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.0, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 4),
-            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.5, "piano": 0.4, "other": 0.4}, "cut", 0),
-            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.4, "piano": 0.4, "other": 0.4}, "crossfade", 8),
+            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("verse", 32, 128, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("drop", 128, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
-        plan = _make_plan_with_sections(sections)
-        result = _validate_remix_plan(plan, meta_a, meta_b)
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
 
-        thin_warnings = [w for w in result.warnings if "active instrumental stems" in w]
-        assert len(thin_warnings) >= 1
-        assert "verse" in thin_warnings[0]
+        assert isinstance(result, IntentPlan)
+        assert len(result.sections) == 4
 
-    def test_thin_section_allowed_for_intro_outro(self):
-        """Intro and outro sections do NOT trigger thin section warnings."""
+    def test_gap_sections_fixed(self):
+        """Gaps between sections are fixed by extending the previous section."""
         meta_a = _make_metadata(bpm=120.0, duration=240.0)
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            # Intro with only drums -- should NOT warn
-            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.0, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "fade", 4),
-            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.8, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.4}, "crossfade", 4),
-            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.6, "piano": 0.5, "other": 0.4}, "cut", 0),
-            # Outro with only drums -- should NOT warn
-            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.0, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 8),
+            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            # Gap: 32-40 missing
+            IntentSection("verse", 40, 128, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("drop", 128, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
-        plan = _make_plan_with_sections(sections)
-        result = _validate_remix_plan(plan, meta_a, meta_b)
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
 
-        thin_warnings = [w for w in result.warnings if "active instrumental stems" in w]
-        assert len(thin_warnings) == 0
+        # Intro should have been extended to cover the gap
+        assert result.sections[0].end_beat == result.sections[1].start_beat
 
-    def test_globally_muted_stem_warning(self):
-        """A stem muted in ALL sections triggers a warning."""
-        meta_a = _make_metadata(bpm=120.0, duration=240.0)
-        meta_b = _make_metadata(bpm=118.0, duration=210.0)
-
-        # Piano is 0.0 in every section
-        sections = [
-            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.7, "guitar": 0.5, "piano": 0.0, "other": 0.4}, "fade", 4),
-            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.8, "bass": 0.7, "guitar": 0.5, "piano": 0.0, "other": 0.4}, "crossfade", 4),
-            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.6, "piano": 0.0, "other": 0.5}, "cut", 0),
-            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.4, "piano": 0.0, "other": 0.4}, "crossfade", 8),
-        ]
-        plan = _make_plan_with_sections(sections)
-        result = _validate_remix_plan(plan, meta_a, meta_b)
-
-        muted_warnings = [w for w in result.warnings if "muted (0.0) in every section" in w]
-        assert len(muted_warnings) >= 1
-        assert "piano" in muted_warnings[0]
-
-    def test_high_muting_rate_warning(self):
-        """High overall muting percentage (>30%) triggers a warning."""
-        meta_a = _make_metadata(bpm=120.0, duration=240.0)
-        meta_b = _make_metadata(bpm=118.0, duration=210.0)
-
-        # Every section has 3+ muted instrumental stems = high muting rate
-        sections = [
-            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.7, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "fade", 4),
-            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.7, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 4),
-            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "cut", 0),
-            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 8),
-        ]
-        plan = _make_plan_with_sections(sections)
-        result = _validate_remix_plan(plan, meta_a, meta_b)
-
-        mute_rate_warnings = [w for w in result.warnings if "muting rate" in w]
-        assert len(mute_rate_warnings) >= 1
-
-    def test_good_plan_no_arrangement_warnings(self):
-        """A well-balanced plan produces no arrangement quality warnings."""
+    def test_overlap_sections_fixed(self):
+        """Overlapping sections are fixed by truncating the earlier section."""
         meta_a = _make_metadata(bpm=120.0, duration=240.0)
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.80, "bass": 0.85, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "fade", 4),
-            Section("verse", 32, 128, {"vocals": 0.90, "drums": 0.80, "bass": 0.75, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "crossfade", 4),
-            Section("breakdown", 128, 192, {"vocals": 0.0, "drums": 0.50, "bass": 0.70, "guitar": 0.80, "piano": 0.60, "other": 0.45}, "crossfade", 4),
-            Section("drop", 192, 352, {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.65, "piano": 0.55, "other": 0.50}, "cut", 0),
-            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.55, "bass": 0.65, "guitar": 0.50, "piano": 0.50, "other": 0.45}, "crossfade", 8),
+            IntentSection("intro", 0, 40, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            # Overlap: verse starts at 32 but intro ends at 40
+            IntentSection("verse", 32, 128, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("drop", 128, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
-        plan = _make_plan_with_sections(sections)
-        result = _validate_remix_plan(plan, meta_a, meta_b)
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
 
-        # No arrangement quality warnings
-        arrangement_keywords = ["active instrumental stems", "muted (0.0) in every", "muting rate"]
-        arrangement_warnings = [
-            w for w in result.warnings
-            if any(kw in w for kw in arrangement_keywords)
-        ]
-        assert len(arrangement_warnings) == 0, f"Unexpected warnings: {arrangement_warnings}"
+        # Sections should be fixed to be contiguous
+        for i in range(1, len(result.sections)):
+            assert result.sections[i].start_beat >= result.sections[i - 1].end_beat
 
-    def test_validation_warnings_are_non_blocking(self):
-        """Arrangement warnings do not prevent the plan from being returned."""
+    def test_missing_stem_roles_filled(self):
+        """Missing stem_roles keys are filled with 'texture' default."""
         meta_a = _make_metadata(bpm=120.0, duration=240.0)
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
-        # A plan with issues but still structurally valid
+        # Section missing 'piano' and 'other' keys
         sections = [
-            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.7, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "fade", 4),
-            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.0, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 4),
-            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "cut", 0),
-            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 8),
+            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background"}, "fade", 4),
+            IntentSection("drop", 32, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
-        plan = _make_plan_with_sections(sections)
-        result = _validate_remix_plan(plan, meta_a, meta_b)
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
 
-        # Plan is returned (not blocked), has warnings, and has correct structure
-        assert isinstance(result, RemixPlan)
-        assert len(result.warnings) > 0
+        # All 6 stems should be present in every section
+        expected_stems = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+        for section in result.sections:
+            assert set(section.stem_roles.keys()) == expected_stems
+            # Missing ones should be filled with "texture"
+            if section.label == "intro":
+                assert section.stem_roles["piano"] == "texture"
+                assert section.stem_roles["other"] == "texture"
+
+    def test_invalid_role_corrected(self):
+        """Invalid stem role values are corrected to 'texture'."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        sections = [
+            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "INVALID_ROLE", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("drop", 32, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
+
+        # Invalid role should be corrected to "texture"
+        assert result.sections[0].stem_roles["guitar"] == "texture"
+
+    def test_single_section_gets_intro_prepended(self):
+        """A plan with only 1 section gets an intro prepended to make at least 2."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        sections = [
+            IntentSection("drop", 0, 416, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
+
         assert len(result.sections) >= 2
+        assert result.sections[0].label == "intro"
+        assert result.sections[0].stem_roles["vocals"] == "silent"
+
+    def test_time_range_clamped(self):
+        """Time ranges beyond song duration are clamped."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        sections = [
+            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("drop", 32, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+        plan.end_time_vocal = 999.0  # Way beyond song duration
+        plan.end_time_instrumental = 999.0
+
+        result = _validate_intent_plan(plan, meta_a, meta_b)
+
+        assert result.end_time_vocal <= meta_a.duration_seconds
+        assert result.end_time_instrumental <= meta_b.duration_seconds

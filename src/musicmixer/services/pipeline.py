@@ -108,6 +108,7 @@ def run_pipeline(
         detect_modulation,
         reconcile_bpm,
     )
+    from musicmixer.services.gain_mapper import map_intent_to_gains
     from musicmixer.services.interpreter import interpret_prompt, TARGET_REMIX_DURATION_SECONDS
     from musicmixer.services.processor import (
         apply_fades,
@@ -444,13 +445,24 @@ def run_pipeline(
         "progress": 0.58,
     }, session=session)
 
-    plan = interpret_prompt(
+    from musicmixer.models import IntentPlan
+
+    intent_or_plan = interpret_prompt(
         prompt, meta_a, meta_b,
         lyrics_a=lyrics_a_data,
         lyrics_b=lyrics_b_data,
-        vocal_stem_lufs=vocal_stem_lufs or None,
-        inst_stem_lufs=inst_stem_lufs or None,
     )
+
+    # If the LLM succeeded, we get an IntentPlan that needs gain mapping.
+    # If it fell back, we already have a RemixPlan with concrete gains.
+    if isinstance(intent_or_plan, IntentPlan):
+        plan = map_intent_to_gains(
+            intent_or_plan,
+            vocal_stem_lufs=vocal_stem_lufs or None,
+            inst_stem_lufs=inst_stem_lufs or None,
+        )
+    else:
+        plan = intent_or_plan
 
     if force_vocal_source is not None:
         plan.vocal_source = force_vocal_source
