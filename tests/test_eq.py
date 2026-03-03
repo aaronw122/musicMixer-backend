@@ -204,3 +204,126 @@ class TestApplyCorrectiveEQPreset:
         audio = _make_stereo_sine(freq=440.0, amplitude=0.5)
         result = apply_corrective_eq(audio, SR, "vocals", apply_preset=False)
         np.testing.assert_allclose(result, audio, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Correction Tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveCorrections:
+    """Test adaptive correction parameter on apply_corrective_eq."""
+
+    def test_none_matches_current_behavior(self):
+        """adaptive_corrections=None should produce identical output to default."""
+        audio = _make_stereo_sine(freq=440.0, amplitude=0.5, duration=3.0)
+        result_default = apply_corrective_eq(audio.copy(), SR, "vocals")
+        result_none = apply_corrective_eq(
+            audio.copy(), SR, "vocals", adaptive_corrections=None
+        )
+        np.testing.assert_allclose(result_none, result_default, atol=1e-6)
+
+    def test_empty_list_matches_current_behavior(self):
+        """adaptive_corrections=[] should produce identical output to default."""
+        audio = _make_stereo_sine(freq=440.0, amplitude=0.5, duration=3.0)
+        result_default = apply_corrective_eq(audio.copy(), SR, "vocals")
+        result_empty = apply_corrective_eq(
+            audio.copy(), SR, "vocals", adaptive_corrections=[]
+        )
+        np.testing.assert_allclose(result_empty, result_default, atol=1e-6)
+
+    def test_adaptive_cut_produces_measurable_attenuation(self):
+        """A -4 dB adaptive cut at 400Hz should measurably attenuate a 400Hz sine."""
+        audio = _make_stereo_sine(freq=400.0, amplitude=0.5, duration=3.0)
+        corrections = [(400.0, -4.0, 2.0)]
+        result = apply_corrective_eq(
+            audio, SR, "other", apply_preset=False, adaptive_corrections=corrections
+        )
+        change_db = _rms_db_change(audio, result)
+        assert change_db < -2.0, (
+            f"400Hz with -4dB adaptive cut changed only {change_db:.1f} dB "
+            f"(expected < -2.0 dB)"
+        )
+
+    def test_adaptive_correction_combined_with_preset(self):
+        """Adaptive corrections should stack on top of preset EQ in a single pass."""
+        audio = _make_stereo_sine(freq=400.0, amplitude=0.5, duration=3.0)
+
+        # Preset-only result
+        result_preset = apply_corrective_eq(audio.copy(), SR, "other")
+
+        # Preset + adaptive cut at 400Hz
+        corrections = [(400.0, -3.0, 2.0)]
+        result_both = apply_corrective_eq(
+            audio.copy(), SR, "other", adaptive_corrections=corrections
+        )
+
+        # Combined should attenuate more than preset alone
+        change_preset = _rms_db_change(audio, result_preset)
+        change_both = _rms_db_change(audio, result_both)
+        assert change_both < change_preset, (
+            f"Preset+adaptive ({change_both:.1f} dB) should attenuate more "
+            f"than preset alone ({change_preset:.1f} dB)"
+        )
+
+    def test_extreme_corrections_pass_through_unclamped(self):
+        """eq.py applies whatever values it receives — clamping is upstream."""
+        audio = _make_stereo_sine(freq=1000.0, amplitude=0.5, duration=3.0)
+        # Extreme -12 dB cut — well beyond the -4 dB cap that spectral.py enforces
+        corrections = [(1000.0, -12.0, 2.0)]
+        result = apply_corrective_eq(
+            audio, SR, "other", apply_preset=False, adaptive_corrections=corrections
+        )
+        change_db = _rms_db_change(audio, result)
+        # Should apply the full -12 dB (approximately), proving no internal clamping
+        assert change_db < -8.0, (
+            f"Extreme -12dB correction only achieved {change_db:.1f} dB "
+            f"(expected < -8.0 dB, proving no internal clamping)"
+        )
+
+    def test_multiple_adaptive_corrections(self):
+        """Multiple corrections should all be applied."""
+        # Mix two sine waves at different frequencies
+        t = np.linspace(0, 3.0, int(SR * 3.0), endpoint=False)
+        sine_400 = np.sin(2 * np.pi * 400 * t) * 0.3
+        sine_2000 = np.sin(2 * np.pi * 2000 * t) * 0.3
+        mono = (sine_400 + sine_2000).astype(np.float32)
+        audio = np.column_stack([mono, mono])
+
+        corrections = [
+            (400.0, -4.0, 2.0),
+            (2000.0, -4.0, 2.0),
+        ]
+        result = apply_corrective_eq(
+            audio, SR, "other", apply_preset=False, adaptive_corrections=corrections
+        )
+        change_db = _rms_db_change(audio, result)
+        # Both frequencies cut — expect significant overall attenuation
+        assert change_db < -2.0, (
+            f"Dual-frequency correction achieved only {change_db:.1f} dB "
+            f"(expected < -2.0 dB)"
+        )
+
+    def test_adaptive_only_no_preset(self):
+        """Adaptive corrections without preset should still work."""
+        audio = _make_stereo_sine(freq=500.0, amplitude=0.5, duration=3.0)
+        corrections = [(500.0, -3.0, 1.5)]
+        result = apply_corrective_eq(
+            audio, SR, "vocals", apply_preset=False, adaptive_corrections=corrections
+        )
+        change_db = _rms_db_change(audio, result)
+        assert change_db < -1.5, (
+            f"Adaptive-only at 500Hz achieved only {change_db:.1f} dB "
+            f"(expected < -1.5 dB)"
+        )
+
+    def test_adaptive_preserves_shape_and_dtype(self):
+        """Output shape and dtype must match input when adaptive corrections applied."""
+        audio = _make_stereo_sine(freq=440.0, amplitude=0.5)
+        corrections = [(440.0, -2.0, 2.0)]
+        result = apply_corrective_eq(
+            audio, SR, "vocals", adaptive_corrections=corrections
+        )
+        assert result.shape == audio.shape
+        assert result.dtype == np.float32
+        assert np.all(np.isfinite(result))

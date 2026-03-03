@@ -80,20 +80,6 @@ _EQ_PRESETS: dict[str, list[tuple[type, dict[str, Any]]]] = {
     ],
 }
 
-def _build_preset_board(stem_type: str) -> Pedalboard:
-    """Build a Pedalboard from the preset profile for a given stem type.
-
-    Args:
-        stem_type: One of vocals, drums, bass, guitar, piano, other.
-
-    Returns:
-        Configured Pedalboard instance.
-    """
-    preset = _EQ_PRESETS.get(stem_type, _EQ_PRESETS["other"])
-    plugins = [plugin_cls(**kwargs) for plugin_cls, kwargs in preset]
-    return Pedalboard(plugins)
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -104,12 +90,14 @@ def apply_corrective_eq(
     sr: int,
     stem_type: str,
     apply_preset: bool = True,
+    adaptive_corrections: list[tuple[float, float, float]] | None = None,
     **kwargs,
 ) -> np.ndarray:
     """Apply corrective EQ to a stem.
 
-    Applies broad preset EQ profiles per stem type. Safe to use before
-    tempo stretching.
+    Applies broad preset EQ profiles per stem type, optionally followed by
+    adaptive corrections from spectral analysis. All filters run in a single
+    pedalboard pass — no extra audio processing cost.
 
     Args:
         audio: Input audio, shape (samples, channels) or (samples,).
@@ -117,6 +105,10 @@ def apply_corrective_eq(
         stem_type: One of vocals, drums, bass, guitar, piano, other.
             Unknown types fall back to "other".
         apply_preset: Whether to apply the preset EQ profile.
+        adaptive_corrections: Optional list of (frequency_hz, gain_db, q_factor)
+            tuples. Each becomes a PeakFilter appended to the preset board.
+            Clamping is handled upstream (spectral.py); this function applies
+            whatever values it receives.
         **kwargs: Accepted for backward compatibility.
 
     Returns:
@@ -127,12 +119,36 @@ def apply_corrective_eq(
         logger.warning("Unknown stem type '%s', falling back to 'other'", stem_type)
         stem_type = "other"
 
-    result = audio
+    has_preset = apply_preset
+    has_adaptive = bool(adaptive_corrections)
 
-    # Preset EQ (broad cuts/boosts)
-    if apply_preset:
-        board = _build_preset_board(stem_type)
-        result = process_with_pedalboard(result, board, sr)
-        logger.debug("Applied preset EQ for stem_type='%s'", stem_type)
+    # Build a single board with preset + adaptive filters for one pass
+    if has_preset or has_adaptive:
+        board = Pedalboard()
 
-    return result
+        if has_preset:
+            preset = _EQ_PRESETS.get(stem_type, _EQ_PRESETS["other"])
+            for plugin_cls, plugin_kwargs in preset:
+                board.append(plugin_cls(**plugin_kwargs))
+
+        if has_adaptive:
+            for freq_hz, gain_db, q_factor in adaptive_corrections:
+                board.append(
+                    PeakFilter(
+                        cutoff_frequency_hz=freq_hz,
+                        gain_db=gain_db,
+                        q=q_factor,
+                    )
+                )
+            logger.debug(
+                "Added %d adaptive corrections for stem_type='%s'",
+                len(adaptive_corrections),
+                stem_type,
+            )
+
+        result = process_with_pedalboard(audio, board, sr)
+        logger.debug("Applied EQ for stem_type='%s' (preset=%s, adaptive=%s)",
+                      stem_type, has_preset, has_adaptive)
+        return result
+
+    return audio
