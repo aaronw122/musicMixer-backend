@@ -9,6 +9,7 @@ from musicmixer.models import AudioMetadata, EnergyBuckets, LyricLine, LyricsDat
 from musicmixer.services.interpreter import (
     _build_few_shot_messages,
     _build_system_prompt_blocks,
+    _validate_remix_plan,
     default_arrangement,
     generate_fallback_plan,
     interpret_prompt,
@@ -323,6 +324,7 @@ class TestBuildSystemPromptBlocks:
             "EXPLANATION: Write 2-3",                  # Section 11
             "SONG DATA:",                              # Section 12
             "1 bar = 4 beats",                         # Section 13
+            "STEM GAIN REFERENCE",                     # Gain reference section
         ]
         for marker in section_markers:
             assert marker in combined, f"Marker missing from blocks: {marker}"
@@ -354,6 +356,7 @@ class TestBuildSystemPromptBlocks:
             "EXPLANATION: Write 2-3",
             "SONG DATA:",
             "1 bar = 4 beats",
+            "STEM GAIN REFERENCE",
         ]
         for marker in required_markers:
             assert marker in combined, (
@@ -665,3 +668,234 @@ class TestInterpretPromptCaching:
 
             with pytest.raises(ValueError, match="stem_backend='local' is not supported"):
                 interpret_prompt("test prompt", meta_a, meta_b)
+
+
+# ---------------------------------------------------------------------------
+# Prompt revision tests: verify new prompt text
+# ---------------------------------------------------------------------------
+
+
+class TestPromptRevisionText:
+    """Tests verifying the revised system prompt text for fuller mixes."""
+
+    def test_vocal_instrumental_balance_in_static_block(self):
+        """Static block contains revised Rule 2 about vocal-instrumental balance."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        static_text = blocks[0]["text"]
+        assert "VOCAL-INSTRUMENTAL BALANCE" in static_text
+        assert "FULL MIX" in static_text
+        assert "spectral ducking" in static_text
+        assert "BAND PLAYING TOGETHER" in static_text
+
+    def test_stem_muting_policy_in_static_block(self):
+        """Static block contains revised stem muting policy."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        static_text = blocks[0]["text"]
+        assert "Stem Muting Policy" in static_text
+        assert "COMPLETE REMOVAL" in static_text
+        assert "3+ muted stems = thin mix" in static_text
+        assert "0.25-0.35" in static_text
+
+    def test_stem_gain_reference_in_static_block(self):
+        """Static block contains the new Stem Gain Reference section."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        static_text = blocks[0]["text"]
+        assert "STEM GAIN REFERENCE" in static_text
+        assert "GAIN SCALE (linear amplitude)" in static_text
+        assert "ENERGY BUDGET BY SECTION TYPE" in static_text
+        assert "Chorus/Drop: target sum 4.5-5.5" in static_text
+        assert "drum-bass foundation" in static_text
+
+    def test_rule1_updated_minimum_gain(self):
+        """Rule 1 uses updated minimum gain of 0.30-0.35 for other stem."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        static_text = blocks[0]["text"]
+        assert "gain 0.30-0.35" in static_text
+
+    def test_few_shot_gains_are_fuller(self):
+        """Few-shot examples use higher gains (no aggressive muting of instrumentals)."""
+        messages = _build_few_shot_messages()
+        for msg in messages:
+            if msg["role"] == "assistant" and isinstance(msg["content"], list):
+                for block in msg["content"]:
+                    if block.get("type") == "tool_use":
+                        for section in block["input"].get("sections", []):
+                            gains = section["stem_gains"]
+                            # Count muted instrumental stems (gain == 0.0, excluding vocals)
+                            muted_inst = sum(
+                                1 for stem, g in gains.items()
+                                if stem != "vocals" and g == 0.0
+                            )
+                            # No section should have more than 2 muted instrumental stems
+                            assert muted_inst <= 2, (
+                                f"Section '{section['label']}' has {muted_inst} muted "
+                                f"instrumental stems: {gains}"
+                            )
+
+    def test_few_shot_verse_gains_follow_guidance(self):
+        """Verse sections in few-shot examples have gains matching the new guidance."""
+        messages = _build_few_shot_messages()
+        for msg in messages:
+            if msg["role"] == "assistant" and isinstance(msg["content"], list):
+                for block in msg["content"]:
+                    if block.get("type") == "tool_use":
+                        for section in block["input"].get("sections", []):
+                            if section["label"] == "verse":
+                                gains = section["stem_gains"]
+                                if gains["vocals"] > 0.0:  # vocal verse
+                                    # Drums should be 0.75-0.95
+                                    assert 0.70 <= gains["drums"] <= 0.95, (
+                                        f"Verse drums={gains['drums']}, expected 0.75-0.95"
+                                    )
+                                    # Bass should be 0.70-0.90
+                                    assert 0.65 <= gains["bass"] <= 0.90, (
+                                        f"Verse bass={gains['bass']}, expected 0.70-0.90"
+                                    )
+
+
+# ---------------------------------------------------------------------------
+# Arrangement validation tests
+# ---------------------------------------------------------------------------
+
+
+def _make_plan_with_sections(sections: list[Section]) -> RemixPlan:
+    """Create a RemixPlan with the given sections for validation testing."""
+    return RemixPlan(
+        vocal_source="song_a",
+        start_time_vocal=0.0,
+        end_time_vocal=200.0,
+        start_time_instrumental=0.0,
+        end_time_instrumental=200.0,
+        sections=sections,
+        tempo_source="weighted_midpoint",
+        key_source="none",
+        explanation="Test plan.",
+        warnings=[],
+        used_fallback=False,
+    )
+
+
+class TestArrangementValidation:
+    """Tests for arrangement quality validation in _validate_remix_plan()."""
+
+    def test_thin_section_warning(self):
+        """Sections with < 2 active instrumental stems trigger a warning."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        sections = [
+            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.4}, "fade", 4),
+            # Only bass is active -- drums, guitar, piano, other all muted
+            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.0, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 4),
+            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.5, "piano": 0.4, "other": 0.4}, "cut", 0),
+            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.4, "piano": 0.4, "other": 0.4}, "crossfade", 8),
+        ]
+        plan = _make_plan_with_sections(sections)
+        result = _validate_remix_plan(plan, meta_a, meta_b)
+
+        thin_warnings = [w for w in result.warnings if "active instrumental stems" in w]
+        assert len(thin_warnings) >= 1
+        assert "verse" in thin_warnings[0]
+
+    def test_thin_section_allowed_for_intro_outro(self):
+        """Intro and outro sections do NOT trigger thin section warnings."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        sections = [
+            # Intro with only drums -- should NOT warn
+            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.0, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "fade", 4),
+            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.8, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.4}, "crossfade", 4),
+            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.6, "piano": 0.5, "other": 0.4}, "cut", 0),
+            # Outro with only drums -- should NOT warn
+            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.0, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 8),
+        ]
+        plan = _make_plan_with_sections(sections)
+        result = _validate_remix_plan(plan, meta_a, meta_b)
+
+        thin_warnings = [w for w in result.warnings if "active instrumental stems" in w]
+        assert len(thin_warnings) == 0
+
+    def test_globally_muted_stem_warning(self):
+        """A stem muted in ALL sections triggers a warning."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        # Piano is 0.0 in every section
+        sections = [
+            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.7, "guitar": 0.5, "piano": 0.0, "other": 0.4}, "fade", 4),
+            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.8, "bass": 0.7, "guitar": 0.5, "piano": 0.0, "other": 0.4}, "crossfade", 4),
+            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.6, "piano": 0.0, "other": 0.5}, "cut", 0),
+            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.4, "piano": 0.0, "other": 0.4}, "crossfade", 8),
+        ]
+        plan = _make_plan_with_sections(sections)
+        result = _validate_remix_plan(plan, meta_a, meta_b)
+
+        muted_warnings = [w for w in result.warnings if "muted (0.0) in every section" in w]
+        assert len(muted_warnings) >= 1
+        assert "piano" in muted_warnings[0]
+
+    def test_high_muting_rate_warning(self):
+        """High overall muting percentage (>30%) triggers a warning."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        # Every section has 3+ muted instrumental stems = high muting rate
+        sections = [
+            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.7, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "fade", 4),
+            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.7, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 4),
+            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "cut", 0),
+            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 8),
+        ]
+        plan = _make_plan_with_sections(sections)
+        result = _validate_remix_plan(plan, meta_a, meta_b)
+
+        mute_rate_warnings = [w for w in result.warnings if "muting rate" in w]
+        assert len(mute_rate_warnings) >= 1
+
+    def test_good_plan_no_arrangement_warnings(self):
+        """A well-balanced plan produces no arrangement quality warnings."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        sections = [
+            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.80, "bass": 0.85, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "fade", 4),
+            Section("verse", 32, 128, {"vocals": 0.90, "drums": 0.80, "bass": 0.75, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "crossfade", 4),
+            Section("breakdown", 128, 192, {"vocals": 0.0, "drums": 0.50, "bass": 0.70, "guitar": 0.80, "piano": 0.60, "other": 0.45}, "crossfade", 4),
+            Section("drop", 192, 352, {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.65, "piano": 0.55, "other": 0.50}, "cut", 0),
+            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.55, "bass": 0.65, "guitar": 0.50, "piano": 0.50, "other": 0.45}, "crossfade", 8),
+        ]
+        plan = _make_plan_with_sections(sections)
+        result = _validate_remix_plan(plan, meta_a, meta_b)
+
+        # No arrangement quality warnings
+        arrangement_keywords = ["active instrumental stems", "muted (0.0) in every", "muting rate"]
+        arrangement_warnings = [
+            w for w in result.warnings
+            if any(kw in w for kw in arrangement_keywords)
+        ]
+        assert len(arrangement_warnings) == 0, f"Unexpected warnings: {arrangement_warnings}"
+
+    def test_validation_warnings_are_non_blocking(self):
+        """Arrangement warnings do not prevent the plan from being returned."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        # A plan with issues but still structurally valid
+        sections = [
+            Section("intro", 0, 32, {"vocals": 0.0, "drums": 0.8, "bass": 0.7, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "fade", 4),
+            Section("verse", 32, 128, {"vocals": 0.9, "drums": 0.0, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 4),
+            Section("drop", 128, 352, {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "cut", 0),
+            Section("outro", 352, 416, {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.0, "piano": 0.0, "other": 0.0}, "crossfade", 8),
+        ]
+        plan = _make_plan_with_sections(sections)
+        result = _validate_remix_plan(plan, meta_a, meta_b)
+
+        # Plan is returned (not blocked), has warnings, and has correct structure
+        assert isinstance(result, RemixPlan)
+        assert len(result.warnings) > 0
+        assert len(result.sections) >= 2

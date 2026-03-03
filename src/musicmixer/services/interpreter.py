@@ -213,8 +213,16 @@ CAPABILITIES:
 
     # Section 2: Failure Mode Guards
     section_2 = """CRITICAL MIXING RULES (violations produce bad audio):
-1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:no, labeled GOOD INSTRUMENTAL SOURCE). For the "other" stem: low-energy sections -> gain 0.2; medium+ energy -> gain 0.4-0.6 (preserves genre identity).
-2. VOCAL CLARITY: When vocals are active, reduce mid-frequency stems (guitar, piano, other) by 30% or more. Only drums + bass should be at full volume alongside vocals.
+1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:no, labeled GOOD INSTRUMENTAL SOURCE). For the "other" stem: low-energy sections -> gain 0.30-0.35; medium+ energy -> gain 0.4-0.6 (preserves genre identity).
+2. VOCAL-INSTRUMENTAL BALANCE: When vocals are active, your job is to create a FULL MIX that supports the vocal, not a solo performance with faint backing. The system already applies spectral ducking (-3.5 dB in 300-3000 Hz) to instrumentals when vocals are present — this handles the frequency conflict for you. Do NOT stack additional heavy gain cuts on top of the ducking.
+Gain guidance when vocals are active:
+- Vocals: 0.85-1.0 (lead element, but not drastically louder than everything else)
+- Drums: 0.75-0.95 (drives the energy — should feel present and punchy)
+- Bass: 0.70-0.90 (provides foundation — occupies its own frequency range and rarely conflicts with vocals)
+- Guitar: 0.45-0.70 (mid-frequency content — the ducking system already carves space, so moderate reduction is sufficient)
+- Piano: 0.40-0.65 (similar to guitar — let the ducking handle the conflict, you handle the arrangement)
+- Other: 0.35-0.60 (pads, synths, textures — these fill out the stereo field and add warmth)
+Key principle: A professional mashup sounds like a BAND PLAYING TOGETHER, not a vocal over silence. If you remove the vocal from your arrangement and the remaining stems sound empty, your instrumental gains are too low.
 3. NO RHYTHMIC COLLISION: Never use drums from both songs simultaneously. Never overlap bass lines from both songs.
 4. ENERGY MATCHING: Match vocal energy to instrumental energy level. Exception: quiet vocal over minimal beat is acceptable as an intentional artistic choice.
 5. DYNAMIC RANGE: The remix MUST have at least 1 contrast moment (e.g., breakdown -> drop) and use a minimum of 3 different energy levels across sections.
@@ -229,8 +237,29 @@ CAPABILITIES:
 - Two peak-level stems at full volume (1.0) will clip. Reduce one by 3-6 dB (gain 0.5-0.7).
 - Section labels in the song data are approximate guidance, not rigid constraints. Use them to understand song structure, but your arrangement should serve the user's prompt.
 - Contrast creates energy: if a section has drums at 0.0, the next section's drums at 1.0 will feel powerful.
-- Muted stems (0.0) are a tool, not a failure -- silence in the right place is more powerful than sound.
-- Use the full 0.0-1.0 range. Avoid keeping all stems at 0.5-0.8 throughout -- that produces a flat, unengaging mix."""
+- Stem Muting Policy: A gain of 0.0 means COMPLETE REMOVAL of that stem. Use it sparingly.
+  When 0.0 IS appropriate: Intro/outro sections deliberately building from minimal elements. A specific creative choice (a cappella breakdown, drums-only transition). When a stem actively clashes (wrong key, conflicting rhythm).
+  When 0.0 is NOT appropriate: As a default strategy for "making room" for vocals (0.40 works fine). For any stem in a chorus, drop, or high-energy section (even the least important stem should be 0.30-0.45 minimum). For more than 2 stems simultaneously in any section (3+ muted stems = thin mix).
+  Practical minimum for background presence: 0.25-0.35. Rule of thumb: across all sections, if more than 15-20% of stem entries are 0.0, you are over-muting.
+
+STEM GAIN REFERENCE:
+
+GAIN SCALE (linear amplitude):
+  1.0 = full level (0 dB)
+  0.70 = -3.1 dB (audibly reduced but clearly present)
+  0.50 = -6.0 dB (background level, supportive role)
+  0.35 = -9.1 dB (texture/warmth, felt more than heard)
+  0.0  = silence (complete removal)
+
+ENERGY BUDGET BY SECTION TYPE:
+The sum of all stem gains is a rough proxy for section energy.
+
+  Intro/Outro: target sum 1.5-3.0, 2-4 active stems
+  Verse: target sum 3.0-4.5, 4-5 active stems minimum
+  Chorus/Drop: target sum 4.5-5.5, ALL stems active, none below 0.35
+  Breakdown: target sum 2.0-3.5, 3-5 active stems
+
+CRITICAL: Contrast comes from RELATIVE changes, not absolute low levels. A chorus feels big because the verse was smaller, not because the verse was silent. The drum-bass foundation should almost never drop below 0.50 in rhythmic sections. Mid-frequency stems (guitar, piano, other) are what separate a professional mix from a karaoke track."""
 
     # Section 3b: Stem Loudness Awareness
     section_3b = """STEM LOUDNESS AWARENESS:
@@ -772,17 +801,17 @@ def _build_few_shot_messages() -> list[dict]:
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 210.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.8, "bass": 1.0, "guitar": 0.5, "piano": 0.4, "other": 0.3}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 1.0, "drums": 0.7, "bass": 1.0, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.0, "bass": 0.5, "guitar": 0.6, "piano": 0.7, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.9, "drums": 0.7, "bass": 1.0, "guitar": 0.4, "piano": 0.2, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "guitar": 0.4, "piano": 0.3, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "breakdown", "start_beat": 256, "end_beat": 288, "stem_gains": {"vocals": 0.3, "drums": 0.3, "bass": 0.5, "guitar": 0.7, "piano": 0.6, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 288, "end_beat": 368, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 368, "end_beat": 416, "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.7, "guitar": 0.5, "piano": 0.5, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.80, "bass": 0.85, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.90, "drums": 0.80, "bass": 0.75, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.50, "bass": 0.70, "guitar": 0.80, "piano": 0.60, "other": 0.45}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.90, "drums": 0.80, "bass": 0.75, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.65, "piano": 0.55, "other": 0.50}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "breakdown", "start_beat": 256, "end_beat": 288, "stem_gains": {"vocals": 0.35, "drums": 0.40, "bass": 0.55, "guitar": 0.70, "piano": 0.60, "other": 0.50}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 288, "end_beat": 368, "stem_gains": {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.65, "piano": 0.55, "other": 0.50}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 368, "end_beat": 416, "stem_gains": {"vocals": 0.0, "drums": 0.55, "bass": 0.65, "guitar": 0.50, "piano": 0.50, "other": 0.45}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "key_source": "none",
-                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted to full. Starting with the hook from Track One ('Roll with me') at bar 41 for the drop gives immediate impact -- the chorus lyrics align with the section boundary at bar 41. Mid-frequency stems are reduced when vocals are active for clarity.",
+                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted. Starting with the hook from Track One ('Roll with me') at bar 41 for the drop gives immediate impact -- the chorus lyrics align with the section boundary at bar 41. The ducking system handles vocal clarity, so the instrumental stays full and punchy throughout.",
                         "warnings": [],
                     },
                 }
@@ -829,12 +858,12 @@ def _build_few_shot_messages() -> list[dict]:
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 210.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.7, "bass": 0.8, "guitar": 0.5, "piano": 0.4, "other": 0.5}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.8, "drums": 0.7, "bass": 0.8, "guitar": 0.3, "piano": 0.3, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.3, "bass": 0.5, "guitar": 0.6, "piano": 0.5, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.9, "drums": 0.7, "bass": 0.8, "guitar": 0.3, "piano": 0.3, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.8, "bass": 0.9, "guitar": 0.4, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 256, "end_beat": 312, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.5, "guitar": 0.5, "piano": 0.6, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.75, "bass": 0.80, "guitar": 0.55, "piano": 0.45, "other": 0.50}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.85, "drums": 0.80, "bass": 0.75, "guitar": 0.50, "piano": 0.40, "other": 0.45}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.50, "bass": 0.65, "guitar": 0.70, "piano": 0.55, "other": 0.50}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.90, "drums": 0.80, "bass": 0.75, "guitar": 0.50, "piano": 0.40, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.60, "piano": 0.50, "other": 0.45}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 256, "end_beat": 312, "stem_gains": {"vocals": 0.0, "drums": 0.50, "bass": 0.55, "guitar": 0.55, "piano": 0.60, "other": 0.50}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "key_source": "none",
                         "explanation": "Song A's laid-back vocals at 88 BPM pair well with Song B's energetic instrumental. I used Song B's clean instrumental sections (bars 1-8, 49-64) for the intro and breakdown, giving contrast before the vocal drop.",
@@ -873,10 +902,10 @@ def _build_few_shot_messages() -> list[dict]:
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 60.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 8, "stem_gains": {"vocals": 0.0, "drums": 0.9, "bass": 0.7, "guitar": 0.0, "piano": 0.0, "other": 0.4}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 8, "end_beat": 24, "stem_gains": {"vocals": 1.0, "drums": 0.0, "bass": 0.5, "guitar": 0.2, "piano": 0.3, "other": 0.3}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 24, "end_beat": 40, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 40, "end_beat": 48, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.4, "guitar": 0.3, "piano": 0.4, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "intro", "start_beat": 0, "end_beat": 8, "stem_gains": {"vocals": 0.0, "drums": 0.85, "bass": 0.75, "guitar": 0.0, "piano": 0.0, "other": 0.40}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 8, "end_beat": 24, "stem_gains": {"vocals": 0.95, "drums": 0.80, "bass": 0.70, "guitar": 0.45, "piano": 0.35, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 24, "end_beat": 40, "stem_gains": {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.55, "piano": 0.45, "other": 0.50}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 40, "end_beat": 48, "stem_gains": {"vocals": 0.0, "drums": 0.50, "bass": 0.55, "guitar": 0.40, "piano": 0.45, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
                         ],
                         "key_source": "none",
                         "explanation": "Song A's vocals are used over Song B's slower R&B instrumental. The drums-only intro at Song B's tempo creates a laid-back groove before the vocal drop. I kept it short due to the extreme tempo difference.",
@@ -1037,6 +1066,52 @@ def _validate_remix_plan(
 
     if clamped_fields:
         logger.info("Section validation clamped fields: %s", clamped_fields)
+
+    # --- Arrangement quality warnings (advisory, not blocking) ---
+    arrangement_warnings: list[str] = []
+
+    # 11. Per-section minimum active instrumental stems
+    for section in sections:
+        active_inst_stems = sum(
+            1 for stem, gain in section.stem_gains.items()
+            if stem != "vocals" and gain > 0.0
+        )
+        if active_inst_stems < 2 and section.label not in ("intro", "outro"):
+            arrangement_warnings.append(
+                f"Section '{section.label}' (beats {section.start_beat}-{section.end_beat}) "
+                f"has only {active_inst_stems} active instrumental stems — mix may sound thin"
+            )
+
+    # 12. No instrumental stem muted across ALL sections
+    for stem_name in ["drums", "bass", "guitar", "piano", "other"]:
+        all_muted = all(
+            s.stem_gains.get(stem_name, 0.0) == 0.0 for s in sections
+        )
+        if all_muted:
+            arrangement_warnings.append(
+                f"Stem '{stem_name}' is muted (0.0) in every section — "
+                f"consider adding it at 0.3+ in at least one section"
+            )
+
+    # 13. Overall muting percentage
+    total_entries = len(sections) * 5  # 5 instrumental stems
+    muted_entries = sum(
+        1 for s in sections
+        for stem, gain in s.stem_gains.items()
+        if stem != "vocals" and gain == 0.0
+    )
+    if total_entries > 0:
+        mute_pct = muted_entries / total_entries * 100
+        if mute_pct > 30:
+            arrangement_warnings.append(
+                f"High muting rate: {mute_pct:.0f}% of instrumental stem entries are 0.0 — "
+                f"mix may lack fullness"
+            )
+
+    if arrangement_warnings:
+        for w in arrangement_warnings:
+            logger.warning("Arrangement quality: %s", w)
+        plan.warnings.extend(arrangement_warnings)
 
     # Duration validation — Song A is always vocal, Song B is always instrumental
     target_bpm = estimate_target_bpm(song_a_meta.bpm, song_b_meta.bpm, plan.tempo_source)
