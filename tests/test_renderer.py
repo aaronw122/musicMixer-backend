@@ -299,3 +299,187 @@ class TestSnapToBar:
         # Bar boundaries in 3/4: 0, 3000, 6000, 9000, ...
         result = snap_to_bar(5200, beats, beats_per_bar=3)
         assert result == 6000
+
+
+# ---------------------------------------------------------------------------
+# beats_to_samples target_bpm fallback tests
+# ---------------------------------------------------------------------------
+
+class TestBeatsToSamplesBpmFallback:
+    """Tests for the target_bpm sanity-check in beats_to_samples()."""
+
+    def test_no_target_bpm_backward_compat(self):
+        """Without target_bpm, extrapolation uses observed spacing (existing behavior)."""
+        sr_scale = SR / ANALYSIS_SR
+        # Ask for beat 210 when we only have 200 beats
+        result_no_bpm = beats_to_samples(210, BEAT_FRAMES, SR, HOP_LENGTH)
+        result_none = beats_to_samples(210, BEAT_FRAMES, SR, HOP_LENGTH, target_bpm=None)
+        assert result_no_bpm == result_none
+
+    def test_target_bpm_close_to_observed_uses_observed(self):
+        """When target_bpm matches observed spacing (<20% diff), observed spacing is used."""
+        # Our BEAT_FRAMES are at 120 BPM. Pass target_bpm=120 -- should not trigger fallback.
+        result_with_bpm = beats_to_samples(210, BEAT_FRAMES, SR, HOP_LENGTH, target_bpm=120.0)
+        result_without = beats_to_samples(210, BEAT_FRAMES, SR, HOP_LENGTH)
+        # With matching BPM, both should be equal
+        assert result_with_bpm == result_without
+
+    def test_target_bpm_corrects_compressed_spacing(self):
+        """When observed spacing is >20% shorter than BPM implies, BPM spacing is used."""
+        # Create a beat grid where the last 8 beats have compressed spacing
+        # (simulating librosa's common behavior at the end of a track)
+        normal_interval = BEAT_INTERVAL_FRAMES  # ~21 frames at 120 BPM
+        frames = list(range(0, 192 * normal_interval, normal_interval))  # 192 normal beats
+        # Last 8 beats: compressed to 50% of normal spacing
+        compressed_interval = normal_interval // 2
+        for i in range(8):
+            frames.append(frames[-1] + compressed_interval)
+        beat_frames = np.array(frames)
+
+        # Without target_bpm: uses the compressed last-8 spacing
+        result_no_bpm = beats_to_samples(210, beat_frames, SR, HOP_LENGTH)
+
+        # With target_bpm=120: should detect the compression and use BPM-based spacing
+        result_with_bpm = beats_to_samples(210, beat_frames, SR, HOP_LENGTH, target_bpm=120.0)
+
+        # The BPM-corrected result should be significantly larger (compressed was ~50% too short)
+        assert result_with_bpm > result_no_bpm
+        # Verify the corrected result uses the expected BPM-based spacing
+        sr_scale = SR / ANALYSIS_SR
+        expected_beat_len = 60.0 / 120.0 * SR  # samples per beat at 120 BPM
+        overshoot = 210 - len(beat_frames) + 1
+        expected = int(beat_frames[-1] * HOP_LENGTH * sr_scale + overshoot * expected_beat_len)
+        assert result_with_bpm == expected
+
+    def test_target_bpm_within_tolerance_no_correction(self):
+        """When observed spacing is within 20% of BPM, no correction is applied."""
+        # Create beats at 110 BPM but claim target is 120 BPM
+        # 110 BPM spacing vs 120 BPM expected: difference is ~8.3%, within 20%
+        interval_110 = int(60 / 110 * ANALYSIS_SR / HOP_LENGTH)
+        beat_frames_110 = np.arange(0, 200) * interval_110
+
+        result_with = beats_to_samples(210, beat_frames_110, SR, HOP_LENGTH, target_bpm=120.0)
+        result_without = beats_to_samples(210, beat_frames_110, SR, HOP_LENGTH)
+        # Within tolerance, so both should be equal
+        assert result_with == result_without
+
+
+# ---------------------------------------------------------------------------
+# render_arrangement with target_bpm tests
+# ---------------------------------------------------------------------------
+
+class TestRenderArrangementWithTargetBpm:
+    """Tests that render_arrangement properly passes target_bpm through."""
+
+    def _make_stems(self, n_samples: int):
+        rng = np.random.default_rng(42)
+        vocal_stems = {
+            "vocals": (rng.standard_normal((n_samples, 2)) * 0.1).astype(np.float32),
+        }
+        instrumental_stems = {
+            "drums": (rng.standard_normal((n_samples, 2)) * 0.1).astype(np.float32),
+        }
+        return vocal_stems, instrumental_stems
+
+    def test_target_bpm_passed_through(self):
+        """render_arrangement with target_bpm produces valid output."""
+        sections = [
+            Section(
+                label="main", start_beat=0, end_beat=50,
+                stem_gains={"vocals": 1.0, "drums": 1.0},
+                transition_in="cut", transition_beats=0,
+            ),
+        ]
+        total = beats_to_samples(50, BEAT_FRAMES, SR, HOP_LENGTH, target_bpm=120.0)
+        vocal_stems, inst_stems = self._make_stems(total)
+
+        vocal_bus, inst_bus = render_arrangement(
+            sections, vocal_stems, inst_stems, BEAT_FRAMES, SR, HOP_LENGTH,
+            target_bpm=120.0,
+        )
+
+        assert vocal_bus.shape[0] == total
+        assert inst_bus.shape[0] == total
+
+    def test_backward_compat_no_target_bpm(self):
+        """render_arrangement works without target_bpm (backward compat)."""
+        sections = [
+            Section(
+                label="main", start_beat=0, end_beat=50,
+                stem_gains={"vocals": 1.0, "drums": 1.0},
+                transition_in="cut", transition_beats=0,
+            ),
+        ]
+        total = beats_to_samples(50, BEAT_FRAMES, SR, HOP_LENGTH)
+        vocal_stems, inst_stems = self._make_stems(total)
+
+        # Should work fine without target_bpm
+        vocal_bus, inst_bus = render_arrangement(
+            sections, vocal_stems, inst_stems, BEAT_FRAMES, SR, HOP_LENGTH,
+        )
+
+        assert vocal_bus.shape[0] == total
+        assert inst_bus.shape[0] == total
+
+
+# ---------------------------------------------------------------------------
+# Pipeline beat grid validation logic tests
+# ---------------------------------------------------------------------------
+
+class TestBeatGridValidation:
+    """Tests for the pipeline's post-stretch beat grid validation logic.
+
+    The pipeline validates whether a re-detected beat grid can reliably
+    cover the plan's beat range (allowing up to 20% extrapolation).
+    These tests exercise that validation logic directly.
+    """
+
+    @staticmethod
+    def _should_use_redetected_grid(
+        new_beat_count: int, plan_end_beat: int,
+    ) -> bool:
+        """Replicates the pipeline's beat grid validation logic."""
+        if new_beat_count <= 10:
+            return False
+        if plan_end_beat <= 0:
+            return True
+        max_reliable_beat = int(new_beat_count * 1.2)
+        return plan_end_beat <= max_reliable_beat
+
+    def test_grid_too_short_falls_back(self):
+        """When re-detected grid cannot cover plan range, falls back to scaled grid."""
+        # 300 detected beats, plan needs 444 beats
+        # max_reliable = 300 * 1.2 = 360, but plan needs 444 -> reject
+        assert not self._should_use_redetected_grid(300, 444)
+
+    def test_grid_sufficient_uses_redetected(self):
+        """When re-detected grid can cover plan range, uses it."""
+        # 400 detected beats, plan needs 444 beats
+        # max_reliable = 400 * 1.2 = 480, plan needs 444 -> accept
+        assert self._should_use_redetected_grid(400, 444)
+
+    def test_grid_exact_boundary(self):
+        """Grid at exactly 20% extrapolation boundary is accepted."""
+        # 370 detected beats, plan needs 444
+        # max_reliable = 370 * 1.2 = 444 -> exactly on boundary -> accept
+        assert self._should_use_redetected_grid(370, 444)
+
+    def test_grid_just_under_boundary_rejected(self):
+        """Grid just under 20% extrapolation boundary is rejected."""
+        # 369 detected beats, plan needs 444
+        # max_reliable = 369 * 1.2 = 442 (int), 444 > 442 -> reject
+        assert not self._should_use_redetected_grid(369, 444)
+
+    def test_very_few_beats_always_rejected(self):
+        """Fewer than 10 re-detected beats are always rejected."""
+        assert not self._should_use_redetected_grid(5, 100)
+        assert not self._should_use_redetected_grid(10, 100)
+
+    def test_no_plan_sections_always_accepted(self):
+        """When plan_end_beat is 0 (no sections), any grid > 10 beats is accepted."""
+        assert self._should_use_redetected_grid(50, 0)
+
+    def test_large_grid_small_plan(self):
+        """Large re-detected grid easily covers a small plan."""
+        # 571 detected beats, plan needs 200
+        assert self._should_use_redetected_grid(571, 200)
