@@ -177,6 +177,8 @@ def _build_system_prompt_blocks(
     stretch_pct: float | None = None,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
+    vocal_stem_lufs: dict[str, float] | None = None,
+    inst_stem_lufs: dict[str, float] | None = None,
 ) -> list[dict]:
     """Construct system prompt as two content blocks for Anthropic prompt caching.
 
@@ -230,6 +232,16 @@ CAPABILITIES:
 - Muted stems (0.0) are a tool, not a failure -- silence in the right place is more powerful than sound.
 - Use the full 0.0-1.0 range. Avoid keeping all stems at 0.5-0.8 throughout -- that produces a flat, unengaging mix."""
 
+    # Section 3b: Stem Loudness Awareness
+    section_3b = """STEM LOUDNESS AWARENESS:
+Each stem in the song data has an integrated LUFS measurement showing its actual loudness.
+Use these to make informed gain decisions:
+- Stems below -25 LUFS are quiet. Setting gain below 0.5 on these may make them inaudible.
+- Stems below -30 LUFS are very quiet. Use gain 0.7-1.0 to keep them present, or 0.0 only if deliberately muting.
+- Stems above -18 LUFS are loud. Gains of 0.5-0.8 are appropriate for background presence.
+- The overall mix loudness depends on the SUM of all stem contributions. If most stems are quiet, keep gains high (0.7-1.0) to maintain sufficient bus level.
+- Avoid muting (gain=0.0) stems that are the primary carriers of a frequency range (e.g., the only bass source)."""
+
     # Section 6 (original): Section Rules
     section_6 = f"""SECTION RULES:
 - Sections should be 4, 8, 16, 32, or 64 beats long (max 64 beats per section)
@@ -263,7 +275,7 @@ WARNINGS: Populate this array when:
 - You're uncertain about a time reference or genre interpretation
 - Tempo/key gap is large and the remix may sound noticeably different from the originals"""
 
-    static_sections = [section_1, section_2, section_3, section_6, section_7, section_10, section_11]
+    static_sections = [section_1, section_2, section_3, section_3b, section_6, section_7, section_10, section_11]
     static_block = {
         "type": "text",
         "text": "\n\n".join(static_sections),
@@ -362,8 +374,8 @@ IMPORTANT: Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)} 
     )
     if has_stem_data:
         song_data_parts.append("\n=== LAYER 3: STEM CHARACTER ===")
-        stem_a = _build_stem_character("Song A", song_a_meta)
-        stem_b = _build_stem_character("Song B", song_b_meta)
+        stem_a = _build_stem_character("Song A", song_a_meta, stem_lufs=vocal_stem_lufs)
+        stem_b = _build_stem_character("Song B", song_b_meta, stem_lufs=inst_stem_lufs)
         if stem_a:
             song_data_parts.append(stem_a)
         if stem_b:
@@ -422,8 +434,17 @@ def _build_section_map(label: str, structure: object, total_bars: int) -> str:
     return "\n".join(lines)
 
 
-def _build_stem_character(label: str, meta: AudioMetadata) -> str:
-    """Build Layer 3 stem character line for a single song (MVP format)."""
+def _build_stem_character(
+    label: str,
+    meta: AudioMetadata,
+    stem_lufs: dict[str, float] | None = None,
+) -> str:
+    """Build Layer 3 stem character line for a single song (MVP format).
+
+    When *stem_lufs* is provided, each stem description includes its
+    integrated LUFS measurement so the LLM can make loudness-informed
+    gain decisions.
+    """
     import numpy as np
 
     stem_analysis = getattr(meta, "stem_analysis", None)
@@ -468,9 +489,16 @@ def _build_stem_character(label: str, meta: AudioMetadata) -> str:
         else:
             density = "full"
 
-        stem_descs.append(f"{stem_name}: {energy_bucket}-energy, {density}")
+        # Append LUFS measurement if available
+        lufs_suffix = ""
+        if stem_lufs and stem_name in stem_lufs:
+            lufs_val = stem_lufs[stem_name]
+            if not (lufs_val != lufs_val):  # guard against NaN (float('nan') != float('nan'))
+                lufs_suffix = f" ({lufs_val:.1f} LUFS)"
 
-    result = f"{label}: " + ". ".join(stem_descs) + "."
+        stem_descs.append(f"{stem_name}: {energy_bucket}-energy, {density}{lufs_suffix}")
+
+    result = f"{label} stems: " + ". ".join(stem_descs) + "."
     if suppressed:
         result += f" ({' | '.join(suppressed)})"
     return result
@@ -1125,6 +1153,8 @@ def interpret_prompt(
     song_b_meta: AudioMetadata = None,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
+    vocal_stem_lufs: dict[str, float] | None = None,
+    inst_stem_lufs: dict[str, float] | None = None,
 ) -> RemixPlan:
     """Convert user prompt + song metadata into a structured remix plan.
 
@@ -1178,6 +1208,8 @@ def interpret_prompt(
         stretch_pct=stretch_pct,
         lyrics_a=lyrics_a,
         lyrics_b=lyrics_b,
+        vocal_stem_lufs=vocal_stem_lufs,
+        inst_stem_lufs=inst_stem_lufs,
     )
 
     # Build messages: few-shot examples + user prompt

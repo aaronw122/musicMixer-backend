@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from musicmixer.models import AudioMetadata, LyricLine, LyricsData, RemixPlan, Section
+from musicmixer.models import AudioMetadata, EnergyBuckets, LyricLine, LyricsData, RemixPlan, Section, StemAnalysis
 from musicmixer.services.interpreter import (
     _build_few_shot_messages,
     _build_system_prompt_blocks,
@@ -217,6 +217,8 @@ def _default_prompt_args(
     stretch_pct: float | None = None,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
+    vocal_stem_lufs: dict[str, float] | None = None,
+    inst_stem_lufs: dict[str, float] | None = None,
 ) -> dict:
     """Build kwargs dict for _build_system_prompt_blocks."""
     meta_a = _make_metadata(bpm=bpm_a, duration=duration_a)
@@ -234,6 +236,8 @@ def _default_prompt_args(
         stretch_pct=stretch_pct,
         lyrics_a=lyrics_a,
         lyrics_b=lyrics_b,
+        vocal_stem_lufs=vocal_stem_lufs,
+        inst_stem_lufs=inst_stem_lufs,
     )
 
 
@@ -308,6 +312,7 @@ class TestBuildSystemPromptBlocks:
             "You are a music remix planner",           # Section 1
             "CRITICAL MIXING RULES",                   # Section 2
             "MIXING ADVISORY",                         # Section 3
+            "STEM LOUDNESS AWARENESS",                 # Section 3b
             "TRANSITIONS:",                            # Section 4
             "Template A (Standard Mashup)",            # Section 5
             "SECTION RULES:",                          # Section 6
@@ -339,6 +344,7 @@ class TestBuildSystemPromptBlocks:
             "You are a music remix planner",
             "CRITICAL MIXING RULES",
             "MIXING ADVISORY",
+            "STEM LOUDNESS AWARENESS",
             "TRANSITIONS:",
             "SECTION RULES:",
             "GENRE GUIDANCE",
@@ -360,6 +366,112 @@ class TestBuildSystemPromptBlocks:
         blocks = _build_system_prompt_blocks(**args)
         assert "STRETCH WARNING (18.5%)" in blocks[1]["text"]
         assert "STRETCH WARNING" not in blocks[0]["text"]
+
+    def test_lufs_guidance_in_static_block(self):
+        """STEM LOUDNESS AWARENESS section appears in static (cached) block."""
+        args = _default_prompt_args()
+        blocks = _build_system_prompt_blocks(**args)
+        assert "STEM LOUDNESS AWARENESS" in blocks[0]["text"]
+        assert "Stems below -25 LUFS" in blocks[0]["text"]
+        assert "Stems below -30 LUFS" in blocks[0]["text"]
+        assert "Stems above -18 LUFS" in blocks[0]["text"]
+
+    def test_lufs_values_not_in_static_block(self):
+        """Per-stem LUFS values should never appear in the static (cached) block."""
+        args = _default_prompt_args(
+            vocal_stem_lufs={"vocals": -16.4},
+            inst_stem_lufs={"drums": -18.8, "bass": -20.2},
+        )
+        blocks = _build_system_prompt_blocks(**args)
+        assert "-16.4 LUFS" not in blocks[0]["text"]
+        assert "-18.8 LUFS" not in blocks[0]["text"]
+
+    def test_works_without_lufs_params(self):
+        """Backward compat: function works when LUFS params are None."""
+        args = _default_prompt_args()
+        # Explicitly ensure LUFS params are None (the default)
+        assert args["vocal_stem_lufs"] is None
+        assert args["inst_stem_lufs"] is None
+        blocks = _build_system_prompt_blocks(**args)
+        assert len(blocks) == 2
+        # LUFS guidance section is still present in static block
+        assert "STEM LOUDNESS AWARENESS" in blocks[0]["text"]
+
+    def test_lufs_values_in_dynamic_block_with_stem_analysis(self):
+        """When LUFS dicts and stem_analysis are provided, LUFS values appear in dynamic block."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        # Add stem_analysis to both so _build_stem_character produces output
+        buckets = EnergyBuckets(noise_floor=0.02, p10=0.05, p50=0.10, p85=0.20)
+        meta_a.stem_analysis = StemAnalysis(
+            bar_rms={"vocals": np.full(60, 0.15)},
+            combined_energy=np.full(60, 0.5),
+            vocal_active=np.full(60, True),
+            vocal_gaps=[],
+            bucket_thresholds=buckets,
+        )
+        meta_b.stem_analysis = StemAnalysis(
+            bar_rms={
+                "drums": np.full(60, 0.18),
+                "bass": np.full(60, 0.12),
+            },
+            combined_energy=np.full(60, 0.5),
+            vocal_active=np.full(60, False),
+            vocal_gaps=[],
+            bucket_thresholds=buckets,
+        )
+
+        from musicmixer.services.interpreter import _compute_key_guidance, estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
+        _key_available, key_detail = _compute_key_guidance(meta_a, meta_b)
+        target_bpm = estimate_target_bpm(vocal_bpm=meta_a.bpm, instrumental_bpm=meta_b.bpm)
+        total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+
+        blocks = _build_system_prompt_blocks(
+            song_a_meta=meta_a,
+            song_b_meta=meta_b,
+            key_matching_available=_key_available,
+            key_matching_detail=key_detail,
+            total_available_beats=total_available_beats,
+            vocal_stem_lufs={"vocals": -16.4},
+            inst_stem_lufs={"drums": -18.8, "bass": -22.7},
+        )
+
+        dynamic_text = blocks[1]["text"]
+        assert "-16.4 LUFS" in dynamic_text
+        assert "-18.8 LUFS" in dynamic_text
+        assert "-22.7 LUFS" in dynamic_text
+
+    def test_lufs_values_absent_when_none(self):
+        """When LUFS dicts are None but stem_analysis exists, no LUFS values in output."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        buckets = EnergyBuckets(noise_floor=0.02, p10=0.05, p50=0.10, p85=0.20)
+        meta_a.stem_analysis = StemAnalysis(
+            bar_rms={"vocals": np.full(60, 0.15)},
+            combined_energy=np.full(60, 0.5),
+            vocal_active=np.full(60, True),
+            vocal_gaps=[],
+            bucket_thresholds=buckets,
+        )
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        from musicmixer.services.interpreter import _compute_key_guidance, estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
+        _key_available, key_detail = _compute_key_guidance(meta_a, meta_b)
+        target_bpm = estimate_target_bpm(vocal_bpm=meta_a.bpm, instrumental_bpm=meta_b.bpm)
+        total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+
+        blocks = _build_system_prompt_blocks(
+            song_a_meta=meta_a,
+            song_b_meta=meta_b,
+            key_matching_available=_key_available,
+            key_matching_detail=key_detail,
+            total_available_beats=total_available_beats,
+            vocal_stem_lufs=None,
+            inst_stem_lufs=None,
+        )
+
+        dynamic_text = blocks[1]["text"]
+        assert "LUFS)" not in dynamic_text
 
 
 # ---------------------------------------------------------------------------

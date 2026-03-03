@@ -380,6 +380,62 @@ def run_pipeline(
                 session_id, label, exc_info=True,
             )
 
+    # === STEP 3.8: Measure per-stem LUFS for LLM interpreter ===
+    # Pre-EQ LUFS on raw stems gives the LLM directionally correct loudness
+    # awareness for gain decisions.  EQ shifts are typically ±2 dB, so raw
+    # measurements are close enough.  These are measured here (before step 4)
+    # so they're available when interpret_prompt builds the system prompt.
+    import soundfile as sf
+
+    vocal_stem_lufs: dict[str, float] = {}
+    inst_stem_lufs: dict[str, float] = {}
+
+    _lufs_meter_raw = pyln.Meter(44100)
+    # Song A = vocal source stems
+    for stem_name in ["vocals"]:
+        stem_path = song_a_stems_dir / f"{stem_name}.wav"
+        if stem_path.exists():
+            try:
+                audio_data, _stem_sr = sf.read(stem_path, dtype="float32")
+                if audio_data.ndim == 1:
+                    audio_data = np.column_stack([audio_data, audio_data])
+                lufs_val = _lufs_meter_raw.integrated_loudness(audio_data)
+                vocal_stem_lufs[stem_name] = lufs_val
+                logger.info(
+                    "Session %s: Raw stem LUFS (vocal/%s): %.1f",
+                    session_id, stem_name, lufs_val,
+                )
+            except Exception:
+                logger.warning(
+                    "Session %s: Failed to measure LUFS for vocal/%s",
+                    session_id, stem_name, exc_info=True,
+                )
+
+    # Song B = instrumental source stems
+    for stem_name in ["drums", "bass", "guitar", "piano", "other"]:
+        stem_path = song_b_stems_dir / f"{stem_name}.wav"
+        if stem_path.exists():
+            try:
+                audio_data, _stem_sr = sf.read(stem_path, dtype="float32")
+                if audio_data.ndim == 1:
+                    audio_data = np.column_stack([audio_data, audio_data])
+                lufs_val = _lufs_meter_raw.integrated_loudness(audio_data)
+                inst_stem_lufs[stem_name] = lufs_val
+                logger.info(
+                    "Session %s: Raw stem LUFS (inst/%s): %.1f",
+                    session_id, stem_name, lufs_val,
+                )
+            except Exception:
+                logger.warning(
+                    "Session %s: Failed to measure LUFS for inst/%s",
+                    session_id, stem_name, exc_info=True,
+                )
+
+    logger.info(
+        "Session %s: Raw stem LUFS measured: %d vocal, %d instrumental",
+        session_id, len(vocal_stem_lufs), len(inst_stem_lufs),
+    )
+
     # === STEP 4: Interpret prompt via LLM (fallback to deterministic plan) ===
     logger.info("Session %s: [4/17] interpreting prompt via LLM...", session_id)
     emit_progress(event_queue, {
@@ -388,7 +444,13 @@ def run_pipeline(
         "progress": 0.58,
     }, session=session)
 
-    plan = interpret_prompt(prompt, meta_a, meta_b, lyrics_a=lyrics_a_data, lyrics_b=lyrics_b_data)
+    plan = interpret_prompt(
+        prompt, meta_a, meta_b,
+        lyrics_a=lyrics_a_data,
+        lyrics_b=lyrics_b_data,
+        vocal_stem_lufs=vocal_stem_lufs or None,
+        inst_stem_lufs=inst_stem_lufs or None,
+    )
 
     if force_vocal_source is not None:
         plan.vocal_source = force_vocal_source
