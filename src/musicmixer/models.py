@@ -20,6 +20,8 @@ import numpy as np
 # ---------------------------------------------------------------------------
 VOCAL_SOURCE: str = "song_a"
 
+STEM_ROLES = ("lead", "support", "background", "texture", "silent")
+
 
 # ---------------------------------------------------------------------------
 # Session management (Step 1)
@@ -180,6 +182,31 @@ class Section:
     stem_gains: dict[str, float]   # {"vocals": 1.0, "drums": 0.7, "bass": 0.8, ...}
     transition_in: str              # "fade" | "crossfade" | "cut"
     transition_beats: int           # Length of transition envelope
+
+
+@dataclass
+class IntentSection:
+    """A remix section described by musical intent, not exact gains."""
+    label: str
+    start_beat: int
+    end_beat: int
+    energy: str                   # "low" | "medium" | "high" | "peak"
+    stem_roles: dict[str, str]    # {"vocals": "lead", "drums": "support", ...}
+    transition_in: str
+    transition_beats: int
+
+
+@dataclass
+class IntentPlan:
+    """Musical intent plan — LLM's creative output before gain mapping."""
+    start_time_vocal: float
+    end_time_vocal: float
+    start_time_instrumental: float
+    end_time_instrumental: float
+    sections: list[IntentSection]
+    key_source: str
+    explanation: str
+    warnings: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
