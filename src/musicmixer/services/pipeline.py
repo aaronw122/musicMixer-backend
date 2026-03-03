@@ -53,9 +53,9 @@ def run_pipeline(
     session_id: str,
     song_a_path: str,
     song_b_path: str,
-    prompt: str,
-    event_queue: queue.Queue,
-    session: SessionState,
+    prompt: str = "",
+    event_queue: queue.Queue = None,
+    session: SessionState = None,
     song_a_original_filename: str = "",
     song_b_original_filename: str = "",
     source_quality_a: str | None = None,
@@ -396,7 +396,7 @@ def run_pipeline(
 
     if plan.used_fallback:
         logger.warning(
-            "Session %s: LLM failed, using deterministic fallback",
+            "Session %s: using deterministic fallback plan (LLM unavailable or failed)",
             session_id,
         )
 

@@ -304,17 +304,39 @@ class TestYouTubeRemixEndpoint:
             assert response.status_code == 403
             assert "disabled" in response.json()["detail"]
 
-    def test_missing_prompt_field(self, client):
-        """Missing required fields should return 422."""
-        response = client.post(
-            "/api/remix/youtube",
-            json={
-                "url_a": VALID_YT_URL_A,
-                "url_b": VALID_YT_URL_B,
-                # missing prompt
-            },
-        )
-        assert response.status_code == 422
+    def test_missing_prompt_field_accepted(self, client):
+        """Missing prompt field should be accepted (defaults to empty string)."""
+        with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
+            mock_wrapper.side_effect = lambda *a, **kw: a[5].release()
+
+            response = client.post(
+                "/api/remix/youtube",
+                json={
+                    "url_a": VALID_YT_URL_A,
+                    "url_b": VALID_YT_URL_B,
+                    # missing prompt — should default to ""
+                },
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert "session_id" in data
+
+    def test_empty_prompt_accepted(self, client):
+        """Explicitly empty prompt should be accepted."""
+        with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
+            mock_wrapper.side_effect = lambda *a, **kw: a[5].release()
+
+            response = client.post(
+                "/api/remix/youtube",
+                json={
+                    "url_a": VALID_YT_URL_A,
+                    "url_b": VALID_YT_URL_B,
+                    "prompt": "",
+                },
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert "session_id" in data
 
     def test_missing_url_fields(self, client):
         """Missing URL fields should return 422."""
