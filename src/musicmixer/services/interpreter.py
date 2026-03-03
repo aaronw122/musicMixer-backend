@@ -65,7 +65,7 @@ REMIX_PLAN_TOOL: dict = {
         "required": [
             "start_time_vocal", "end_time_vocal",
             "start_time_instrumental", "end_time_instrumental",
-            "sections", "tempo_source", "key_source",
+            "sections", "key_source",
             "explanation", "warnings",
         ],
         "properties": {
@@ -142,11 +142,7 @@ REMIX_PLAN_TOOL: dict = {
                     "additionalProperties": False,
                 },
             },
-            "tempo_source": {
-                "type": "string",
-                "enum": ["song_a", "song_b", "average"],
-                "description": "Which song's tempo to use as target. 'average' only when BPMs differ by <15%.",
-            },
+            # tempo_source removed — always computed algorithmically via weighted_midpoint
             "key_source": {
                 "type": "string",
                 "enum": ["song_a", "song_b", "none"],
@@ -313,9 +309,9 @@ If total beats < 48, use Template C. If 48-96, use Standard Mashup. If 96-192, u
 
     # Section 8 (original): Tempo and Key Guidance
     section_8 = f"""TEMPO MATCHING:
-- tempo_source "average" only when BPMs differ by <15%.
-- 15-30% gap: prefer vocal source tempo (the song providing vocals gets stretched less).
-- >30% gap: system will stretch vocals only. Note this in your explanation.
+Tempo is handled automatically by the system using an algorithm that balances vocal and instrumental stretch.
+You do NOT choose tempo_source — it is not in your tool schema. Focus on arrangement and stem gains.
+If the BPM gap is large (>20%), mention in your explanation that some tempo stretching was applied.
 
 KEY MATCHING:
 {key_matching_detail}
@@ -757,7 +753,6 @@ def _build_few_shot_messages() -> list[dict]:
                             {"label": "drop", "start_beat": 288, "end_beat": 368, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 1.0, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
                             {"label": "outro", "start_beat": 368, "end_beat": 416, "stem_gains": {"vocals": 0.0, "drums": 0.5, "bass": 0.7, "guitar": 0.5, "piano": 0.5, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
-                        "tempo_source": "song_b",
                         "key_source": "none",
                         "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted to full. Starting with the hook from Track One ('Roll with me') at bar 41 for the drop gives immediate impact -- the chorus lyrics align with the section boundary at bar 41. Mid-frequency stems are reduced when vocals are active for clarity.",
                         "warnings": [],
@@ -813,7 +808,6 @@ def _build_few_shot_messages() -> list[dict]:
                             {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.8, "bass": 0.9, "guitar": 0.4, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
                             {"label": "outro", "start_beat": 256, "end_beat": 312, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.5, "guitar": 0.5, "piano": 0.6, "other": 0.5}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
-                        "tempo_source": "song_a",
                         "key_source": "none",
                         "explanation": "Song A's laid-back vocals at 88 BPM pair well with Song B's energetic instrumental. I used Song B's clean instrumental sections (bars 1-8, 49-64) for the intro and breakdown, giving contrast before the vocal drop.",
                         "warnings": ["These songs have very different tempos, so Song B's instrumental has been stretched to match Song A's tempo. Some artifacts may be audible."],
@@ -856,7 +850,6 @@ def _build_few_shot_messages() -> list[dict]:
                             {"label": "drop", "start_beat": 24, "end_beat": 40, "stem_gains": {"vocals": 1.0, "drums": 0.9, "bass": 0.8, "guitar": 0.3, "piano": 0.2, "other": 0.3}, "transition_in": "cut", "transition_beats": 0},
                             {"label": "outro", "start_beat": 40, "end_beat": 48, "stem_gains": {"vocals": 0.0, "drums": 0.4, "bass": 0.4, "guitar": 0.3, "piano": 0.4, "other": 0.4}, "transition_in": "crossfade", "transition_beats": 4},
                         ],
-                        "tempo_source": "song_b",
                         "key_source": "none",
                         "explanation": "Song A's vocals are used over Song B's slower R&B instrumental. The drums-only intro at Song B's tempo creates a laid-back groove before the vocal drop. I kept it short due to the extreme tempo difference.",
                         "warnings": [
@@ -892,6 +885,11 @@ def _parse_remix_plan(
             transition_beats=int(s["transition_beats"]),
         ))
 
+    # Log what LLM would have chosen for tempo (data collection), but always use algorithmic
+    llm_tempo = raw.get("tempo_source", "not_provided")
+    if llm_tempo != "not_provided":
+        logger.info("LLM suggested tempo_source=%r (ignored, using weighted_midpoint)", llm_tempo)
+
     return RemixPlan(
         vocal_source=VOCAL_SOURCE,
         start_time_vocal=float(raw["start_time_vocal"]),
@@ -899,7 +897,7 @@ def _parse_remix_plan(
         start_time_instrumental=float(raw["start_time_instrumental"]),
         end_time_instrumental=float(raw["end_time_instrumental"]),
         sections=sections,
-        tempo_source=raw["tempo_source"],
+        tempo_source="weighted_midpoint",
         key_source=raw["key_source"],
         explanation=raw["explanation"],
         warnings=list(raw.get("warnings", [])),
