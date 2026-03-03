@@ -247,6 +247,115 @@ class TestCreateRemix:
             del sys.modules["musicmixer.services.pipeline_day1"]
 
 
+class TestCreateRemixNoPrompt:
+    """Tests that the /remix endpoint works without a prompt parameter."""
+
+    def test_accepts_mp3_files_without_prompt(self, client, tmp_path):
+        """Should accept .mp3 files without a prompt and return session_id."""
+        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+
+        def fake_pipeline(session_id, song_a_path, song_b_path):
+            remix_dir = tmp_path / "remixes" / session_id
+            remix_dir.mkdir(parents=True, exist_ok=True)
+            remix_path = remix_dir / "remix.mp3"
+            remix_path.write_bytes(b"fake mp3")
+            return remix_path
+
+        fake_module.run_pipeline_sync = fake_pipeline
+        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
+
+        try:
+            response = client.post(
+                "/api/remix",
+                files={
+                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+                },
+                # No prompt data — should default to ""
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert "session_id" in data
+        finally:
+            del sys.modules["musicmixer.services.pipeline_day1"]
+
+    def test_empty_prompt_accepted(self, client, tmp_path):
+        """Should accept an explicitly empty prompt string."""
+        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+
+        def fake_pipeline(session_id, song_a_path, song_b_path):
+            remix_dir = tmp_path / "remixes" / session_id
+            remix_dir.mkdir(parents=True, exist_ok=True)
+            remix_path = remix_dir / "remix.mp3"
+            remix_path.write_bytes(b"fake mp3")
+            return remix_path
+
+        fake_module.run_pipeline_sync = fake_pipeline
+        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
+
+        try:
+            response = client.post(
+                "/api/remix",
+                files={
+                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+                },
+                data={"prompt": ""},
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert "session_id" in data
+        finally:
+            del sys.modules["musicmixer.services.pipeline_day1"]
+
+    def test_pipeline_receives_empty_prompt_when_omitted(self, client, tmp_path):
+        """When no prompt is sent, the pipeline wrapper should receive empty string."""
+        import time
+        captured_prompt = []
+
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            captured_prompt.append(prompt)
+            session.status = "complete"
+            processing_lock.release()
+
+        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
+            response = client.post(
+                "/api/remix",
+                files={
+                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+                },
+                # No prompt
+            )
+            assert response.status_code == 200
+
+            # Give the background thread a moment to run
+            time.sleep(0.5)
+
+            assert len(captured_prompt) == 1
+            assert captured_prompt[0] == ""
+
+
+class TestYouTubeRemixRequestModel:
+    """Tests for the YouTubeRemixRequest model with optional prompt."""
+
+    def test_prompt_defaults_to_empty_string(self):
+        """YouTubeRemixRequest should accept missing prompt, defaulting to empty string."""
+        from musicmixer.api.remix import YouTubeRemixRequest
+        req = YouTubeRemixRequest(url_a="https://www.youtube.com/watch?v=abc", url_b="https://www.youtube.com/watch?v=xyz")
+        assert req.prompt == ""
+
+    def test_prompt_preserved_when_provided(self):
+        """YouTubeRemixRequest should preserve prompt when explicitly provided."""
+        from musicmixer.api.remix import YouTubeRemixRequest
+        req = YouTubeRemixRequest(
+            url_a="https://www.youtube.com/watch?v=abc",
+            url_b="https://www.youtube.com/watch?v=xyz",
+            prompt="mix the vocals with the beat",
+        )
+        assert req.prompt == "mix the vocals with the beat"
+
+
 class TestGetAudio:
     def test_returns_404_for_missing_remix(self, client):
         import uuid as _uuid
