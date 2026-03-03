@@ -183,6 +183,38 @@ class Section:
 
 
 # ---------------------------------------------------------------------------
+# Intent-based remix planning (LLM outputs roles, not gains)
+# ---------------------------------------------------------------------------
+
+STEM_ROLES = ("lead", "support", "background", "texture", "silent")
+
+
+@dataclass
+class IntentSection:
+    """A remix section described by musical intent, not exact gains."""
+    label: str                    # "intro" | "verse" | "chorus" | "breakdown" | "drop" | "outro" | "bridge"
+    start_beat: int
+    end_beat: int
+    energy: str                   # "low" | "medium" | "high" | "peak"
+    stem_roles: dict[str, str]    # {"vocals": "lead", "drums": "support", ...}
+    transition_in: str            # "fade" | "crossfade" | "cut"
+    transition_beats: int
+
+
+@dataclass
+class IntentPlan:
+    """Musical intent plan — LLM's creative output before gain mapping."""
+    start_time_vocal: float
+    end_time_vocal: float
+    start_time_instrumental: float
+    end_time_instrumental: float
+    sections: list[IntentSection]
+    key_source: str               # "song_a" | "song_b" | "none"
+    explanation: str
+    warnings: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Spectral analysis (Adaptive EQ)
 # ---------------------------------------------------------------------------
 
