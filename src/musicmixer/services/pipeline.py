@@ -551,63 +551,62 @@ def run_pipeline(
             session_id,
         )
 
-    # === STEP 7.72: Adaptive spectral analysis (gated by flag) ===
+    # === STEP 7.72: Adaptive spectral analysis ===
     # Compute spectral profiles, detect cross-stem conflicts, and generate
     # adaptive correction parameters.  Runs AFTER the vocal bandpass filter
     # so adaptive EQ only operates on post-bandpass frequencies.
     vocal_corrections: dict[str, list[tuple[float, float, float]]] = {}
     inst_corrections: dict[str, list[tuple[float, float, float]]] = {}
 
-    if settings.adaptive_eq_enabled:
-        try:
-            _t0_spectral = time.monotonic()
-            vocal_profiles = []
-            for stem_type, audio in vocal_audio.items():
-                try:
-                    vocal_profiles.append(compute_spectral_profile(audio, sr, stem_type))
-                except Exception:
-                    logger.warning(
-                        "Session %s: Spectral profile failed for vocal/%s, skipping",
-                        session_id, stem_type, exc_info=True,
-                    )
+    try:
+        _t0_spectral = time.monotonic()
+        vocal_profiles = []
+        for stem_type, audio in vocal_audio.items():
+            try:
+                vocal_profiles.append(compute_spectral_profile(audio, sr, stem_type))
+            except Exception:
+                logger.warning(
+                    "Session %s: Spectral profile failed for vocal/%s, skipping",
+                    session_id, stem_type, exc_info=True,
+                )
 
-            inst_profiles = []
-            for stem_type, audio in inst_audio.items():
-                try:
-                    inst_profiles.append(compute_spectral_profile(audio, sr, stem_type))
-                except Exception:
-                    logger.warning(
-                        "Session %s: Spectral profile failed for inst/%s, skipping",
-                        session_id, stem_type, exc_info=True,
-                    )
+        inst_profiles = []
+        for stem_type, audio in inst_audio.items():
+            try:
+                inst_profiles.append(compute_spectral_profile(audio, sr, stem_type))
+            except Exception:
+                logger.warning(
+                    "Session %s: Spectral profile failed for inst/%s, skipping",
+                    session_id, stem_type, exc_info=True,
+                )
 
-            if vocal_profiles and inst_profiles:
-                conflicts = detect_conflicts(vocal_profiles, inst_profiles)
-                vocal_corrections, inst_corrections = compute_adaptive_corrections(
-                    conflicts, vocal_profiles, inst_profiles,
-                )
-                _elapsed_spectral = time.monotonic() - _t0_spectral
-                logger.info(
-                    "Session %s: Adaptive EQ analysis: %d conflicts, %d vocal corrections, "
-                    "%d inst corrections (%.2fs)",
-                    session_id, len(conflicts),
-                    sum(len(v) for v in vocal_corrections.values()),
-                    sum(len(v) for v in inst_corrections.values()),
-                    _elapsed_spectral,
-                )
-            else:
-                logger.info(
-                    "Session %s: Adaptive EQ skipped — insufficient profiles "
-                    "(vocal=%d, inst=%d)",
-                    session_id, len(vocal_profiles), len(inst_profiles),
-                )
-        except Exception:
-            logger.error(
-                "Session %s: Adaptive EQ analysis failed, falling back to preset-only",
-                session_id, exc_info=True,
+        if vocal_profiles and inst_profiles:
+            conflicts = detect_conflicts(vocal_profiles, inst_profiles)
+            vocal_corrections, inst_corrections = compute_adaptive_corrections(
+                conflicts, vocal_profiles, inst_profiles,
             )
-            vocal_corrections = {}
-            inst_corrections = {}
+            _elapsed_spectral = time.monotonic() - _t0_spectral
+            logger.info(
+                "Session %s: Adaptive EQ analysis: %d conflicts, %d vocal corrections, "
+                "%d inst corrections (%.2fs)",
+                session_id, len(conflicts),
+                sum(len(v) for v in vocal_corrections.values()),
+                sum(len(v) for v in inst_corrections.values()),
+                _elapsed_spectral,
+            )
+        else:
+            logger.info(
+                "Session %s: Adaptive EQ skipped — insufficient profiles "
+                "(vocal=%d, inst=%d)",
+                session_id, len(vocal_profiles), len(inst_profiles),
+            )
+    except Exception:
+        logger.error(
+            "Session %s: Adaptive EQ analysis failed, falling back to preset-only",
+            session_id, exc_info=True,
+        )
+        vocal_corrections = {}
+        inst_corrections = {}
 
     # === STEP 7.75: Broad preset EQ + adaptive corrections (before tempo stretch) ===
     # Apply corrective EQ profiles per stem type. Only broad cuts/boosts (Q~1-3)
