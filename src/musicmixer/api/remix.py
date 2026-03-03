@@ -136,7 +136,7 @@ def _validate_youtube_url(url: str) -> str:
 class YouTubeRemixRequest(BaseModel):
     url_a: str  # YouTube URL for song A
     url_b: str  # YouTube URL for song B
-    prompt: str  # Remix prompt
+    prompt: str = ""  # Remix prompt (optional — defaults to deterministic plan)
 
 
 # ---------------------------------------------------------------------------

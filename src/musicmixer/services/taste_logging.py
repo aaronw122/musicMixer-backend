@@ -11,7 +11,7 @@ from pydantic import BaseModel
 class TasteStageLog(BaseModel):
     """Per-request logging for the taste training stage."""
     request_id: str
-    prompt: str
+    prompt: str = ""
     feature_version: str | None = None
     model_version: str | None = None
     flag_config: dict[str, bool] = {}  # all ab_* flags
