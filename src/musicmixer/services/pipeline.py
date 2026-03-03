@@ -396,7 +396,7 @@ def run_pipeline(
 
     if plan.used_fallback:
         logger.warning(
-            "Session %s: LLM failed, using deterministic fallback",
+            "Session %s: using deterministic fallback plan (LLM unavailable or failed)",
             session_id,
         )
 

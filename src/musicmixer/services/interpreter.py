@@ -1133,13 +1133,13 @@ def interpret_prompt(
     Synchronous -- runs in the pipeline thread, NOT the async event loop.
     Falls back to generate_fallback_plan() on any LLM failure.
 
-    When prompt is empty/blank, skips the LLM call entirely and returns
-    the deterministic fallback plan directly (saves an API call and latency).
+    When no prompt is provided, uses a default prompt that lets the LLM
+    analyze song structure and make intelligent mixing decisions.
     """
-    # Fast path: no prompt provided — skip LLM, use deterministic plan
+    # Default prompt when user doesn't provide one
     if not prompt or not prompt.strip():
-        logger.info("No prompt provided, using deterministic fallback plan")
-        return generate_fallback_plan(song_a_meta, song_b_meta)
+        prompt = "Create a mashup using vocals from Song A over the instrumentals from Song B. Analyze the song structures and make smart arrangement decisions."
+        logger.info("No user prompt provided, using default prompt for LLM interpretation")
 
     # Guard: interpreter requires 6-stem separation (Modal)
     if settings.stem_backend != "modal":
