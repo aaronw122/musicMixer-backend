@@ -27,12 +27,16 @@ def beats_to_samples(
     sr: int,
     hop_length: int = 512,
     analysis_sr: int = 22050,
+    target_bpm: float | None = None,
 ) -> int:
     """Convert a beat index to a sample position using the actual beat grid.
 
     Uses beat_frames from librosa (NOT constant-BPM math, which drifts).
     If beat_index exceeds the detected beats, extrapolate using the average
-    interval of the last 8 beats.
+    interval of the last 8 beats.  When *target_bpm* is provided and the
+    observed spacing diverges more than 20 % from the BPM-implied spacing,
+    the BPM-based value is used instead — this prevents compressed trailing
+    beats from causing severe duration undershoot.
 
     Args:
         beat_index: Index into beat_frames (or beyond for extrapolation).
@@ -42,6 +46,8 @@ def beats_to_samples(
         analysis_sr: Sample rate used during beat analysis (default 22050).
             Beat frames are in units of this rate. When sr != analysis_sr,
             positions are scaled accordingly.
+        target_bpm: Optional target BPM. Used as a sanity check when
+            extrapolating beyond the detected grid.
     """
     sr_scale = sr / analysis_sr  # e.g. 44100 / 22050 = 2.0
 
@@ -53,6 +59,19 @@ def beats_to_samples(
         # Extrapolate beyond last detected beat
         last_n = beat_frames[-8:] if len(beat_frames) >= 8 else beat_frames
         avg_beat_len = float(np.mean(np.diff(last_n))) * hop_length * sr_scale
+
+        # If target_bpm is provided, use it as a sanity check
+        if target_bpm and target_bpm > 0:
+            expected_beat_len = 60.0 / target_bpm * sr  # samples per beat at target BPM
+            # If observed spacing differs by more than 20% from expected, use expected
+            if abs(avg_beat_len - expected_beat_len) / expected_beat_len > 0.20:
+                logger.warning(
+                    "Beat extrapolation: observed spacing %.1f samples differs >20%% "
+                    "from expected %.1f (at %.1f BPM). Using BPM-based spacing.",
+                    avg_beat_len, expected_beat_len, target_bpm,
+                )
+                avg_beat_len = expected_beat_len
+
         overshoot = beat_index - len(beat_frames) + 1
         return int(beat_frames[-1] * hop_length * sr_scale + overshoot * avg_beat_len)
 
@@ -67,6 +86,7 @@ def _build_gain_curves(
     sr: int,
     hop_length: int = 512,
     last_beat: int = 0,
+    target_bpm: float | None = None,
 ) -> dict[str, np.ndarray]:
     """Build continuous per-stem gain curves across the full track.
 
@@ -88,8 +108,8 @@ def _build_gain_curves(
 
         # First pass: fill each section with its flat gain
         for section in sections:
-            start = beats_to_samples(section.start_beat, beat_frames, sr, hop_length)
-            end = beats_to_samples(section.end_beat, beat_frames, sr, hop_length)
+            start = beats_to_samples(section.start_beat, beat_frames, sr, hop_length, target_bpm=target_bpm)
+            end = beats_to_samples(section.end_beat, beat_frames, sr, hop_length, target_bpm=target_bpm)
             start = max(0, min(start, total_samples))
             end = max(start, min(end, total_samples))
             gain = section.stem_gains.get(stem_name, 0.0)
@@ -113,10 +133,10 @@ def _build_gain_curves(
             before_beats = trans_beats // 2
             after_beats = trans_beats - before_beats
             trans_start = beats_to_samples(
-                max(0, section.start_beat - before_beats), beat_frames, sr, hop_length
+                max(0, section.start_beat - before_beats), beat_frames, sr, hop_length, target_bpm=target_bpm
             )
             trans_end = beats_to_samples(
-                min(last_beat, section.start_beat + after_beats), beat_frames, sr, hop_length
+                min(last_beat, section.start_beat + after_beats), beat_frames, sr, hop_length, target_bpm=target_bpm
             )
             trans_start = max(0, min(trans_start, total_samples))
             trans_end = max(trans_start, min(trans_end, total_samples))
@@ -148,6 +168,7 @@ def render_arrangement(
     beat_frames: np.ndarray,
     sr: int,
     hop_length: int = 512,
+    target_bpm: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Render sections into a vocal bus + instrumental bus.
 
@@ -163,6 +184,8 @@ def render_arrangement(
         beat_frames: Post-stretch beat grid (frame indices from librosa).
         sr: Sample rate of all stem audio (must be uniform, typically 44100).
         hop_length: Hop length used for beat_frames (default 512).
+        target_bpm: Optional target BPM, passed to beats_to_samples for
+            extrapolation sanity checks.
 
     Returns:
         (vocal_bus, instrumental_bus) -- both shape (total_samples, 2), float32.
@@ -174,7 +197,7 @@ def render_arrangement(
 
     # Compute total output length from last section's end_beat
     last_beat = max(s.end_beat for s in sections)
-    total_samples = beats_to_samples(last_beat, beat_frames, sr, hop_length)
+    total_samples = beats_to_samples(last_beat, beat_frames, sr, hop_length, target_bpm=target_bpm)
 
     if total_samples <= 0:
         empty = np.zeros((0, 2), dtype=np.float32)
@@ -188,7 +211,7 @@ def render_arrangement(
     # Build continuous gain curves
     gain_curves = _build_gain_curves(
         sections, all_stem_names, total_samples, beat_frames, sr, hop_length,
-        last_beat=last_beat,
+        last_beat=last_beat, target_bpm=target_bpm,
     )
 
     # Allocate output buses
@@ -227,7 +250,7 @@ def render_arrangement(
     if sections[0].transition_in == "fade":
         fade_in_beats = sections[0].transition_beats
         fade_in_samples = beats_to_samples(
-            fade_in_beats, beat_frames, sr, hop_length
+            fade_in_beats, beat_frames, sr, hop_length, target_bpm=target_bpm
         )
         fade_in_samples = max(0, min(fade_in_samples, total_samples // 4))
         if fade_in_samples > 0:

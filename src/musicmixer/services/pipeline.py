@@ -794,11 +794,34 @@ def run_pipeline(
                 y=mono_22k, sr=22050, units="frames", start_bpm=target_bpm,
             )
             if len(new_beat_frames) > 10:
-                post_stretch_beat_frames = new_beat_frames
-                logger.info(
-                    "Session %s: Re-detected %d beats post-stretch",
-                    session_id, len(new_beat_frames),
-                )
+                # Validate: does the new grid cover enough of the plan's beat range?
+                plan_end_beat = plan.sections[-1].end_beat if plan.sections else 0
+
+                if plan_end_beat > 0:
+                    # Estimate how many beats the new grid can reliably provide
+                    # (allow up to 20% extrapolation beyond detected beats)
+                    reliable_beats = len(new_beat_frames)
+                    max_reliable_beat = int(reliable_beats * 1.2)
+
+                    if plan_end_beat > max_reliable_beat:
+                        logger.warning(
+                            "Session %s: Re-detected beat grid (%d beats) cannot reliably "
+                            "cover plan range (%d beats). Falling back to scaled grid.",
+                            session_id, len(new_beat_frames), plan_end_beat,
+                        )
+                        # DON'T use new_beat_frames, keep the scaled original grid
+                    else:
+                        post_stretch_beat_frames = new_beat_frames
+                        logger.info(
+                            "Session %s: Re-detected %d beats post-stretch (plan needs %d)",
+                            session_id, len(new_beat_frames), plan_end_beat,
+                        )
+                else:
+                    post_stretch_beat_frames = new_beat_frames
+                    logger.info(
+                        "Session %s: Re-detected %d beats post-stretch",
+                        session_id, len(new_beat_frames),
+                    )
             else:
                 logger.warning(
                     "Session %s: Post-stretch beat detection found only %d beats, using scaled grid",
@@ -907,6 +930,7 @@ def run_pipeline(
         instrumental_stems=inst_audio,
         beat_frames=post_stretch_beat_frames,
         sr=sr,
+        target_bpm=target_bpm,
     )
 
     # Post-render duration sanity check
