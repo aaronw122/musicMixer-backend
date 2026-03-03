@@ -1408,7 +1408,7 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
             "We created a remix using the strongest sections of each song. "
             "Vocals from Song A layered over Song B's instrumentals."
         ),
-        warnings=["Using automatic remix layout (no prompt interpretation yet)."],
+        warnings=["Using automatic remix layout (LLM was unavailable)."],
         used_fallback=True,
     )
 
