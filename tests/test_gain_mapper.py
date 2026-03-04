@@ -13,6 +13,7 @@ from musicmixer.models import (
 )
 from musicmixer.services.gain_mapper import (
     ALL_STEMS,
+    ENERGY_BUDGET_TARGETS,
     ENERGY_MULTIPLIERS,
     INSTRUMENTAL_STEMS,
     MAX_MUTING_FRACTION,
@@ -118,7 +119,7 @@ class TestRoleToGainMapping:
             }),
             None, None,
         )
-        assert 0.50 <= gains["drums"] <= 0.75
+        assert 0.60 <= gains["drums"] <= 0.90
 
     def test_background_lower_than_support(self):
         roles = {s: "silent" for s in ALL_STEMS}
@@ -218,7 +219,7 @@ class TestLufsAdjustment:
         assert factor > 1.0
 
     def test_neutral_reference(self):
-        factor = _lufs_adjustment(-20.0)
+        factor = _lufs_adjustment(-18.0)
         assert factor == pytest.approx(1.0)
 
     def test_loud_stem_attenuated(self):
@@ -261,12 +262,12 @@ class TestLufsAdjustment:
         assert gains_attenuated["drums"] < gains_neutral["drums"]
 
     def test_lufs_ranges(self):
-        """Verify the full range of LUFS adjustments."""
+        """Verify the full range of LUFS adjustments (neutral ref = -18)."""
         assert _lufs_adjustment(-35.0) == 1.3
-        assert _lufs_adjustment(-28.0) == 1.15
-        assert _lufs_adjustment(-22.0) == 1.0
-        assert _lufs_adjustment(-17.0) == 0.85
-        assert _lufs_adjustment(-12.0) == 0.75
+        assert _lufs_adjustment(-25.0) == 1.15
+        assert _lufs_adjustment(-20.0) == 1.0
+        assert _lufs_adjustment(-15.0) == 0.90
+        assert _lufs_adjustment(-10.0) == 0.80
 
 
 # ---------------------------------------------------------------------------
@@ -459,31 +460,31 @@ class TestGainFloors:
     """Support stems clamped to 0.50 min, background to 0.30, texture to 0.15."""
 
     def test_support_floor_at_low_energy(self):
-        """Even at low energy, support should not drop below 0.50."""
+        """Even at low energy, support should not drop below 0.60."""
         section = _make_intent_section(energy="low", stem_roles={
             "vocals": "silent", "drums": "support", "bass": "silent",
             "guitar": "silent", "piano": "silent", "other": "silent",
         })
         gains = _compute_section_gains(section, None, None)
-        assert gains["drums"] >= 0.50
+        assert gains["drums"] >= 0.60
 
     def test_background_floor_at_low_energy(self):
-        """Background should not drop below 0.30."""
+        """Background should not drop below 0.40."""
         section = _make_intent_section(energy="low", stem_roles={
             "vocals": "silent", "drums": "silent", "bass": "background",
             "guitar": "silent", "piano": "silent", "other": "silent",
         })
         gains = _compute_section_gains(section, None, None)
-        assert gains["bass"] >= 0.30
+        assert gains["bass"] >= 0.40
 
     def test_texture_floor_at_low_energy(self):
-        """Texture should not drop below 0.15."""
+        """Texture should not drop below 0.20."""
         section = _make_intent_section(energy="low", stem_roles={
             "vocals": "silent", "drums": "silent", "bass": "silent",
             "guitar": "silent", "piano": "texture", "other": "silent",
         })
         gains = _compute_section_gains(section, None, None)
-        assert gains["piano"] >= 0.15
+        assert gains["piano"] >= 0.20
 
     def test_silent_not_floored(self):
         """Silent stems should stay at 0.0 regardless of floors."""
@@ -497,9 +498,9 @@ class TestGainFloors:
 
     def test_floor_values_match_spec(self):
         """Verify the documented floor values."""
-        assert ROLE_GAIN_FLOORS["support"] == 0.50
-        assert ROLE_GAIN_FLOORS["background"] == 0.30
-        assert ROLE_GAIN_FLOORS["texture"] == 0.15
+        assert ROLE_GAIN_FLOORS["support"] == 0.60
+        assert ROLE_GAIN_FLOORS["background"] == 0.40
+        assert ROLE_GAIN_FLOORS["texture"] == 0.20
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +785,108 @@ class TestEndToEnd:
         for intent_sec, sec in zip(intent.sections, plan.sections):
             assert sec.transition_in == intent_sec.transition_in
             assert sec.transition_beats == intent_sec.transition_beats
+
+
+# ---------------------------------------------------------------------------
+# 11. TestEnergyBudgetAutoCorrect
+# ---------------------------------------------------------------------------
+
+class TestEnergyBudgetAutoCorrect:
+    """Energy budget auto-correction scales gains up when total is below target."""
+
+    def test_below_target_gets_scaled_up(self):
+        """Section below energy budget minimum gets non-silent gains scaled up."""
+        # Build a chorus with deliberately low gains (all texture)
+        section = _make_intent_section(
+            label="chorus", energy="high",
+            stem_roles={
+                "vocals": "texture", "drums": "texture", "bass": "texture",
+                "guitar": "texture", "piano": "silent", "other": "silent",
+            },
+        )
+        gains = [_compute_section_gains(section, None, None)]
+        total_before = sum(gains[0].values())
+        lo, hi = ENERGY_BUDGET_TARGETS["chorus"]
+        assert total_before < lo, "Pre-condition: total should be below target"
+
+        warnings = _validate_energy_budgets(gains, ["chorus"])
+        total_after = sum(gains[0].values())
+
+        assert total_after >= lo, "Auto-correct should bring total to at least the minimum"
+        assert len(warnings) == 0, "No warnings expected after successful auto-correct"
+
+    def test_auto_correct_preserves_ordering(self):
+        """After scaling, relative ordering of gains is preserved (below cap)."""
+        # Use a verse target (3.0-4.5) with low energy so the scale factor
+        # is moderate and doesn't push everything to the 1.0 cap.
+        section = _make_intent_section(
+            label="verse", energy="low",
+            stem_roles={
+                "vocals": "lead", "drums": "support", "bass": "background",
+                "guitar": "texture", "piano": "texture", "other": "silent",
+            },
+        )
+        gains = [_compute_section_gains(section, None, None)]
+        _validate_energy_budgets(gains, ["verse"])
+
+        assert gains[0]["vocals"] >= gains[0]["drums"]
+        assert gains[0]["drums"] >= gains[0]["bass"]
+        assert gains[0]["bass"] >= gains[0]["guitar"]
+        assert gains[0]["other"] == 0.0  # silent stays silent
+
+    def test_auto_correct_caps_at_one(self):
+        """Individual gains never exceed 1.0 after auto-correct."""
+        # Chorus with a single active stem forces a large scale factor
+        section = _make_intent_section(
+            label="chorus", energy="low",
+            stem_roles={
+                "vocals": "texture", "drums": "silent", "bass": "silent",
+                "guitar": "silent", "piano": "silent", "other": "silent",
+            },
+        )
+        gains = [_compute_section_gains(section, None, None)]
+        _validate_energy_budgets(gains, ["chorus"])
+
+        for stem, val in gains[0].items():
+            assert val <= 1.0, f"{stem} gain {val} exceeds 1.0 after auto-correct"
+
+    def test_above_target_produces_warning(self):
+        """Section above energy budget still produces a warning (no downward correction)."""
+        # Intro with all stems at lead + peak energy — will be way above intro target
+        section = _make_intent_section(
+            label="intro", energy="peak",
+            stem_roles={s: "lead" for s in ALL_STEMS},
+        )
+        gains = [_compute_section_gains(section, None, None)]
+        total = sum(gains[0].values())
+        _, hi = ENERGY_BUDGET_TARGETS["intro"]
+        assert total > hi, "Pre-condition: total should be above target"
+
+        warnings = _validate_energy_budgets(gains, ["intro"])
+        assert len(warnings) == 1
+        assert "above" in warnings[0]
+
+    def test_within_target_no_change(self):
+        """Section within budget range is not modified."""
+        section = _make_intent_section(
+            label="verse", energy="medium",
+        )
+        gains = [_compute_section_gains(section, None, None)]
+        original = dict(gains[0])
+
+        warnings = _validate_energy_budgets(gains, ["verse"])
+
+        assert len(warnings) == 0
+        for stem in ALL_STEMS:
+            assert gains[0][stem] == pytest.approx(original[stem], abs=0.001)
+
+    def test_all_silent_below_target_warns(self):
+        """All-silent section below budget warns instead of scaling (nothing to scale)."""
+        gains = [{"vocals": 0.0, "drums": 0.0, "bass": 0.0,
+                  "guitar": 0.0, "piano": 0.0, "other": 0.0}]
+        warnings = _validate_energy_budgets(gains, ["chorus"])
+        assert len(warnings) == 1
+        assert "all stems silent" in warnings[0]
 
 
 # ---------------------------------------------------------------------------

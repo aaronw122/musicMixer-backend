@@ -36,11 +36,14 @@ ALL_STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
 INSTRUMENTAL_STEMS = ["drums", "bass", "guitar", "piano", "other"]
 
 # Step A: base role-to-gain mapping
+# NOTE: support/background/texture raised in energy-budget-tuning so that
+# after LUFS attenuation (~0.88x at -18 LUFS neutral ref) the effective
+# gains still land inside energy-budget target ranges.
 ROLE_BASE_GAINS: dict[str, float] = {
     "lead":       0.92,
-    "support":    0.67,
-    "background": 0.45,
-    "texture":    0.27,
+    "support":    0.82,
+    "background": 0.55,
+    "texture":    0.30,
     "silent":     0.0,
 }
 
@@ -53,10 +56,11 @@ ENERGY_MULTIPLIERS: dict[str, float] = {
 }
 
 # Step D: gain floors per role
+# Floors raised to sit below the new base gains but above the old ones.
 ROLE_GAIN_FLOORS: dict[str, float] = {
-    "support":    0.50,
-    "background": 0.30,
-    "texture":    0.15,
+    "support":    0.60,
+    "background": 0.40,
+    "texture":    0.20,
 }
 
 # Step D: energy budget targets (total gain sum per section)
@@ -83,18 +87,23 @@ MAX_MUTING_FRACTION = 0.15
 # ---------------------------------------------------------------------------
 
 def _lufs_adjustment(lufs: float) -> float:
-    """LUFS-based gain correction. Reference: -20 LUFS = neutral."""
+    """LUFS-based gain correction. Reference: -18 LUFS = neutral.
+
+    Neutral reference shifted from -20 to -18 (energy-budget-tuning) so
+    that stems around -14 to -15 LUFS — common for drums and bass — receive
+    gentler attenuation (~0.90x instead of ~0.80x).
+    """
     if math.isnan(lufs) or lufs < -60:
         return 1.0  # no data, neutral
-    if lufs < -30:
+    if lufs < -28:
         return 1.3   # very quiet stem, boost
-    if lufs < -25:
+    if lufs < -23:
         return 1.15
-    if lufs <= -20:
+    if lufs <= -18:
         return 1.0   # neutral reference
-    if lufs < -15:
-        return 0.85
-    return 0.75       # very loud stem, attenuate
+    if lufs < -13:
+        return 0.90
+    return 0.80       # very loud stem, attenuate
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +271,15 @@ def _validate_energy_budgets(
     sections_gains: list[dict[str, float]],
     section_labels: list[str],
 ) -> list[str]:
-    """Constraint 4: log warnings if total gain sum falls outside targets."""
+    """Constraint 4: auto-correct sections whose total gain is below target.
+
+    When a section's total gain falls below the energy budget minimum, all
+    non-silent stems in that section are scaled proportionally upward so the
+    total hits the minimum.  Individual gains are capped at 1.0.
+
+    Sections above the target range still produce warnings (no downward
+    auto-correction — clipping is safer to flag than to silently fix).
+    """
     warnings: list[str] = []
     for i, (gains, label) in enumerate(zip(sections_gains, section_labels)):
         total = sum(gains.values())
@@ -270,13 +287,29 @@ def _validate_energy_budgets(
         if targets is None:
             continue
         lo, hi = targets
+
         if total < lo:
-            msg = (
-                f"Section {i} ({label}): total gain {total:.2f} below "
-                f"target range [{lo:.1f}, {hi:.1f}]"
-            )
-            logger.warning("Energy budget: %s", msg)
-            warnings.append(msg)
+            # --- auto-correct: scale non-silent gains up to hit lo ---
+            non_silent = {s: g for s, g in gains.items() if g > 0.0}
+            ns_total = sum(non_silent.values())
+            if ns_total > 0:
+                scale = lo / ns_total
+                for stem in non_silent:
+                    gains[stem] = min(1.0, gains[stem] * scale)
+                new_total = sum(gains.values())
+                logger.info(
+                    "Energy budget: section %d (%s) adjusted total gain "
+                    "from %.2f to %.2f (target min %.1f)",
+                    i, label, total, new_total, lo,
+                )
+            else:
+                # All stems silent — nothing to scale; emit warning
+                msg = (
+                    f"Section {i} ({label}): total gain {total:.2f} below "
+                    f"target range [{lo:.1f}, {hi:.1f}] (all stems silent)"
+                )
+                logger.warning("Energy budget: %s", msg)
+                warnings.append(msg)
         elif total > hi:
             msg = (
                 f"Section {i} ({label}): total gain {total:.2f} above "
