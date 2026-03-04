@@ -22,7 +22,7 @@ from pathlib import Path
 import anthropic
 
 from musicmixer.config import settings
-from musicmixer.models import VOCAL_SOURCE, AudioMetadata, LyricsData, RemixPlan, Section
+from musicmixer.models import VOCAL_SOURCE, AudioMetadata, IntentPlan, IntentSection, LyricsData, RemixPlan, Section
 from musicmixer.services.tempo import compute_stretch_pct, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ TARGET_REMIX_DURATION_SECONDS = 210  # 3.5 minutes
 class _DurationTooShortError(Exception):
     """Raised when the LLM's arrangement is too short for the target duration."""
 
-    def __init__(self, plan: RemixPlan, target_bpm: float):
+    def __init__(self, plan: IntentPlan, target_bpm: float):
         self.plan = plan
         self.target_bpm = target_bpm
         total_beats = plan.sections[-1].end_beat if plan.sections else 0
@@ -96,7 +96,7 @@ REMIX_PLAN_TOOL: dict = {
                 "description": "Ordered list of remix sections. Must be contiguous (end_beat of one = start_beat of next). First section starts at beat 0.",
                 "items": {
                     "type": "object",
-                    "required": ["label", "start_beat", "end_beat", "stem_gains", "transition_in", "transition_beats"],
+                    "required": ["label", "start_beat", "end_beat", "energy", "stem_roles", "transition_in", "transition_beats"],
                     "properties": {
                         "label": {
                             "type": "string",
@@ -113,17 +113,22 @@ REMIX_PLAN_TOOL: dict = {
                             "minimum": 4,
                             "description": "Ending beat (exclusive). Section length = end_beat - start_beat. Should be 4, 8, 16, 32, or 64.",
                         },
-                        "stem_gains": {
+                        "energy": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "peak"],
+                            "description": "Overall energy level of this section.",
+                        },
+                        "stem_roles": {
                             "type": "object",
                             "required": ["vocals", "drums", "bass", "guitar", "piano", "other"],
-                            "description": "Volume level for each stem in this section. 0.0 = silent, 1.0 = full volume.",
+                            "description": "Role for each stem: lead, support, background, texture, or silent.",
                             "properties": {
-                                "vocals": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                                "drums": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                                "bass": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                                "guitar": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                                "piano": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                                "other": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                                "vocals": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"]},
+                                "drums": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"]},
+                                "bass": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"]},
+                                "guitar": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"]},
+                                "piano": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"]},
+                                "other": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"]},
                             },
                             "additionalProperties": False,
                         },
@@ -177,8 +182,6 @@ def _build_system_prompt_blocks(
     stretch_pct: float | None = None,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
-    vocal_stem_lufs: dict[str, float] | None = None,
-    inst_stem_lufs: dict[str, float] | None = None,
 ) -> list[dict]:
     """Construct system prompt as two content blocks for Anthropic prompt caching.
 
@@ -207,69 +210,51 @@ CONSTRAINTS:
 
 CAPABILITIES:
 - Select source regions from each song (start/end times in seconds)
-- Design a section-based arrangement with per-stem volume control (0.0-1.0 for each of: {stem_list})
+- Design a section-based arrangement with per-stem role assignment (lead, support, background, texture, silent for each of: {stem_list})
 - Choose transitions between sections (fade, crossfade, cut)
 - Set tempo and key matching strategy"""
 
     # Section 2: Failure Mode Guards
     section_2 = """CRITICAL MIXING RULES (violations produce bad audio):
-1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:no, labeled GOOD INSTRUMENTAL SOURCE). For the "other" stem: low-energy sections -> gain 0.30-0.35; medium+ energy -> gain 0.4-0.6 (preserves genre identity).
-2. VOCAL-INSTRUMENTAL BALANCE: When vocals are active, your job is to create a FULL MIX that supports the vocal, not a solo performance with faint backing. The system already applies spectral ducking (-3.5 dB in 300-3000 Hz) to instrumentals when vocals are present — this handles the frequency conflict for you. Do NOT stack additional heavy gain cuts on top of the ducking.
-Gain guidance when vocals are active:
-- Vocals: 0.85-1.0 (lead element, but not drastically louder than everything else)
-- Drums: 0.75-0.95 (drives the energy — should feel present and punchy)
-- Bass: 0.70-0.90 (provides foundation — occupies its own frequency range and rarely conflicts with vocals)
-- Guitar: 0.45-0.70 (mid-frequency content — the ducking system already carves space, so moderate reduction is sufficient)
-- Piano: 0.40-0.65 (similar to guitar — let the ducking handle the conflict, you handle the arrangement)
-- Other: 0.35-0.60 (pads, synths, textures — these fill out the stereo field and add warmth)
-Key principle: A professional mashup sounds like a BAND PLAYING TOGETHER, not a vocal over silence. If you remove the vocal from your arrangement and the remaining stems sound empty, your instrumental gains are too low.
+1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:no, labeled GOOD INSTRUMENTAL SOURCE). For instrumental breakdowns, assign at least one stem as "lead".
+2. VOCAL-INSTRUMENTAL BALANCE: When vocals are active, assign them "lead" and ensure at least 2-3 instrumental stems are "support" or "background". A mashup should sound like a FULL BAND, not a vocal solo.
 3. NO RHYTHMIC COLLISION: Never use drums from both songs simultaneously. Never overlap bass lines from both songs.
 4. ENERGY MATCHING: Match vocal energy to instrumental energy level. Exception: quiet vocal over minimal beat is acceptable as an intentional artistic choice.
 5. DYNAMIC RANGE: The remix MUST have at least 1 contrast moment (e.g., breakdown -> drop) and use a minimum of 3 different energy levels across sections.
 6. ENDING: End with 4-8 bars of reduced energy or a natural outro. NEVER cut the remix at full energy -- it sounds broken.
-7. GAIN VARIATION: Vary gain profiles across sections. Strip down to drums+bass+vocals for contrast, then use full arrangement for impact. Flat gain across all sections produces a lifeless mix.
+7. ROLE VARIATION: Vary stem roles across sections. Strip down to drums+bass+vocals for contrast, then promote more stems to "support" for impact. Flat roles across all sections produces a lifeless mix.
 8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 bar numbers with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section."""
 
-    # Section 3: Mixing Advisory Notes
-    section_3 = """MIXING ADVISORY:
+    # Section 3: Stem Roles and Energy Levels
+    section_3 = """STEM ROLES:
+For each section, assign every stem one of these roles:
+- "lead": Primary element driving the section (typically vocals in vocal sections)
+- "support": Important contributor, clearly audible but not dominant (drums, bass in a verse)
+- "background": Present for fullness, felt more than heard (guitar pad, piano comping)
+- "texture": Subtle atmospheric presence, adds warmth/depth
+- "silent": Deliberately absent — use SPARINGLY, prefer "texture" over "silent"
+
+Guidelines:
+- Vocal sections should have vocals as "lead" and at least 2-3 instrumental stems as "support" or "background"
+- Instrumental sections (breakdowns, intros) should have at least one "lead" instrumental
+- The drum-bass pair should typically be "support" or higher in any rhythmic section
+- Vary roles across sections to create dynamics: verse might have guitar as "background", chorus promotes it to "support"
+- A mashup should sound like a full band, not a vocal solo. Err toward "background" over "silent"
+
+ENERGY LEVELS:
+Each section has an energy level:
+- "low": Sparse, minimal, building or fading (intros, outros, quiet breakdowns)
+- "medium": Standard energy, controlled (verses, bridges)
+- "high": Elevated energy, driving (pre-chorus, energetic verses)
+- "peak": Maximum intensity, everything firing (choruses, drops)
+
+Use energy to create dynamic arc: low → medium → high → peak → medium → low
+
+MIXING ADVISORY:
 - Stagger stem entries over 2-4 bars for natural-sounding builds (don't bring everything in at once).
 - Begin vocal sections 1-2 beats early for pickup notes (vocals often start before the downbeat).
-- Two peak-level stems at full volume (1.0) will clip. Reduce one by 3-6 dB (gain 0.5-0.7).
 - Section labels in the song data are approximate guidance, not rigid constraints. Use them to understand song structure, but your arrangement should serve the user's prompt.
-- Contrast creates energy: if a section has drums at 0.0, the next section's drums at 1.0 will feel powerful.
-- Stem Muting Policy: A gain of 0.0 means COMPLETE REMOVAL of that stem. Use it sparingly.
-  When 0.0 IS appropriate: Intro/outro sections deliberately building from minimal elements. A specific creative choice (a cappella breakdown, drums-only transition). When a stem actively clashes (wrong key, conflicting rhythm).
-  When 0.0 is NOT appropriate: As a default strategy for "making room" for vocals (0.40 works fine). For any stem in a chorus, drop, or high-energy section (even the least important stem should be 0.30-0.45 minimum). For more than 2 stems simultaneously in any section (3+ muted stems = thin mix).
-  Practical minimum for background presence: 0.25-0.35. Rule of thumb: across all sections, if more than 15-20% of stem entries are 0.0, you are over-muting.
-
-STEM GAIN REFERENCE:
-
-GAIN SCALE (linear amplitude):
-  1.0 = full level (0 dB)
-  0.70 = -3.1 dB (audibly reduced but clearly present)
-  0.50 = -6.0 dB (background level, supportive role)
-  0.35 = -9.1 dB (texture/warmth, felt more than heard)
-  0.0  = silence (complete removal)
-
-ENERGY BUDGET BY SECTION TYPE:
-The sum of all stem gains is a rough proxy for section energy.
-
-  Intro/Outro: target sum 1.5-3.0, 2-4 active stems
-  Verse: target sum 3.0-4.5, 4-5 active stems minimum
-  Chorus/Drop: target sum 4.5-5.5, ALL stems active, none below 0.35
-  Breakdown: target sum 2.0-3.5, 3-5 active stems
-
-CRITICAL: Contrast comes from RELATIVE changes, not absolute low levels. A chorus feels big because the verse was smaller, not because the verse was silent. The drum-bass foundation should almost never drop below 0.50 in rhythmic sections. Mid-frequency stems (guitar, piano, other) are what separate a professional mix from a karaoke track."""
-
-    # Section 3b: Stem Loudness Awareness
-    section_3b = """STEM LOUDNESS AWARENESS:
-Each stem in the song data has an integrated LUFS measurement showing its actual loudness.
-Use these to make informed gain decisions:
-- Stems below -25 LUFS are quiet. Setting gain below 0.5 on these may make them inaudible.
-- Stems below -30 LUFS are very quiet. Use gain 0.7-1.0 to keep them present, or 0.0 only if deliberately muting.
-- Stems above -18 LUFS are loud. Gains of 0.5-0.8 are appropriate for background presence.
-- The overall mix loudness depends on the SUM of all stem contributions. If most stems are quiet, keep gains high (0.7-1.0) to maintain sufficient bus level.
-- Avoid muting (gain=0.0) stems that are the primary carriers of a frequency range (e.g., the only bass source)."""
+- Contrast creates energy: if a section has drums as "silent", the next section's drums at "support" will feel powerful."""
 
     # Section 6 (original): Section Rules
     section_6 = f"""SECTION RULES:
@@ -277,8 +262,8 @@ Use these to make informed gain decisions:
 - Default: start with instrumental only (establishes the beat before vocals enter), unless the prompt suggests otherwise
 - Always end with instrumental only or a fade
 - section labels: "intro", "verse", "breakdown", "drop", "outro"
-- stem_gains values must be between 0.0 and 1.0 (never exceed 1.0 -- it causes distortion)
-- stem_gains must include all stems: {stem_list}
+- stem_roles must include all stems: {stem_list}
+- Each stem role must be one of: "lead", "support", "background", "texture", "silent"
 - transition_in: "fade", "crossfade", or "cut"
 - transition_beats: how many beats the transition lasts (0-8, must be less than half the section length)"""
 
@@ -304,7 +289,7 @@ WARNINGS: Populate this array when:
 - You're uncertain about a time reference or genre interpretation
 - Tempo/key gap is large and the remix may sound noticeably different from the originals"""
 
-    static_sections = [section_1, section_2, section_3, section_3b, section_6, section_7, section_10, section_11]
+    static_sections = [section_1, section_2, section_3, section_6, section_7, section_10, section_11]
     static_block = {
         "type": "text",
         "text": "\n\n".join(static_sections),
@@ -403,8 +388,8 @@ IMPORTANT: Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)} 
     )
     if has_stem_data:
         song_data_parts.append("\n=== LAYER 3: STEM CHARACTER ===")
-        stem_a = _build_stem_character("Song A", song_a_meta, stem_lufs=vocal_stem_lufs)
-        stem_b = _build_stem_character("Song B", song_b_meta, stem_lufs=inst_stem_lufs)
+        stem_a = _build_stem_character("Song A", song_a_meta)
+        stem_b = _build_stem_character("Song B", song_b_meta)
         if stem_a:
             song_data_parts.append(stem_a)
         if stem_b:
@@ -466,14 +451,8 @@ def _build_section_map(label: str, structure: object, total_bars: int) -> str:
 def _build_stem_character(
     label: str,
     meta: AudioMetadata,
-    stem_lufs: dict[str, float] | None = None,
 ) -> str:
-    """Build Layer 3 stem character line for a single song (MVP format).
-
-    When *stem_lufs* is provided, each stem description includes its
-    integrated LUFS measurement so the LLM can make loudness-informed
-    gain decisions.
-    """
+    """Build Layer 3 stem character line for a single song (MVP format)."""
     import numpy as np
 
     stem_analysis = getattr(meta, "stem_analysis", None)
@@ -518,14 +497,7 @@ def _build_stem_character(
         else:
             density = "full"
 
-        # Append LUFS measurement if available
-        lufs_suffix = ""
-        if stem_lufs and stem_name in stem_lufs:
-            lufs_val = stem_lufs[stem_name]
-            if not (lufs_val != lufs_val):  # guard against NaN (float('nan') != float('nan'))
-                lufs_suffix = f" ({lufs_val:.1f} LUFS)"
-
-        stem_descs.append(f"{stem_name}: {energy_bucket}-energy, {density}{lufs_suffix}")
+        stem_descs.append(f"{stem_name}: {energy_bucket}-energy, {density}")
 
     result = f"{label} stems: " + ". ".join(stem_descs) + "."
     if suppressed:
@@ -765,8 +737,8 @@ def _build_few_shot_messages() -> list[dict]:
                 "   89-103 15b  2:58-3:30 | outro          | medium->low      | sparse     | vox:no\n"
                 "Vocal gaps: 1-8, 41-72, 89-103\n\n"
                 "=== LAYER 3: STEM CHARACTER ===\n"
-                "Song A stems: vocals: high-energy, full (-14.2 LUFS). drums: high-energy, full (-17.5 LUFS). bass: high-energy, full (-18.1 LUFS). other: high-energy, full (-20.3 LUFS). (guitar: negligible | piano: minor)\n"
-                "Song B stems: guitar: high-energy, full (-16.8 LUFS). drums: high-energy, full (-17.2 LUFS). bass: medium-energy, mid (-22.4 LUFS). vocals: medium-energy, mid (-21.0 LUFS). piano: low-energy, sparse (-28.6 LUFS). (other: minimal)\n\n"
+                "Song A stems: vocals: high-energy, full. drums: high-energy, full. bass: high-energy, full. other: high-energy, full. (guitar: negligible | piano: minor)\n"
+                "Song B stems: guitar: high-energy, full. drums: high-energy, full. bass: medium-energy, mid. vocals: medium-energy, mid. piano: low-energy, sparse. (other: minimal)\n\n"
                 "=== LAYER 4: CROSS-SONG ===\n"
                 "Loudness: Song A ~5 dB louder. Reduce Song A stems ~5 dB.\n"
                 "Instrumental source: Song B clean sections at bars 1-8, 41-72, 89-103.\n\n"
@@ -801,17 +773,17 @@ def _build_few_shot_messages() -> list[dict]:
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 210.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.80, "bass": 0.85, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.90, "drums": 0.80, "bass": 0.75, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.50, "bass": 0.70, "guitar": 0.80, "piano": 0.60, "other": 0.45}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.90, "drums": 0.80, "bass": 0.75, "guitar": 0.55, "piano": 0.45, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.65, "piano": 0.55, "other": 0.50}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "breakdown", "start_beat": 256, "end_beat": 288, "stem_gains": {"vocals": 0.35, "drums": 0.40, "bass": 0.55, "guitar": 0.70, "piano": 0.60, "other": 0.50}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 288, "end_beat": 368, "stem_gains": {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.65, "piano": 0.55, "other": 0.50}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 368, "end_beat": 416, "stem_gains": {"vocals": 0.0, "drums": 0.55, "bass": 0.65, "guitar": 0.50, "piano": 0.50, "other": 0.45}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 192, "end_beat": 256, "energy": "peak", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "breakdown", "start_beat": 256, "end_beat": 288, "energy": "low", "stem_roles": {"vocals": "background", "drums": "background", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 288, "end_beat": 368, "energy": "peak", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 368, "end_beat": 416, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "key_source": "none",
-                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass boosted. Starting with the hook from Track One ('Roll with me') at bar 41 for the drop gives immediate impact -- the chorus lyrics align with the section boundary at bar 41. The ducking system handles vocal clarity, so the instrumental stays full and punchy throughout.",
+                        "explanation": "I put Song A's vocals over Song B's instrumental with the bass promoted to support role throughout. Starting with the hook from Track One ('Roll with me') at bar 41 for the drop gives immediate impact -- the chorus lyrics align with the section boundary at bar 41.",
                         "warnings": [],
                     },
                 }
@@ -858,12 +830,12 @@ def _build_few_shot_messages() -> list[dict]:
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 210.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 32, "stem_gains": {"vocals": 0.0, "drums": 0.75, "bass": 0.80, "guitar": 0.55, "piano": 0.45, "other": 0.50}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 32, "end_beat": 96, "stem_gains": {"vocals": 0.85, "drums": 0.80, "bass": 0.75, "guitar": 0.50, "piano": 0.40, "other": 0.45}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "stem_gains": {"vocals": 0.0, "drums": 0.50, "bass": 0.65, "guitar": 0.70, "piano": 0.55, "other": 0.50}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 128, "end_beat": 192, "stem_gains": {"vocals": 0.90, "drums": 0.80, "bass": 0.75, "guitar": 0.50, "piano": 0.40, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 192, "end_beat": 256, "stem_gains": {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.60, "piano": 0.50, "other": 0.45}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 256, "end_beat": 312, "stem_gains": {"vocals": 0.0, "drums": 0.50, "bass": 0.55, "guitar": 0.55, "piano": 0.60, "other": 0.50}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "breakdown", "start_beat": 96, "end_beat": 128, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 192, "end_beat": 256, "energy": "peak", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 256, "end_beat": 312, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "support", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "key_source": "none",
                         "explanation": "Song A's laid-back vocals at 88 BPM pair well with Song B's energetic instrumental. I used Song B's clean instrumental sections (bars 1-8, 49-64) for the intro and breakdown, giving contrast before the vocal drop.",
@@ -902,10 +874,10 @@ def _build_few_shot_messages() -> list[dict]:
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 60.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 8, "stem_gains": {"vocals": 0.0, "drums": 0.85, "bass": 0.75, "guitar": 0.0, "piano": 0.0, "other": 0.40}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 8, "end_beat": 24, "stem_gains": {"vocals": 0.95, "drums": 0.80, "bass": 0.70, "guitar": 0.45, "piano": 0.35, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "drop", "start_beat": 24, "end_beat": 40, "stem_gains": {"vocals": 1.0, "drums": 0.90, "bass": 0.85, "guitar": 0.55, "piano": 0.45, "other": 0.50}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 40, "end_beat": 48, "stem_gains": {"vocals": 0.0, "drums": 0.50, "bass": 0.55, "guitar": 0.40, "piano": 0.45, "other": 0.40}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "intro", "start_beat": 0, "end_beat": 8, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "lead", "bass": "support", "guitar": "silent", "piano": "silent", "other": "texture"}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 8, "end_beat": 24, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "drop", "start_beat": 24, "end_beat": 40, "energy": "peak", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 40, "end_beat": 48, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "texture", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
                         ],
                         "key_source": "none",
                         "explanation": "Song A's vocals are used over Song B's slower R&B instrumental. The drums-only intro at Song B's tempo creates a laid-back groove before the vocal drop. I kept it short due to the extreme tempo difference.",
@@ -925,19 +897,18 @@ def _build_few_shot_messages() -> list[dict]:
 # LLM response parsing
 # ---------------------------------------------------------------------------
 
-def _parse_remix_plan(
+def _parse_intent_plan(
     raw: dict,
-    song_a_meta: AudioMetadata,
-    song_b_meta: AudioMetadata,
-) -> RemixPlan:
-    """Parse the raw tool_use output dict into a RemixPlan model."""
+) -> IntentPlan:
+    """Parse the raw tool_use output dict into an IntentPlan model."""
     sections = []
     for s in raw["sections"]:
-        sections.append(Section(
+        sections.append(IntentSection(
             label=s["label"],
             start_beat=int(s["start_beat"]),
             end_beat=int(s["end_beat"]),
-            stem_gains={k: float(v) for k, v in s["stem_gains"].items()},
+            energy=s["energy"],
+            stem_roles={k: str(v) for k, v in s["stem_roles"].items()},
             transition_in=s["transition_in"],
             transition_beats=int(s["transition_beats"]),
         ))
@@ -947,18 +918,15 @@ def _parse_remix_plan(
     if llm_tempo != "not_provided":
         logger.info("LLM suggested tempo_source=%r (ignored, using weighted_midpoint)", llm_tempo)
 
-    return RemixPlan(
-        vocal_source=VOCAL_SOURCE,
+    return IntentPlan(
         start_time_vocal=float(raw["start_time_vocal"]),
         end_time_vocal=float(raw["end_time_vocal"]),
         start_time_instrumental=float(raw["start_time_instrumental"]),
         end_time_instrumental=float(raw["end_time_instrumental"]),
         sections=sections,
-        tempo_source="weighted_midpoint",
         key_source=raw["key_source"],
         explanation=raw["explanation"],
         warnings=list(raw.get("warnings", [])),
-        used_fallback=False,
     )
 
 
@@ -966,12 +934,17 @@ def _parse_remix_plan(
 # Post-LLM validation
 # ---------------------------------------------------------------------------
 
-def _validate_remix_plan(
-    plan: RemixPlan,
+def _validate_intent_plan(
+    plan: IntentPlan,
     song_a_meta: AudioMetadata,
     song_b_meta: AudioMetadata,
-) -> RemixPlan:
-    """Validate and fix the LLM's remix plan. Fixes issues in-place where possible."""
+) -> IntentPlan:
+    """Validate and fix the LLM's intent plan. Fixes structural issues in-place where possible.
+
+    Gain-specific validation (minimum active stems, muting rate, etc.) is now
+    the gain mapper's responsibility. This function only validates structural
+    correctness: time ranges, beat contiguity, section lengths, and duration.
+    """
     clamped_fields: list[str] = []
 
     # Time range validation — Song A always provides vocals, Song B always provides instrumentals
@@ -990,7 +963,7 @@ def _validate_remix_plan(
         plan.end_time_instrumental = min(plan.start_time_instrumental + 30.0, inst_meta.duration_seconds)
         clamped_fields.append("instrumental_time_range")
 
-    # Section validation (10-point checklist)
+    # Section validation
     sections = plan.sections
 
     # 1. Sort by start_beat
@@ -1012,11 +985,8 @@ def _validate_remix_plan(
     # 4. Minimum section length (4 beats)
     sections = [s for s in sections if s.end_beat - s.start_beat >= 4]
     if not sections:
-        # Completely unrecoverable -- use default arrangement
-        total_beats = int(inst_meta.bpm * TARGET_REMIX_DURATION_SECONDS / 60)
-        plan.sections = default_arrangement(total_beats)
-        plan.used_fallback = True
-        plan.warnings.append("Section arrangement was regenerated automatically.")
+        # Completely unrecoverable -- caller should use fallback
+        plan.warnings.append("Section arrangement was invalid (no sections >= 4 beats).")
         return plan
 
     # 5. transition_beats <= (end_beat - start_beat) / 2
@@ -1026,24 +996,21 @@ def _validate_remix_plan(
             s.transition_beats = max_transition
             clamped_fields.append(f"transition_beats_{s.label}")
 
-    # 6. stem_gains keys (add missing, remove unknown)
+    # 6. stem_roles keys (add missing with default "texture", remove unknown)
     valid_stems = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+    valid_roles = {"lead", "support", "background", "texture", "silent"}
     for s in sections:
         for stem in valid_stems:
-            if stem not in s.stem_gains:
-                s.stem_gains[stem] = 0.0
-        s.stem_gains = {k: v for k, v in s.stem_gains.items() if k in valid_stems}
+            if stem not in s.stem_roles:
+                s.stem_roles[stem] = "texture"
+        s.stem_roles = {k: v for k, v in s.stem_roles.items() if k in valid_stems}
+        # Validate role values
+        for stem, role in s.stem_roles.items():
+            if role not in valid_roles:
+                s.stem_roles[stem] = "texture"
+                clamped_fields.append(f"role_{s.label}_{stem}")
 
-    # 7. stem_gains values in [0.0, 1.0]
-    for s in sections:
-        for stem, gain in s.stem_gains.items():
-            if gain < 0.0 or gain > 1.0:
-                s.stem_gains[stem] = max(0.0, min(1.0, gain))
-                clamped_fields.append(f"gain_{s.label}_{stem}")
-
-    # 8. Total beat range within available audio (deferred to pipeline -- needs beat grid)
-
-    # 9. At least 2 sections
+    # 7. At least 2 sections
     if len(sections) < 2:
         total_beats = sections[0].end_beat
         half = total_beats // 2
@@ -1051,12 +1018,13 @@ def _validate_remix_plan(
         half = (half // 4) * 4
         if half < 4:
             half = 4
-        intro = Section("intro", 0, half, {**sections[0].stem_gains, "vocals": 0.0}, "fade", 4)
+        intro_roles = {**sections[0].stem_roles, "vocals": "silent"}
+        intro = IntentSection("intro", 0, half, "low", intro_roles, "fade", 4)
         main = sections[0]
         main.start_beat = half
         sections = [intro, main]
 
-    # 10. Last section end_beat on bar boundary (multiple of 4)
+    # 8. Last section end_beat on bar boundary (multiple of 4)
     last = sections[-1]
     remainder = last.end_beat % 4
     if remainder != 0:
@@ -1067,54 +1035,8 @@ def _validate_remix_plan(
     if clamped_fields:
         logger.info("Section validation clamped fields: %s", clamped_fields)
 
-    # --- Arrangement quality warnings (advisory, not blocking) ---
-    arrangement_warnings: list[str] = []
-
-    # 11. Per-section minimum active instrumental stems
-    for section in sections:
-        active_inst_stems = sum(
-            1 for stem, gain in section.stem_gains.items()
-            if stem != "vocals" and gain > 0.0
-        )
-        if active_inst_stems < 2 and section.label not in ("intro", "outro"):
-            arrangement_warnings.append(
-                f"Section '{section.label}' (beats {section.start_beat}-{section.end_beat}) "
-                f"has only {active_inst_stems} active instrumental stems — mix may sound thin"
-            )
-
-    # 12. No instrumental stem muted across ALL sections
-    for stem_name in ["drums", "bass", "guitar", "piano", "other"]:
-        all_muted = all(
-            s.stem_gains.get(stem_name, 0.0) == 0.0 for s in sections
-        )
-        if all_muted:
-            arrangement_warnings.append(
-                f"Stem '{stem_name}' is muted (0.0) in every section — "
-                f"consider adding it at 0.3+ in at least one section"
-            )
-
-    # 13. Overall muting percentage
-    total_entries = len(sections) * 5  # 5 instrumental stems
-    muted_entries = sum(
-        1 for s in sections
-        for stem, gain in s.stem_gains.items()
-        if stem != "vocals" and gain == 0.0
-    )
-    if total_entries > 0:
-        mute_pct = muted_entries / total_entries * 100
-        if mute_pct > 30:
-            arrangement_warnings.append(
-                f"High muting rate: {mute_pct:.0f}% of instrumental stem entries are 0.0 — "
-                f"mix may lack fullness"
-            )
-
-    if arrangement_warnings:
-        for w in arrangement_warnings:
-            logger.warning("Arrangement quality: %s", w)
-        plan.warnings.extend(arrangement_warnings)
-
     # Duration validation — Song A is always vocal, Song B is always instrumental
-    target_bpm = estimate_target_bpm(song_a_meta.bpm, song_b_meta.bpm, plan.tempo_source)
+    target_bpm = estimate_target_bpm(song_a_meta.bpm, song_b_meta.bpm)
 
     # Pre-render logging: arrangement stats before duration validation
     total_beats = sections[-1].end_beat if sections else 0
@@ -1126,16 +1048,16 @@ def _validate_remix_plan(
         target_bpm, TARGET_REMIX_DURATION_SECONDS,
     )
 
-    plan, duration_ok = _validate_duration(plan, target_bpm)
+    plan, duration_ok = _validate_intent_duration(plan, target_bpm)
     if not duration_ok:
         raise _DurationTooShortError(plan, target_bpm)
 
     return plan
 
 
-def _validate_duration(
-    plan: RemixPlan, target_bpm: float,
-) -> tuple[RemixPlan, bool]:
+def _validate_intent_duration(
+    plan: IntentPlan, target_bpm: float,
+) -> tuple[IntentPlan, bool]:
     """Validate arrangement duration against target range.
 
     Returns (plan, is_acceptable). If is_acceptable is False, the caller
@@ -1181,7 +1103,7 @@ def _compute_stretch_pct(bpm_a: float, bpm_b: float) -> float:
     return compute_stretch_pct(vocal_bpm=bpm_a, instrumental_bpm=bpm_b)
 
 
-def _warn_vocal_stretch_limits(plan: RemixPlan, stretch_pct: float) -> None:
+def _warn_vocal_stretch_limits(plan: IntentPlan, stretch_pct: float) -> None:
     """Advisory warning if vocal sections exceed recommended bar limits at stretch ratio.
 
     Per spec: >12% stretch -> max 8 bars at up to 15%, max 4 bars above 15%.
@@ -1197,9 +1119,9 @@ def _warn_vocal_stretch_limits(plan: RemixPlan, stretch_pct: float) -> None:
         max_bars = 4
 
     for section in plan.sections:
-        # Check sections with active vocals
-        vocal_gain = section.stem_gains.get("vocals", 0.0)
-        if vocal_gain < 0.1:
+        # Check sections with active vocals (any role other than "silent")
+        vocal_role = section.stem_roles.get("vocals", "silent")
+        if vocal_role == "silent":
             continue
 
         section_beats = section.end_beat - section.start_beat
@@ -1228,13 +1150,17 @@ def interpret_prompt(
     song_b_meta: AudioMetadata = None,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
-    vocal_stem_lufs: dict[str, float] | None = None,
-    inst_stem_lufs: dict[str, float] | None = None,
-) -> RemixPlan:
-    """Convert user prompt + song metadata into a structured remix plan.
+) -> IntentPlan | RemixPlan:
+    """Convert user prompt + song metadata into a structured IntentPlan.
+
+    Returns IntentPlan (musical intent with stem roles + energy levels) on
+    LLM success. The gain mapper module converts IntentPlan -> RemixPlan.
+
+    Falls back to generate_fallback_plan() on any LLM failure, which returns
+    a RemixPlan directly (bypasses gain mapping). Callers should check
+    isinstance() or used_fallback to determine which path was taken.
 
     Synchronous -- runs in the pipeline thread, NOT the async event loop.
-    Falls back to generate_fallback_plan() on any LLM failure.
 
     When no prompt is provided, uses a default prompt that lets the LLM
     analyze song structure and make intelligent mixing decisions.
@@ -1283,8 +1209,6 @@ def interpret_prompt(
         stretch_pct=stretch_pct,
         lyrics_a=lyrics_a,
         lyrics_b=lyrics_b,
-        vocal_stem_lufs=vocal_stem_lufs,
-        inst_stem_lufs=inst_stem_lufs,
     )
 
     # Build messages: few-shot examples + user prompt
@@ -1388,7 +1312,7 @@ def interpret_prompt(
 
         # Parse and validate
         try:
-            plan = _parse_remix_plan(raw_plan, song_a_meta, song_b_meta)
+            plan = _parse_intent_plan(raw_plan)
         except Exception:
             # Parse error -- on retry this can happen if LLM returns garbage
             logger.exception(
@@ -1398,7 +1322,7 @@ def interpret_prompt(
             return generate_fallback_plan(song_a_meta, song_b_meta)
 
         try:
-            plan = _validate_remix_plan(plan, song_a_meta, song_b_meta)
+            plan = _validate_intent_plan(plan, song_a_meta, song_b_meta)
         except _DurationTooShortError as e:
             if attempt < max_duration_attempts - 1:
                 needed_beats = int(
