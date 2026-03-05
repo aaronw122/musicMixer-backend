@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # Storage
     data_dir: Path = Path("data")
     max_concurrent_mixes: int = Field(default=1, ge=1, le=8)
+    distributed_limiter_enabled: bool = False
 
     # Stem separation
     stem_backend: str = "modal"  # "modal" or "local"
