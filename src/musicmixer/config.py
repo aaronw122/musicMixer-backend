@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     stem_cache_enabled: bool = True
     stem_cache_max_gb: float = 10.0
     stem_cache_dir: Path = Path("data/stem_cache")
+    distributed_limiter_enabled: bool = False
 
     # Output
     output_format: str = "mp3"
