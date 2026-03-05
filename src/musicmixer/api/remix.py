@@ -534,12 +534,56 @@ async def get_status(session_id: str, request: Request):
     }
 
 
+@router.get("/remix/{session_id}/public")
+async def get_public_remix(session_id: str):
+    """Return public remix metadata for share-link playback."""
+    _validate_uuid(session_id)
+
+    manifest_path = (settings.data_dir / "remixes" / session_id / "manifest.json").resolve()
+    audio_path = (settings.data_dir / "remixes" / session_id / "remix.mp3").resolve()
+
+    # Path safety
+    if not manifest_path.is_relative_to(settings.data_dir.resolve()):
+        raise HTTPException(400, "Invalid session ID")
+
+    if not manifest_path.exists() or not audio_path.exists():
+        raise HTTPException(404, "Remix not found")
+
+    manifest = json.loads(manifest_path.read_text())
+
+    # TTL enforcement: check expiry
+    from datetime import datetime, timezone
+    expires_at = datetime.fromisoformat(manifest["expires_at"])
+    now = datetime.now(timezone.utc)
+    if now >= expires_at:
+        raise HTTPException(410, "Remix has expired")
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        content={
+            "session_id": manifest["session_id"],
+            "status": "ready",
+            "audio_url": f"/api/remix/{session_id}/audio",
+            "explanation": manifest["explanation"],
+            "warnings": manifest["warnings"],
+            "usedFallback": manifest["used_fallback"],
+            "expires_at": manifest["expires_at"],
+        },
+        headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
 @router.get("/remix/{session_id}/audio")
 async def get_audio(session_id: str):
     """Serve the rendered remix MP3."""
     _validate_uuid(session_id)
 
-    remix_path = (settings.data_dir / "remixes" / session_id / "remix.mp3").resolve()
+    remix_dir = (settings.data_dir / "remixes" / session_id).resolve()
+    remix_path = remix_dir / "remix.mp3"
+    manifest_path = remix_dir / "manifest.json"
 
     # Belt-and-suspenders: ensure resolved path is still inside data_dir
     if not remix_path.is_relative_to(settings.data_dir.resolve()):
@@ -547,7 +591,28 @@ async def get_audio(session_id: str):
 
     if not remix_path.exists():
         raise HTTPException(404, "Remix not found")
-    return FileResponse(remix_path, media_type="audio/mpeg", filename="remix.mp3")
+
+    # TTL enforcement: if manifest exists, check expiry
+    headers: dict[str, str] = {"Referrer-Policy": "no-referrer"}
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        from datetime import datetime, timezone
+        expires_at = datetime.fromisoformat(manifest["expires_at"])
+        now = datetime.now(timezone.utc)
+        if now >= expires_at:
+            raise HTTPException(410, "Remix has expired")
+        remaining = int((expires_at - now).total_seconds())
+        max_age = max(0, remaining)
+        headers["Cache-Control"] = f"private, max-age={max_age}, must-revalidate"
+    else:
+        headers["Cache-Control"] = "private, max-age=60, must-revalidate"
+
+    return FileResponse(
+        remix_path,
+        media_type="audio/mpeg",
+        filename="remix.mp3",
+        headers=headers,
+    )
 
 
 VALID_SONGS = {"song_a", "song_b"}

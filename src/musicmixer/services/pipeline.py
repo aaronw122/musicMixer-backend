@@ -49,6 +49,46 @@ def emit_progress(
         session.last_event = event
 
 
+def _write_remix_manifest(
+    session_id: str,
+    remix_dir: "Path",
+    explanation: str,
+    warnings: list[str],
+    used_fallback: bool,
+) -> None:
+    """Persist a public remix manifest for share-link playback.
+
+    Writes atomically via .tmp + rename to avoid partial reads by the
+    public endpoint.
+    """
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from musicmixer.config import settings
+
+    now = datetime.now(timezone.utc)
+    expires_at = now.timestamp() + settings.remix_ttl_seconds
+    expires_at_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+
+    manifest = {
+        "session_id": session_id,
+        "created_at": now.isoformat(),
+        "expires_at": expires_at_dt.isoformat(),
+        "explanation": explanation,
+        "warnings": warnings,
+        "used_fallback": used_fallback,
+        "audio_filename": "remix.mp3",
+    }
+
+    manifest_path = Path(remix_dir) / "manifest.json"
+    tmp_path = manifest_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(manifest, indent=2))
+    tmp_path.rename(manifest_path)
+
+    logger.info("Session %s: Wrote public manifest to %s", session_id, manifest_path)
+
+
 def run_pipeline(
     session_id: str,
     song_a_path: str,
@@ -1129,6 +1169,15 @@ def run_pipeline(
     session.remix_path = str(output_path)
     session.explanation = plan.explanation
     session.status = "complete"
+
+    # Persist public remix manifest for share-link playback
+    _write_remix_manifest(
+        session_id=session_id,
+        remix_dir=output_path.parent,
+        explanation=plan.explanation,
+        warnings=plan.warnings,
+        used_fallback=plan.used_fallback,
+    )
 
     emit_progress(event_queue, {
         "step": "complete",

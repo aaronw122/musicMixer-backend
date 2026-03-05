@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     youtube_enabled: bool = True
     youtube_max_duration_seconds: int = 900  # 15 minutes
 
+    # Share links
+    remix_ttl_seconds: int = 10800  # 3 hours
+
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
