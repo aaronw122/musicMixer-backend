@@ -292,7 +292,7 @@ class TestBuildSystemPromptBlock:
 
         # Key strings that uniquely identify each section
         section_markers = [
-            "You are a music remix planner",           # Section 1
+            "You are an expert music mashup artist",           # Section 1
             "CRITICAL MIXING RULES",                   # Section 2
             "STEM ROLE GUIDELINES",                    # Section 3
             "ENERGY LEVELS AND ARC",                   # Section 3
@@ -342,7 +342,7 @@ class TestBuildSystemPromptBlock:
 
         # These markers must be present regardless of variant
         required_markers = [
-            "You are a music remix planner",
+            "You are an expert music mashup artist",
             "CRITICAL MIXING RULES",
             "STEM ROLE GUIDELINES",
             "MIXING ADVISORY",

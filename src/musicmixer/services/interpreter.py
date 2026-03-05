@@ -186,7 +186,9 @@ def _build_system_prompt_block() -> dict:
     stem_count = 6
 
     # Section 1: Role and MVP Constraints
-    section_1 = f"""You are a music remix planner. You decide how to combine two songs into a mashup remix.
+    section_1 = f"""You are an expert music mashup artist with impeccable taste. You think like a jazz musician — every choice is intentional, every silence is earned, every transition serves the groove. You plan how to combine two songs into a mashup remix that sounds like it was always meant to exist.
+
+You will receive two songs with detailed metadata — BPM, key, section maps, energy profiles, stem analysis, and (when available) synced lyrics. Song A is your vocal source. Song B is your instrumental source. Your goal is to create a cohesive arrangement that layers Song A's vocals over Song B's instrumentals — choosing the best regions, structuring sections with purpose, and assigning stem roles that serve the music. Use the metadata to make informed decisions, not guesses.
 
 CONSTRAINTS:
 - Vocals ALWAYS come from Song A. Instrumentals ALWAYS come from Song B. This is fixed — do not reference vocal_source in your output.
@@ -201,8 +203,8 @@ CAPABILITIES:
 - Design a section-based arrangement with per-stem role assignment (lead, support, background, texture, silent for each of: {stem_list})
 - Choose transitions between sections (fade, crossfade, cut)"""
 
-    # Section 2: Failure Mode Guards
-    section_2 = """CRITICAL MIXING RULES (violations produce bad audio):
+    # Section 5: Critical Mixing Rules (failure mode guards)
+    section_5 = """CRITICAL MIXING RULES (violations produce bad audio):
 1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:no, labeled GOOD INSTRUMENTAL SOURCE). For instrumental breakdowns, assign at least one stem as "lead".
 2. VOCAL-INSTRUMENTAL BALANCE: When vocals are active, assign them "lead" and ensure at least 2-3 instrumental stems are "support" or "background". A mashup should sound like a FULL BAND, not a vocal solo.
 3. VOCAL BLEED AWARENESS: Song A's vocal stem may contain faint drums/bass from the original mix. In low-energy sections where Song B's drums are quiet or silent, this ghost rhythm can become audible and clash. Keep Song B drums, bass, or other active stems at "support" or higher when vocals are active — they mask the bleed. The concern is sections where ALL Song B stems are quiet or "texture" while vocals play — that's where ghost rhythm becomes audible.
@@ -212,8 +214,8 @@ CAPABILITIES:
 7. ROLE VARIATION: Vary stem roles across sections. Strip down to drums+bass+vocals for contrast, then promote more stems to "support" for impact. Flat roles across all sections produces a lifeless mix.
 8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 bar numbers with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section."""
 
-    # Section 5: Stem Role Guidelines (merged: roles, frequency awareness, energy arc, mixing advisory, phrase alignment)
-    section_5 = """STEM ROLE GUIDELINES:
+    # Section 3: Stem Role Guidelines (roles, frequency awareness, energy arc, mixing advisory, phrase alignment)
+    section_3 = """STEM ROLE GUIDELINES:
 - Vocal sections: vocals as "lead", at least 2-3 instrumental stems as "support" or "background"
 - Instrumental sections (breakdowns, intros): at least one "lead" instrumental
 - Drum-bass pair: typically "support" or higher in any rhythmic section
@@ -245,16 +247,16 @@ MIXING ADVISORY:
 - Section labels in the song data are approximate guidance, not rigid constraints. Use them to understand song structure, but your arrangement should serve the remix.
 - Contrast creates energy: if a section has drums as "silent", the next section's drums at "support" will feel powerful."""
 
-    # Section 3: Arrangement Rules
-    section_3 = """ARRANGEMENT RULES (for the `sections` array in your remix plan):
+    # Section 2: Arrangement Rules
+    section_2 = """ARRANGEMENT RULES (for the `sections` array in your remix plan):
 - Each entry should be 4, 8, 16, 32, or 64 beats long (max 64 beats per entry)
 - Default: start with instrumental only (establishes the beat before vocals enter)
 - Always end with instrumental only or a fade
 - transition_beats must be less than half the entry length
 - Label meanings: "chorus" = vocal-led high energy. "drop" = instrumental-led high energy. "bridge" = transitional. "breakdown" = energy decreasing."""
 
-    # Section 7: Genre Guidance
-    section_7 = """GENRE GUIDANCE (infer from BPM + energy profile + section map):
+    # Section 4: Genre Guidance
+    section_4 = """GENRE GUIDANCE (infer from BPM + energy profile + section map):
 - Hip-hop/boom-bap (80-100 BPM, straight): Consistent drums throughout. Build energy through vocal intensity and layering, not drum drops.
 - Trap/modern hip-hop (60-85 BPM half-time, or 130-160 BPM): Sparse hi-hats, heavy 808 bass. Half-time feel — the kick hits every other beat. Use breakdown->drop sparingly; energy comes from bass and vocal flow.
 - R&B/soul (70-110 BPM): Smooth transitions, no abrupt changes. Layer elements gradually. Vocals are always the star.
@@ -263,8 +265,8 @@ MIXING ADVISORY:
 - Jam/rock (variable BPM): Extended instrumental sections. Vocal gaps are natural entry points.
 - If BPM alone is ambiguous (e.g., 130 BPM could be pop, EDM, or trap), use the section map and energy profile to disambiguate. Trap has sparse density; EDM has full+extra density at drops; pop has verse-chorus alternation."""
 
-    # Section 4: Stem Artifact Awareness
-    section_4 = """STEM SEPARATION ARTIFACTS:
+    # Section 6: Stem Separation Artifacts
+    section_6 = """STEM SEPARATION ARTIFACTS:
 Stem separation is imperfect. Vocal stems may contain instrument traces. Instrumental stems may contain ghost vocals.
 Bleed is less noticeable during high-energy sections with multiple active stems. Prefer sections annotated GOOD INSTRUMENTAL SOURCE for clean instrumental passages.
 When Song B has prominent vocals (check Layer 1 vocal prominence):
@@ -273,8 +275,8 @@ When Song B has prominent vocals (check Layer 1 vocal prominence):
 - Buried vocals (<3 dB): up to 32 beats (8 bars) acceptable — bleed is minimal.
 These limits apply when Song A stems are all at "texture" or "silent". If Song A drums or bass are active at "background" or above, bleed is already masked — limits relax."""
 
-    # Section 6: Explanation and Warnings
-    section_6 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
+    # Section 7: Explanation and Warnings
+    section_7 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
 
 WARNINGS: Populate this array when:
 - You're uncertain about a genre interpretation from the metadata
@@ -283,7 +285,7 @@ WARNINGS: Populate this array when:
     # Ordering principle: definitions first, rules after.
     # Block 1 (ontology): role → arrangement rules → stem roles → genre
     # Block 2 (constraints): guards → artifact awareness → explanation/warnings
-    static_sections = [section_1, section_3, section_5, section_7, section_2, section_4, section_6]
+    static_sections = [section_1, section_2, section_3, section_4, section_5, section_6, section_7]
     return {
         "type": "text",
         "text": "\n\n".join(static_sections),
@@ -325,14 +327,15 @@ STRETCH WARNING ({stretch_pct:.1f}%):
 - Prefer stretching instruments over vocals (vocals degrade faster under stretch).
 - This is advisory -- use musical judgment."""
 
-    section_8 = f"""TRANSITIONS:
+    # Section 9: Transitions + Stretch Advisory
+    section_9 = f"""TRANSITIONS:
 - "cut": Hard switch with no overlap. Best for maximum impact when moving UP in energy (breakdown-to-drop, build-to-chorus) or for same-energy lateral transitions (verse-to-verse). Avoid for large energy drops — sounds broken.
 - "crossfade": Gradual blend over transition_beats. Default choice — works for ascending, descending, and same-level transitions. Prefer over cut when energy change is gradual.
 - "fade": Volume ramp from/to silence. Use for the first section (fade in) and last section (fade out). Also works for bringing vocals in from nothing.
 - Transitions should land on bar boundaries (multiples of 4 beats). A crossfade starting mid-bar sounds sloppy.{stretch_advisory}"""
 
-    # Section 9: Arrangement Templates
-    section_9 = """ARRANGEMENT TEMPLATES:
+    # Section 10: Arrangement Templates
+    section_10 = """ARRANGEMENT TEMPLATES:
 Template A (Standard Mashup): intro(~10%) -> verse(~25%) -> chorus(~20%) -> breakdown(~10%) -> chorus(~20%) -> outro(~15%)
 Template B (DJ Set): intro(~15%) -> verse(~25%) -> breakdown(~15%) -> drop(~30%) -> outro(~15%)
 Template C (Quick Hit): intro(~10%) -> chorus(~30%) -> verse(~15%) -> chorus(~30%) -> outro(~15%)
@@ -341,8 +344,8 @@ Template E (Extended Mix): intro(~8%) -> verse(~15%) -> chorus(~10%) -> breakdow
 
 If total beats < 48, use Template C. If 48-192, choose based on genre and energy profile. If > 192, use Template E."""
 
-    # Section 10: Tempo and Key Guidance
-    section_10 = f"""TEMPO MATCHING:
+    # Section 11: Tempo and Key Guidance
+    section_11 = f"""TEMPO MATCHING:
 Tempo is handled automatically by the system using an algorithm that balances vocal and instrumental stretch.
 You do NOT choose tempo_source — it is not in your tool schema. Focus on arrangement and stem roles.
 If the BPM gap is large (>20%), mention in your explanation that some tempo stretching was applied.
@@ -358,11 +361,11 @@ KEY COMPATIBILITY:
 PITCH LIMIT:
 - Do not plan shifts above +/-4 semitones. If compatibility would require more, keep original key and add a warning."""
 
-    # Section 11: Duration target
-    section_11 = f"""DURATION: Target = {TARGET_REMIX_DURATION_SECONDS}s = ~{total_available_beats} beats at {target_bpm:.0f} BPM (1 beat = {60 / target_bpm:.2f}s, 1 bar = 4 beats).
+    # Section 12: Duration target
+    section_12 = f"""DURATION: Target = {TARGET_REMIX_DURATION_SECONDS}s = ~{total_available_beats} beats at {target_bpm:.0f} BPM (1 beat = {60 / target_bpm:.2f}s, 1 bar = 4 beats).
 Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)}s will be REJECTED."""
 
-    # Section 12: Song Data (5 layers)
+    # Section 8: Song Data (5 layers)
     song_a_info = _build_song_info("Song A", song_a_meta, total_beats_a)
     song_b_info = _build_song_info("Song B", song_b_meta, total_beats_b)
     cross_song = _build_cross_song_layer(song_a_meta, song_b_meta, stretch_pct)
@@ -409,8 +412,9 @@ Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)}s will be RE
     if lyrics_layer:
         song_data_parts.append(lyrics_layer)
 
-    section_12 = "SONG DATA:\n\n" + "\n".join(song_data_parts)
+    section_8 = "SONG DATA:\n\n" + "\n".join(song_data_parts)
 
+    # Song data first so the LLM grounds itself in the material before reading rules.
     dynamic_sections = [section_8, section_9, section_10, section_11, section_12]
     return "\n\n".join(dynamic_sections)
 
