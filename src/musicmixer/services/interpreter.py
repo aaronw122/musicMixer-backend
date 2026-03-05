@@ -357,14 +357,8 @@ KEY COMPATIBILITY:
 PITCH LIMIT:
 - Do not plan shifts above +/-4 semitones. If compatibility would require more, keep original key and add a warning."""
 
-    # Section 9 (original): Ambiguity Handling + Duration (consolidated)
-    section_9 = f"""HANDLING AMBIGUOUS PROMPTS:
-- Vague ("make it cool"): Use energy profiles and section maps. Pick vocals from the song with higher vocal prominence. Use Standard Mashup template. Align sections to GOOD INSTRUMENTAL SOURCE annotations.
-- Contradictory ("vocals from both"): Acknowledge in warnings. Pick the better vocal source and explain why.
-- Genre jargon ("trap", "lo-fi"): Translate to volume/structure decisions. "Trap" = heavy bass, sparse hi-hats. "Lo-fi" = reduce other, gentle, Template D.
-- Time references ("guitar solo at 2:30"): Cross-reference with the section map to find the right region. Add a warning if unsure.
-
-DURATION: Target = {TARGET_REMIX_DURATION_SECONDS}s = ~{total_available_beats} beats at {target_bpm:.0f} BPM (1 beat = {60 / target_bpm:.2f}s, 1 bar = 4 beats).
+    # Section 9 (original): Duration target
+    section_9 = f"""DURATION: Target = {TARGET_REMIX_DURATION_SECONDS}s = ~{total_available_beats} beats at {target_bpm:.0f} BPM (1 beat = {60 / target_bpm:.2f}s, 1 bar = 4 beats).
 Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)}s will be REJECTED."""
 
     # Section 12 (original): Song Data (5 layers)

@@ -302,7 +302,6 @@ class TestBuildSystemPromptBlock:
             "SECTION RULES:",                          # Section 6
             "GENRE GUIDANCE",                          # Section 7
             "TEMPO MATCHING:",                         # Section 8
-            "HANDLING AMBIGUOUS PROMPTS",              # Section 9
             "STEM SEPARATION ARTIFACTS",               # Section 10
             "EXPLANATION: Write 2-3",                  # Section 11
             "SONG DATA:",                              # Section 12
@@ -323,6 +322,7 @@ class TestBuildSystemPromptBlock:
             "STEM LOUDNESS AWARENESS",
             "ENERGY BUDGET BY SECTION TYPE",
             "GAIN SCALE (linear amplitude)",
+            "HANDLING AMBIGUOUS PROMPTS",
         ]
         for marker in absent_markers:
             assert marker not in combined, f"Removed marker still present: {marker}"
@@ -350,7 +350,6 @@ class TestBuildSystemPromptBlock:
             "SECTION RULES:",
             "GENRE GUIDANCE",
             "TEMPO MATCHING:",
-            "HANDLING AMBIGUOUS PROMPTS",
             "STEM SEPARATION ARTIFACTS",
             "EXPLANATION: Write 2-3",
             "SONG DATA:",
