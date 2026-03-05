@@ -95,6 +95,7 @@ class SectionInfo:
     energy_trajectory: str          # e.g. "medium->high" (thirds, deduped)
     density: str                    # sparse|mid|full|full+extra
     vocal_status: str               # vox:yes|vox:no|vox:fading
+    vocal_prominence_db: Optional[float] = None  # dB above accompaniment, None if no vocals
     annotations: list[str] = field(default_factory=list)  # ["DROP","BUILD","GOOD INSTRUMENTAL SOURCE"]
 
 

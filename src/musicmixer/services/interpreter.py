@@ -269,11 +269,12 @@ MIXING ADVISORY:
     section_6 = """STEM SEPARATION ARTIFACTS:
 Stem separation is imperfect. Vocal stems may contain instrument traces. Instrumental stems may contain ghost vocals.
 Bleed is less noticeable during high-energy sections with multiple active stems. Prefer sections annotated GOOD INSTRUMENTAL SOURCE for clean instrumental passages.
-When Song B has prominent vocals (check Layer 1 vocal prominence):
-- Dominant vocals (>6 dB): limit purely-instrumental sections to 8 beats (2 bars) — ghost vocals will be obvious.
-- Moderate vocals (3-6 dB): limit to 16 beats (4 bars) — bleed is present but manageable with active drums/bass.
-- Buried vocals (<3 dB): up to 32 beats (8 bars) acceptable — bleed is minimal.
-These limits apply when Song A stems are all at "texture" or "silent". If Song A drums or bass are active at "background" or above, bleed is already masked — limits relax."""
+When Song B sections show vocal dB values in the section map above, those indicate bleed risk for instrumental passages:
+- Higher dB (>+6 dB): strong bleed — limit purely-instrumental passages using those stems.
+- Moderate dB (+3 to +6 dB): manageable bleed with active drums/bass masking.
+- Low dB (<+3 dB): minimal bleed.
+- vox:-- means no detected vocals — lowest bleed risk.
+These limits relax when Song A drums or bass are active at "background" or above, since they mask bleed."""
 
     # Section 7: Explanation and Warnings
     section_7 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
@@ -432,6 +433,18 @@ def _build_section_map(label: str, structure: object, total_bars: int) -> str:
 
         energy_display = sec.energy_trajectory if sec.energy_trajectory else sec.energy_level
 
+        # Render vocal column with dB values when available
+        if sec.vocal_prominence_db is not None and sec.vocal_status == "vox:fading":
+            vox_display = f"vox:{sec.vocal_prominence_db:+.0f}dB(fading)"
+        elif sec.vocal_prominence_db is not None:
+            vox_display = f"vox:{sec.vocal_prominence_db:+.0f}dB"
+        elif sec.vocal_prominence_db is None and sec.vocal_status == "vox:no":
+            vox_display = "vox:--"
+        elif sec.vocal_prominence_db is None and sec.vocal_status == "vox:fading":
+            vox_display = "vox:fading"
+        else:
+            vox_display = sec.vocal_status
+
         lines.append(
             f"  {sec.start_bar:>3}-{sec.end_bar:<3}  "
             f"{sec.bar_count:>2}b  "
@@ -439,7 +452,7 @@ def _build_section_map(label: str, structure: object, total_bars: int) -> str:
             f"{sec.label:<14} | "
             f"{energy_display:<16} | "
             f"{sec.density:<10} | "
-            f"{sec.vocal_status:<10}"
+            f"{vox_display:<18}"
             f"{annotations_str}"
         )
 
@@ -533,17 +546,6 @@ def _build_song_info(
         f'{label}: "{_song_filename(meta)}" -- '
         f"{meta.bpm:.0f} BPM, {key_str}, {dur_min}:{dur_sec:02d}, {total_bars} bars."
     )
-
-    # Vocal prominence
-    vocal_prom = getattr(meta, "vocal_prominence_db", None)
-    if vocal_prom is not None:
-        if vocal_prom > 6:
-            vox_desc = f"dominant, +{vocal_prom:.0f} dB above instrumental, clean separation"
-        elif vocal_prom > 3:
-            vox_desc = f"moderate, +{vocal_prom:.0f} dB above instrumental"
-        else:
-            vox_desc = f"buried, +{vocal_prom:.0f} dB above instrumental, bleed expected"
-        overview += f"\nVocals: {vox_desc}."
 
     # Energy profile from song_structure
     song_structure = getattr(meta, "song_structure", None)
@@ -735,25 +737,25 @@ def _build_few_shot_messages() -> list[dict]:
                 "SONG DATA:\n\n"
                 "=== LAYER 1: SONG OVERVIEW ===\n"
                 'Song A: "Night Ride" -- 120 BPM, Cmin, 4:00, 120 bars.\n'
-                "Vocals: dominant, +8 dB above instrumental, clean separation. Energy: compressed.\n"
+                "Energy: compressed.\n"
                 'Song B: "City Groove" -- 118 BPM, Cmaj, 3:30, 103 bars.\n'
-                "Vocals: moderate, +3 dB above instrumental. Energy: wide dynamic range.\n\n"
+                "Energy: wide dynamic range.\n\n"
                 "=== LAYER 2: SECTION MAP ===\n"
                 "Song A (120 bars):\n"
-                "    1-8    8b  0:00-0:16 | intro          | medium           | mid        | vox:no    | GOOD INSTRUMENTAL SOURCE\n"
-                "    9-40  32b  0:16-1:20 | verse          | high             | full       | vox:yes\n"
-                "   41-56  16b  1:20-1:52 | chorus         | high             | full+extra | vox:yes   | DROP\n"
-                "   57-72  16b  1:52-2:24 | verse          | high             | full       | vox:yes\n"
-                "   73-88  16b  2:24-2:56 | chorus         | high             | full+extra | vox:yes\n"
-                "   89-104 16b  2:56-3:28 | breakdown      | high->medium     | mid        | vox:yes\n"
-                "  105-120 16b  3:28-4:00 | outro          | medium->low      | sparse     | vox:fading\n"
+                "    1-8    8b  0:00-0:16 | intro          | medium           | mid        | vox:--              | GOOD INSTRUMENTAL SOURCE\n"
+                "    9-40  32b  0:16-1:20 | verse          | high             | full       | vox:+8dB\n"
+                "   41-56  16b  1:20-1:52 | chorus         | high             | full+extra | vox:+8dB            | DROP\n"
+                "   57-72  16b  1:52-2:24 | verse          | high             | full       | vox:+8dB\n"
+                "   73-88  16b  2:24-2:56 | chorus         | high             | full+extra | vox:+8dB\n"
+                "   89-104 16b  2:56-3:28 | breakdown      | high->medium     | mid        | vox:+6dB\n"
+                "  105-120 16b  3:28-4:00 | outro          | medium->low      | sparse     | vox:+4dB(fading)\n"
                 "Vocal gaps: 1-8\n"
                 "Song B (103 bars):\n"
-                "    1-8    8b  0:00-0:16 | intro          | low              | sparse     | vox:no    | GOOD INSTRUMENTAL SOURCE\n"
-                "    9-40  32b  0:16-1:21 | verse          | medium           | mid        | vox:yes\n"
-                "   41-72  32b  1:21-2:26 | instrumental   | high->peak       | full+extra | vox:no    | GOOD INSTRUMENTAL SOURCE\n"
-                "   73-88  16b  2:26-2:58 | verse          | medium           | mid        | vox:yes\n"
-                "   89-103 15b  2:58-3:30 | outro          | medium->low      | sparse     | vox:no\n"
+                "    1-8    8b  0:00-0:16 | intro          | low              | sparse     | vox:--              | GOOD INSTRUMENTAL SOURCE\n"
+                "    9-40  32b  0:16-1:21 | verse          | medium           | mid        | vox:+3dB\n"
+                "   41-72  32b  1:21-2:26 | instrumental   | high->peak       | full+extra | vox:--              | GOOD INSTRUMENTAL SOURCE\n"
+                "   73-88  16b  2:26-2:58 | verse          | medium           | mid        | vox:+3dB\n"
+                "   89-103 15b  2:58-3:30 | outro          | medium->low      | sparse     | vox:--\n"
                 "Vocal gaps: 1-8, 41-72, 89-103\n\n"
                 "=== LAYER 3: STEM CHARACTER ===\n"
                 "Song A stems: vocals: high-energy, full. drums: high-energy, full. bass: high-energy, full. other: high-energy, full. (guitar: negligible | piano: minor)\n"
@@ -828,17 +830,17 @@ def _build_few_shot_messages() -> list[dict]:
                 "SONG DATA:\n\n"
                 "=== LAYER 1: SONG OVERVIEW ===\n"
                 'Song A: "Slow Jam" -- 88 BPM, Gmin, 3:45, 82 bars.\n'
-                "Vocals: moderate, +4 dB above instrumental. Energy: moderate dynamics.\n"
+                "Energy: moderate dynamics.\n"
                 'Song B: "Upbeat Track" -- 98 BPM, Amin, 3:30, 86 bars.\n'
                 "Energy: wide dynamic range.\n\n"
                 "=== LAYER 2: SECTION MAP ===\n"
                 "Song B (86 bars):\n"
-                "    1-8    8b  0:00-0:15 | intro          | low              | sparse     | vox:no    | GOOD INSTRUMENTAL SOURCE\n"
-                "    9-32  24b  0:15-0:57 | verse          | medium           | mid        | vox:yes\n"
-                "   33-48  16b  0:57-1:21 | chorus         | high             | full       | vox:yes   | DROP\n"
-                "   49-64  16b  1:21-1:45 | instrumental   | high             | full       | vox:no    | GOOD INSTRUMENTAL SOURCE\n"
-                "   65-80  16b  1:45-2:09 | verse          | medium           | mid        | vox:yes\n"
-                "   81-86   6b  2:09-2:30 | outro          | medium->low      | sparse     | vox:no\n"
+                "    1-8    8b  0:00-0:15 | intro          | low              | sparse     | vox:--              | GOOD INSTRUMENTAL SOURCE\n"
+                "    9-32  24b  0:15-0:57 | verse          | medium           | mid        | vox:+4dB\n"
+                "   33-48  16b  0:57-1:21 | chorus         | high             | full       | vox:+4dB            | DROP\n"
+                "   49-64  16b  1:21-1:45 | instrumental   | high             | full       | vox:--              | GOOD INSTRUMENTAL SOURCE\n"
+                "   65-80  16b  1:45-2:09 | verse          | medium           | mid        | vox:+4dB\n"
+                "   81-86   6b  2:09-2:30 | outro          | medium->low      | sparse     | vox:--\n"
                 "Vocal gaps: 1-8, 49-64, 81-86\n\n"
                 "=== LAYER 4: CROSS-SONG ===\n"
                 "Loudness: similar levels.\n"

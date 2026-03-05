@@ -829,3 +829,143 @@ class TestDetectSections:
         assert len(sections) >= 1
         assert sections[0].start_bar == 0
         assert sections[-1].end_bar == n_bars
+
+
+# ---------------------------------------------------------------------------
+# Per-section vocal prominence
+# ---------------------------------------------------------------------------
+
+class TestPerSectionVocalProminence:
+    def _make_bar_boundaries(self, n_bars: int) -> np.ndarray:
+        """Create evenly spaced bar boundaries."""
+        return np.arange(n_bars + 1) * 1000
+
+    def test_label_sections_populates_vocal_prominence(self) -> None:
+        """label_sections should populate vocal_prominence_db on sections with enough vocal bars."""
+        n_bars = 32
+        bar_rms = _make_6stem_rms(n_bars, base=0.1)
+        # Strong vocals in second half
+        bar_rms["vocals"][:16] = 0.001
+        bar_rms["vocals"][16:] = 0.5
+
+        combined, buckets = compute_adaptive_buckets(bar_rms)
+        vocal_active = np.zeros(n_bars, dtype=bool)
+        vocal_active[16:] = True  # 16 vocal-active bars in second half
+        bar_bounds = self._make_bar_boundaries(n_bars)
+
+        sections = label_sections(
+            boundaries=np.array([16], dtype=np.intp),
+            total_bars=n_bars,
+            combined_energy=combined,
+            vocal_active=vocal_active,
+            bar_rms_per_stem=bar_rms,
+            buckets=buckets,
+            bpm=120.0,
+            bar_boundaries_frames=bar_bounds,
+        )
+
+        # Second section (bars 16-32) has 16 vocal-active bars -> should have prominence
+        vocal_section = [s for s in sections if s.start_bar == 16][0]
+        assert vocal_section.vocal_prominence_db is not None
+        assert isinstance(vocal_section.vocal_prominence_db, float)
+
+    def test_short_vocal_section_gets_none(self) -> None:
+        """Sections with fewer than 3 vocal-active bars get vocal_prominence_db = None."""
+        n_bars = 16
+        bar_rms = _make_6stem_rms(n_bars, base=0.1)
+        bar_rms["vocals"] = np.full(n_bars, 0.5, dtype=np.float64)
+
+        combined, buckets = compute_adaptive_buckets(bar_rms)
+        # Only 2 vocal-active bars in the first section (bars 0-8)
+        vocal_active = np.zeros(n_bars, dtype=bool)
+        vocal_active[6:8] = True  # 2 bars active in first section
+        vocal_active[8:] = True   # 8 bars active in second section
+        bar_bounds = self._make_bar_boundaries(n_bars)
+
+        sections = label_sections(
+            boundaries=np.array([8], dtype=np.intp),
+            total_bars=n_bars,
+            combined_energy=combined,
+            vocal_active=vocal_active,
+            bar_rms_per_stem=bar_rms,
+            buckets=buckets,
+            bpm=120.0,
+            bar_boundaries_frames=bar_bounds,
+        )
+
+        first_section = sections[0]
+        # Only 2 active bars -> below threshold of 3
+        assert first_section.vocal_prominence_db is None
+
+    def test_no_vocal_section_gets_none(self) -> None:
+        """Sections with no vocal activity get vocal_prominence_db = None."""
+        n_bars = 16
+        bar_rms = _make_6stem_rms(n_bars, base=0.1)
+
+        combined, buckets = compute_adaptive_buckets(bar_rms)
+        vocal_active = np.zeros(n_bars, dtype=bool)
+        bar_bounds = self._make_bar_boundaries(n_bars)
+
+        sections = label_sections(
+            boundaries=np.array([], dtype=np.intp),
+            total_bars=n_bars,
+            combined_energy=combined,
+            vocal_active=vocal_active,
+            bar_rms_per_stem=bar_rms,
+            buckets=buckets,
+            bpm=120.0,
+            bar_boundaries_frames=bar_bounds,
+        )
+
+        for sec in sections:
+            assert sec.vocal_prominence_db is None
+
+    def test_merge_sections_clears_prominence(self) -> None:
+        """merge_sections sets vocal_prominence_db to None on merged sections."""
+        sections = [
+            SectionInfo(0, 8, 8, 0.0, 4.0, "verse", "medium", "medium",
+                        "mid", "vox:yes", vocal_prominence_db=5.0),
+            SectionInfo(8, 16, 8, 4.0, 8.0, "verse", "medium", "medium",
+                        "mid", "vox:yes", vocal_prominence_db=7.0),
+        ]
+        merged = merge_sections(sections)
+        assert len(merged) == 1
+        # Merged section should have None prominence (lost raw data)
+        assert merged[0].vocal_prominence_db is None
+
+
+class TestSectionMapRendering:
+    def test_db_rendering(self) -> None:
+        """_build_section_map renders vox:+XdB format for sections with prominence."""
+        from musicmixer.models import SongStructure, VocalGap
+        from musicmixer.services.interpreter import _build_section_map
+
+        sections = [
+            SectionInfo(0, 8, 8, 0.0, 4.0, "intro", "low", "low",
+                        "sparse", "vox:no", vocal_prominence_db=None),
+            SectionInfo(8, 24, 16, 4.0, 12.0, "verse", "medium", "medium",
+                        "mid", "vox:yes", vocal_prominence_db=6.3),
+            SectionInfo(24, 32, 8, 12.0, 16.0, "outro", "low", "low->low",
+                        "sparse", "vox:fading", vocal_prominence_db=3.0),
+        ]
+        structure = SongStructure(sections=sections, vocal_gaps=[], total_bars=32)
+        result = _build_section_map("Song A", structure, 32)
+
+        assert "vox:--" in result
+        assert "vox:+6dB" in result
+        assert "vox:+3dB(fading)" in result
+
+    def test_no_prominence_fading_fallback(self) -> None:
+        """Sections with vocal_status=fading but no prominence render as vox:fading."""
+        from musicmixer.models import SongStructure
+        from musicmixer.services.interpreter import _build_section_map
+
+        sections = [
+            SectionInfo(0, 8, 8, 0.0, 4.0, "outro", "low", "low",
+                        "sparse", "vox:fading", vocal_prominence_db=None),
+        ]
+        structure = SongStructure(sections=sections, vocal_gaps=[], total_bars=8)
+        result = _build_section_map("Song A", structure, 8)
+
+        assert "vox:fading" in result
+        assert "dB" not in result
