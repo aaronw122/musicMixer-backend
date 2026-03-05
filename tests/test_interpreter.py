@@ -7,8 +7,9 @@ import pytest
 
 from musicmixer.models import AudioMetadata, EnergyBuckets, IntentPlan, IntentSection, LyricLine, LyricsData, RemixPlan, Section, StemAnalysis
 from musicmixer.services.interpreter import (
+    _build_dynamic_context,
     _build_few_shot_messages,
-    _build_system_prompt_blocks,
+    _build_system_prompt_block,
     _validate_intent_plan,
     default_arrangement,
     generate_fallback_plan,
@@ -210,7 +211,7 @@ def _make_lyrics(is_synced: bool = True, lines: list[LyricLine] | None = None) -
     )
 
 
-def _default_prompt_args(
+def _default_dynamic_args(
     bpm_a: float = 120.0,
     bpm_b: float = 118.0,
     duration_a: float = 240.0,
@@ -219,7 +220,7 @@ def _default_prompt_args(
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
 ) -> dict:
-    """Build kwargs dict for _build_system_prompt_blocks."""
+    """Build kwargs dict for _build_dynamic_context."""
     meta_a = _make_metadata(bpm=bpm_a, duration=duration_a)
     meta_b = _make_metadata(bpm=bpm_b, duration=duration_b)
     from musicmixer.services.interpreter import _compute_key_guidance, estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
@@ -229,7 +230,6 @@ def _default_prompt_args(
     return dict(
         song_a_meta=meta_a,
         song_b_meta=meta_b,
-        key_matching_available=_key_available,
         key_matching_detail=key_detail,
         total_available_beats=total_available_beats,
         stretch_pct=stretch_pct,
@@ -243,73 +243,59 @@ def _default_prompt_args(
 # ---------------------------------------------------------------------------
 
 
-class TestBuildSystemPromptBlocks:
-    """Tests for _build_system_prompt_blocks()."""
+class TestBuildSystemPromptBlock:
+    """Tests for _build_system_prompt_block() and _build_dynamic_context()."""
 
-    def test_returns_two_blocks(self):
-        """Returns exactly 2 content block dicts."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        assert isinstance(blocks, list)
-        assert len(blocks) == 2
+    def test_returns_single_block(self):
+        """Returns a single content block dict."""
+        block = _build_system_prompt_block()
+        assert isinstance(block, dict)
+        assert block["type"] == "text"
 
-    def test_first_block_has_cache_control(self):
-        """First block has cache_control: {type: ephemeral}."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        assert blocks[0]["type"] == "text"
-        assert blocks[0]["cache_control"] == {"type": "ephemeral"}
-
-    def test_second_block_no_cache_control(self):
-        """Second block does NOT have cache_control."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        assert blocks[1]["type"] == "text"
-        assert "cache_control" not in blocks[1]
+    def test_block_has_cache_control(self):
+        """Block has cache_control: {type: ephemeral}."""
+        block = _build_system_prompt_block()
+        assert block["cache_control"] == {"type": "ephemeral"}
 
     def test_static_block_is_constant(self):
-        """Different songs/BPMs produce identical block[0] text (cached block never changes)."""
-        args1 = _default_prompt_args(bpm_a=90.0, bpm_b=140.0, duration_a=180.0, duration_b=300.0)
-        args2 = _default_prompt_args(bpm_a=120.0, bpm_b=100.0, duration_a=240.0, duration_b=200.0)
-        blocks1 = _build_system_prompt_blocks(**args1)
-        blocks2 = _build_system_prompt_blocks(**args2)
-        assert blocks1[0]["text"] == blocks2[0]["text"]
+        """Calling _build_system_prompt_block() always returns the same text."""
+        block1 = _build_system_prompt_block()
+        block2 = _build_system_prompt_block()
+        assert block1["text"] == block2["text"]
 
-    def test_dynamic_block_varies_with_song_data(self):
-        """Dynamic block changes when song metadata changes."""
-        args1 = _default_prompt_args(bpm_a=90.0, bpm_b=140.0)
-        args2 = _default_prompt_args(bpm_a=120.0, bpm_b=100.0)
-        blocks1 = _build_system_prompt_blocks(**args1)
-        blocks2 = _build_system_prompt_blocks(**args2)
-        assert blocks1[1]["text"] != blocks2[1]["text"]
+    def test_dynamic_context_varies_with_song_data(self):
+        """Dynamic context changes when song metadata changes."""
+        args1 = _default_dynamic_args(bpm_a=90.0, bpm_b=140.0)
+        args2 = _default_dynamic_args(bpm_a=120.0, bpm_b=100.0)
+        ctx1 = _build_dynamic_context(**args1)
+        ctx2 = _build_dynamic_context(**args2)
+        assert ctx1 != ctx2
 
-    def test_dynamic_block_contains_song_metadata(self):
-        """Song names/BPMs appear in block[1] only, not block[0]."""
-        args = _default_prompt_args(bpm_a=95.0, bpm_b=125.0)
-        blocks = _build_system_prompt_blocks(**args)
-        # BPM values appear in dynamic block (song data)
-        assert "95 BPM" in blocks[1]["text"]
-        assert "125 BPM" in blocks[1]["text"]
+    def test_dynamic_context_contains_song_metadata(self):
+        """Song BPMs appear in dynamic context, not in static block."""
+        args = _default_dynamic_args(bpm_a=95.0, bpm_b=125.0)
+        ctx = _build_dynamic_context(**args)
+        block = _build_system_prompt_block()
+        # BPM values appear in dynamic context (song data)
+        assert "95 BPM" in ctx
+        assert "125 BPM" in ctx
         # BPM values should NOT appear in static block
-        assert "95 BPM" not in blocks[0]["text"]
-        assert "125 BPM" not in blocks[0]["text"]
+        assert "95 BPM" not in block["text"]
+        assert "125 BPM" not in block["text"]
 
-    def test_blocks_contain_all_expected_sections(self):
-        """Combined blocks text contains all expected section markers.
-
-        Verifies that every section of the system prompt is present across
-        the two blocks (static + dynamic).
-        """
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        combined = blocks[0]["text"] + "\n\n" + blocks[1]["text"]
+    def test_combined_contains_all_expected_sections(self):
+        """Combined static + dynamic text contains all expected section markers."""
+        block = _build_system_prompt_block()
+        args = _default_dynamic_args()
+        ctx = _build_dynamic_context(**args)
+        combined = block["text"] + "\n\n" + ctx
 
         # Key strings that uniquely identify each section
         section_markers = [
             "You are a music remix planner",           # Section 1
             "CRITICAL MIXING RULES",                   # Section 2
-            "STEM ROLES:",                             # Section 3 (new)
-            "ENERGY LEVELS:",                          # Section 3 (new)
+            "STEM ROLE GUIDELINES",                    # Section 3
+            "ENERGY LEVELS AND ARC",                   # Section 3
             "MIXING ADVISORY",                         # Section 3
             "TRANSITIONS:",                            # Section 4
             "Template A (Standard Mashup)",            # Section 5
@@ -320,16 +306,17 @@ class TestBuildSystemPromptBlocks:
             "STEM SEPARATION ARTIFACTS",               # Section 10
             "EXPLANATION: Write 2-3",                  # Section 11
             "SONG DATA:",                              # Section 12
-            "1 bar = 4 beats",                         # Section 13
+            "1 bar = 4 beats",                         # Duration in Section 9
         ]
         for marker in section_markers:
-            assert marker in combined, f"Marker missing from blocks: {marker}"
+            assert marker in combined, f"Marker missing: {marker}"
 
     def test_removed_gain_sections_absent(self):
         """Gain-specific sections are no longer in the system prompt."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        combined = blocks[0]["text"] + "\n\n" + blocks[1]["text"]
+        block = _build_system_prompt_block()
+        args = _default_dynamic_args()
+        ctx = _build_dynamic_context(**args)
+        combined = block["text"] + "\n\n" + ctx
 
         absent_markers = [
             "STEM GAIN REFERENCE",
@@ -346,17 +333,18 @@ class TestBuildSystemPromptBlocks:
         ("with_stretch_above_12", dict(stretch_pct=15.0)),
         ("with_key_detail", dict(bpm_a=100.0, bpm_b=105.0)),
     ])
-    def test_blocks_contain_all_sections_parameterized(self, variant, kwargs):
-        """All expected section markers present in blocks output for all variants."""
-        args = _default_prompt_args(**kwargs)
-        blocks = _build_system_prompt_blocks(**args)
-        combined = blocks[0]["text"] + "\n\n" + blocks[1]["text"]
+    def test_combined_contains_all_sections_parameterized(self, variant, kwargs):
+        """All expected section markers present for all variants."""
+        block = _build_system_prompt_block()
+        args = _default_dynamic_args(**kwargs)
+        ctx = _build_dynamic_context(**args)
+        combined = block["text"] + "\n\n" + ctx
 
         # These markers must be present regardless of variant
         required_markers = [
             "You are a music remix planner",
             "CRITICAL MIXING RULES",
-            "STEM ROLES:",
+            "STEM ROLE GUIDELINES",
             "MIXING ADVISORY",
             "TRANSITIONS:",
             "SECTION RULES:",
@@ -370,22 +358,22 @@ class TestBuildSystemPromptBlocks:
         ]
         for marker in required_markers:
             assert marker in combined, (
-                f"Variant {variant}: marker missing from blocks: {marker}"
+                f"Variant {variant}: marker missing: {marker}"
             )
 
-    def test_stretch_advisory_in_dynamic_block(self):
-        """When stretch_pct > 12, the stretch warning appears in dynamic block only."""
-        args = _default_prompt_args(stretch_pct=18.5)
-        blocks = _build_system_prompt_blocks(**args)
-        assert "STRETCH WARNING (18.5%)" in blocks[1]["text"]
-        assert "STRETCH WARNING" not in blocks[0]["text"]
+    def test_stretch_advisory_in_dynamic_context(self):
+        """When stretch_pct > 12, the stretch warning appears in dynamic context only."""
+        args = _default_dynamic_args(stretch_pct=18.5)
+        ctx = _build_dynamic_context(**args)
+        block = _build_system_prompt_block()
+        assert "STRETCH WARNING (18.5%)" in ctx
+        assert "STRETCH WARNING" not in block["text"]
 
     def test_stem_roles_guidance_in_static_block(self):
-        """STEM ROLES section appears in static (cached) block."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        static_text = blocks[0]["text"]
-        assert "STEM ROLES:" in static_text
+        """STEM ROLE GUIDELINES section appears in static (cached) block."""
+        block = _build_system_prompt_block()
+        static_text = block["text"]
+        assert "STEM ROLE GUIDELINES" in static_text
         assert '"lead"' in static_text
         assert '"support"' in static_text
         assert '"background"' in static_text
@@ -519,11 +507,9 @@ class TestInterpretPromptCaching:
             system_arg = call_kwargs.kwargs["system"]
 
             assert isinstance(system_arg, list), f"system= should be list, got {type(system_arg)}"
-            assert len(system_arg) == 2, f"system= should have 2 blocks, got {len(system_arg)}"
+            assert len(system_arg) == 1, f"system= should have 1 block, got {len(system_arg)}"
             assert system_arg[0]["type"] == "text"
             assert system_arg[0]["cache_control"] == {"type": "ephemeral"}
-            assert system_arg[1]["type"] == "text"
-            assert "cache_control" not in system_arg[1]
 
             # Verify the plan is an IntentPlan
             assert isinstance(plan, IntentPlan)
@@ -612,18 +598,16 @@ class TestPromptIntentText:
 
     def test_vocal_instrumental_balance_uses_roles(self):
         """Static block contains Rule 2 about vocal-instrumental balance using role language."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        static_text = blocks[0]["text"]
+        block = _build_system_prompt_block()
+        static_text = block["text"]
         assert "VOCAL-INSTRUMENTAL BALANCE" in static_text
         assert "FULL BAND" in static_text
         assert '"lead"' in static_text
 
     def test_role_variation_rule_in_static_block(self):
         """Static block contains Rule 7 about role variation (not gain variation)."""
-        args = _default_prompt_args()
-        blocks = _build_system_prompt_blocks(**args)
-        static_text = blocks[0]["text"]
+        block = _build_system_prompt_block()
+        static_text = block["text"]
         assert "ROLE VARIATION" in static_text
 
     def test_few_shot_sections_have_energy_and_roles(self):
