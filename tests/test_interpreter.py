@@ -299,7 +299,7 @@ class TestBuildSystemPromptBlock:
             "MIXING ADVISORY",                         # Section 3
             "TRANSITIONS:",                            # Section 4
             "Template A (Standard Mashup)",            # Section 5
-            "SECTION RULES:",                          # Section 6
+            "ARRANGEMENT RULES",                       # Section 6
             "GENRE GUIDANCE",                          # Section 7
             "TEMPO MATCHING:",                         # Section 8
             "STEM SEPARATION ARTIFACTS",               # Section 10
@@ -347,7 +347,7 @@ class TestBuildSystemPromptBlock:
             "STEM ROLE GUIDELINES",
             "MIXING ADVISORY",
             "TRANSITIONS:",
-            "SECTION RULES:",
+            "ARRANGEMENT RULES",
             "GENRE GUIDANCE",
             "TEMPO MATCHING:",
             "STEM SEPARATION ARTIFACTS",
