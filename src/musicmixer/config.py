@@ -1,4 +1,5 @@
 from pathlib import Path
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,8 @@ class Settings(BaseSettings):
 
     # Storage
     data_dir: Path = Path("data")
+    max_concurrent_mixes: int = Field(default=1, ge=1, le=8)
+    distributed_limiter_enabled: bool = False
 
     # Stem separation
     stem_backend: str = "modal"  # "modal" or "local"
@@ -22,7 +25,6 @@ class Settings(BaseSettings):
     stem_cache_enabled: bool = True
     stem_cache_max_gb: float = 10.0
     stem_cache_dir: Path = Path("data/stem_cache")
-    distributed_limiter_enabled: bool = False
 
     # Output
     output_format: str = "mp3"

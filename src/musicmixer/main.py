@@ -58,8 +58,10 @@ async def lifespan(app: FastAPI):
     for subdir in ("uploads", "stems", "remixes"):
         (settings.data_dir / subdir).mkdir(parents=True, exist_ok=True)
 
-    # Thread pool for pipeline execution (max 1 concurrent remix)
-    app.state.executor = ThreadPoolExecutor(max_workers=1)
+    mix_capacity = settings.max_concurrent_mixes
+
+    # Thread pool for pipeline execution (bounded by configured mix capacity)
+    app.state.executor = ThreadPoolExecutor(max_workers=mix_capacity)
     # Thread pool for SSE blocking reads (up to 4 concurrent SSE readers)
     app.state.sse_executor = ThreadPoolExecutor(
         max_workers=4, thread_name_prefix="sse-reader"
@@ -68,10 +70,10 @@ async def lifespan(app: FastAPI):
     app.state.sessions = {}
     # Lock protecting the sessions dict for thread safety
     app.state.sessions_lock = threading.Lock()
-    # Lock ensuring only one pipeline runs at a time (authoritative gate)
-    app.state.processing_lock = threading.Lock()
+    # Shared global capacity gate across ALL remix creation endpoints
+    app.state.processing_lock = threading.BoundedSemaphore(value=mix_capacity)
 
-    logger.info("musicMixer backend started")
+    logger.info("musicMixer backend started (max_concurrent_mixes=%d)", mix_capacity)
     yield
 
     logger.info("musicMixer backend shutting down")
