@@ -10,6 +10,7 @@ falls back to the provided fallback plan.
 """
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
@@ -27,25 +28,34 @@ CIRCUIT_BREAKER_COOLDOWN_SECONDS = 600  # 10 minutes
 # Module-level circuit breaker state
 _consecutive_fallbacks: int = 0
 _circuit_open_since: float | None = None
+_circuit_breaker_lock = threading.Lock()
 
 
 def _reset_circuit_breaker() -> None:
     """Reset circuit breaker state after a successful run."""
     global _consecutive_fallbacks, _circuit_open_since
-    _consecutive_fallbacks = 0
-    _circuit_open_since = None
+    with _circuit_breaker_lock:
+        _consecutive_fallbacks = 0
+        _circuit_open_since = None
 
 
 def _record_fallback() -> None:
     """Record a fallback and potentially open the circuit breaker."""
     global _consecutive_fallbacks, _circuit_open_since
-    _consecutive_fallbacks += 1
-    if _consecutive_fallbacks >= CIRCUIT_BREAKER_THRESHOLD and _circuit_open_since is None:
-        _circuit_open_since = time.monotonic()
+    should_log_open = False
+    fallback_count = 0
+    with _circuit_breaker_lock:
+        _consecutive_fallbacks += 1
+        fallback_count = _consecutive_fallbacks
+        if fallback_count >= CIRCUIT_BREAKER_THRESHOLD and _circuit_open_since is None:
+            _circuit_open_since = time.monotonic()
+            should_log_open = True
+
+    if should_log_open:
         logger.warning(
             "Taste stage circuit breaker OPEN after %d consecutive fallbacks. "
             "Will disable for %ds.",
-            _consecutive_fallbacks,
+            fallback_count,
             CIRCUIT_BREAKER_COOLDOWN_SECONDS,
         )
 
@@ -53,18 +63,39 @@ def _record_fallback() -> None:
 def _is_circuit_open() -> bool:
     """Check if circuit breaker is open (taste stage disabled)."""
     global _consecutive_fallbacks, _circuit_open_since
-    if _circuit_open_since is None:
-        return False
-    elapsed = time.monotonic() - _circuit_open_since
-    if elapsed >= CIRCUIT_BREAKER_COOLDOWN_SECONDS:
+    cooldown_elapsed = False
+    elapsed = 0.0
+    with _circuit_breaker_lock:
+        if _circuit_open_since is None:
+            return False
+        elapsed = time.monotonic() - _circuit_open_since
+        if elapsed >= CIRCUIT_BREAKER_COOLDOWN_SECONDS:
+            _consecutive_fallbacks = 0
+            _circuit_open_since = None
+            cooldown_elapsed = True
+        else:
+            return True
+
+    if cooldown_elapsed:
         # Cooldown elapsed, reset and allow retry
         logger.info(
             "Taste stage circuit breaker cooldown elapsed (%.0fs). Resetting.",
             elapsed,
         )
-        _reset_circuit_breaker()
-        return False
-    return True
+    return False
+
+
+def _get_circuit_breaker_state() -> tuple[int, float | None]:
+    """Snapshot current circuit breaker state for assertions."""
+    with _circuit_breaker_lock:
+        return _consecutive_fallbacks, _circuit_open_since
+
+
+def _set_circuit_open_since(value: float | None) -> None:
+    """Set open timestamp with lock protection (test helper)."""
+    global _circuit_open_since
+    with _circuit_breaker_lock:
+        _circuit_open_since = value
 
 
 @dataclass

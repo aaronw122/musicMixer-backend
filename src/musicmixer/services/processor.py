@@ -11,6 +11,7 @@ import logging
 import math
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -32,6 +33,7 @@ GATE_FLOOR_DB = -45.0  # Below this RMS, assume silence (don't compress)
 
 # Module-level cache for rubberband version
 _rubberband_version: int | None = None
+_rubberband_version_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -91,31 +93,36 @@ def check_rubberband_version() -> int:
     if _rubberband_version is not None:
         return _rubberband_version
 
-    try:
-        result = subprocess.run(
-            ["rubberband", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        # rubberband --version outputs just the version number, e.g. "4.0.0"
-        # or may output "Rubber Band Library version X.Y.Z" on some builds
-        version_text = result.stdout.strip() + result.stderr.strip()
-        # Find first digit sequence that looks like a version
-        for part in version_text.split():
-            if part[0].isdigit():
-                major = int(part.split(".")[0])
-                _rubberband_version = major
-                logger.info("Detected rubberband v%d (%s)", major, part)
-                return major
-        # Fallback: couldn't parse
-        logger.warning("Could not parse rubberband version from: %s", version_text)
-        _rubberband_version = 3
-        return 3
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-        logger.warning("rubberband version check failed: %s", e)
-        _rubberband_version = 3
-        return 3
+    with _rubberband_version_lock:
+        # Double-check after acquiring lock so only one caller initializes cache.
+        if _rubberband_version is not None:
+            return _rubberband_version
+
+        try:
+            result = subprocess.run(
+                ["rubberband", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            # rubberband --version outputs just the version number, e.g. "4.0.0"
+            # or may output "Rubber Band Library version X.Y.Z" on some builds
+            version_text = result.stdout.strip() + result.stderr.strip()
+            # Find first digit sequence that looks like a version
+            for part in version_text.split():
+                if part and part[0].isdigit():
+                    major = int(part.split(".")[0])
+                    _rubberband_version = major
+                    logger.info("Detected rubberband v%d (%s)", major, part)
+                    return major
+            # Fallback: couldn't parse
+            logger.warning("Could not parse rubberband version from: %s", version_text)
+            _rubberband_version = 3
+            return 3
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            logger.warning("rubberband version check failed: %s", e)
+            _rubberband_version = 3
+            return 3
 
 
 def rubberband_process(

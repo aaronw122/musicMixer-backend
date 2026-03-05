@@ -9,7 +9,9 @@ Tests cover:
 - TasteStageLog Pydantic model validation
 """
 
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -21,7 +23,10 @@ from musicmixer.services.taste_stage import (
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     CIRCUIT_BREAKER_THRESHOLD,
     TasteStageResult,
+    _get_circuit_breaker_state,
     _reset_circuit_breaker,
+    _set_circuit_open_since,
+    _record_fallback,
     run_taste_stage,
 )
 
@@ -318,8 +323,6 @@ class TestCircuitBreaker:
 
     def test_reenables_after_cooldown(self):
         """Circuit breaker re-enables after cooldown period."""
-        import musicmixer.services.taste_stage as ts_module
-
         meta_a = _make_audio_metadata()
         meta_b = _make_audio_metadata(bpm=130.0)
         fallback = _make_remix_plan()
@@ -342,7 +345,9 @@ class TestCircuitBreaker:
         assert result.fallback_reason == "circuit breaker open"
 
         # Simulate cooldown elapsed by backdating the open timestamp
-        ts_module._circuit_open_since = time.monotonic() - CIRCUIT_BREAKER_COOLDOWN_SECONDS - 1
+        _set_circuit_open_since(
+            time.monotonic() - CIRCUIT_BREAKER_COOLDOWN_SECONDS - 1,
+        )
 
         # Now set up a successful path
         mock_planner.generate_candidates = MagicMock(return_value=[selected])
@@ -359,6 +364,30 @@ class TestCircuitBreaker:
             result = run_taste_stage(meta_a, meta_b, "test", fallback_plan=fallback)
             assert result.fallback_triggered is False
             assert result.selection_method == "heuristic"
+
+    def test_record_fallback_thread_safe_under_concurrency(self):
+        """Concurrent fallback recording preserves an exact counter."""
+        workers = 16
+        increments_per_worker = 1000
+        expected = workers * increments_per_worker
+
+        original_switch_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            def _worker():
+                for _ in range(increments_per_worker):
+                    _record_fallback()
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_worker) for _ in range(workers)]
+                for future in futures:
+                    future.result()
+        finally:
+            sys.setswitchinterval(original_switch_interval)
+
+        consecutive_fallbacks, circuit_open_since = _get_circuit_breaker_state()
+        assert consecutive_fallbacks == expected
+        assert circuit_open_since is not None
 
 
 class TestSuccessfulRun:
