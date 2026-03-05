@@ -46,7 +46,11 @@ def _pipeline_wrapper(
     song_a_original_filename: str = "",
     song_b_original_filename: str = "",
 ) -> None:
-    """Runs the pipeline in a background thread. Releases processing_lock on exit."""
+    """Runs the pipeline in a background thread.
+
+    Ownership note: after successful executor.submit(), this wrapper is the sole
+    owner of the acquired processing slot and MUST release it on exit.
+    """
     try:
         session.status = "processing"
         from musicmixer.services.pipeline import run_pipeline
@@ -157,7 +161,8 @@ def _youtube_pipeline_wrapper(
     A lock-guarded monotonic progress tracker prevents progress values from
     jumping backward when the two callbacks interleave.
 
-    Releases processing_lock on exit.
+    Ownership note: after successful executor.submit(), this wrapper is the sole
+    owner of the acquired processing slot and MUST release it on exit.
     """
     try:
         session.status = "processing"
@@ -304,7 +309,8 @@ def create_youtube_remix(
     """Accept two YouTube URLs, download audio, and start remix pipeline.
 
     Both URLs must be valid YouTube links. Returns session_id immediately.
-    Only one remix can be processed at a time. Returns 409 if another is in progress.
+    Shared global capacity gate applies across both create endpoints.
+    Returns 409 if capacity is currently full.
     """
     if not settings.youtube_enabled:
         raise HTTPException(403, "YouTube input is disabled")
@@ -313,10 +319,12 @@ def create_youtube_remix(
     _validate_youtube_url(body.url_a)
     _validate_youtube_url(body.url_b)
 
-    # Fail-fast: check processing lock BEFORE downloading (don't waste time if busy)
+    # Fail-fast: acquire a global capacity slot BEFORE downloading
+    # (don't waste time if capacity is already full).
     processing_lock = request.app.state.processing_lock
     if not processing_lock.acquire(blocking=False):
         raise HTTPException(409, "Another remix is being processed")
+    slot_transferred = False
 
     try:
         # Generate session ID
@@ -337,14 +345,13 @@ def create_youtube_remix(
             session,
             processing_lock,
         )
+        slot_transferred = True
 
         return {"session_id": session_id}
-
-    except HTTPException:
-        raise
-    except Exception:
-        processing_lock.release()
-        raise
+    finally:
+        # If submit failed, release in request thread (ownership never transferred).
+        if not slot_transferred:
+            processing_lock.release()
 
 
 @router.post("/remix")
@@ -356,7 +363,8 @@ def create_remix(
 ):
     """Accept two songs, start async pipeline, return session ID immediately.
 
-    Only one remix can be processed at a time. Returns 409 if another is in progress.
+    Shared global capacity gate applies across both create endpoints.
+    Returns 409 if capacity is currently full.
     """
     max_bytes = settings.max_file_size_mb * 1024 * 1024
 
@@ -370,10 +378,11 @@ def create_remix(
                 f"Allowed: {settings.allowed_extensions}",
             )
 
-    # Acquire processing lock (non-blocking) -- authoritative single-remix gate
+    # Acquire a global capacity slot (non-blocking) -- authoritative gate
     processing_lock = request.app.state.processing_lock
     if not processing_lock.acquire(blocking=False):
         raise HTTPException(409, "Another remix is being processed")
+    slot_transferred = False
 
     try:
         # Generate session ID
@@ -399,7 +408,6 @@ def create_remix(
         ]:
             data = file.file.read()
             if len(data) > max_bytes:
-                processing_lock.release()
                 raise HTTPException(
                     413, f"{label} exceeds {settings.max_file_size_mb}MB limit"
                 )
@@ -429,16 +437,13 @@ def create_remix(
             song_a_original_filename,
             song_b_original_filename,
         )
+        slot_transferred = True
 
         return {"session_id": session_id}
-
-    except HTTPException:
-        # Re-raise HTTP exceptions (like 413) without double-releasing the lock
-        raise
-    except Exception:
-        # If anything unexpected fails before submit, release the lock
-        processing_lock.release()
-        raise
+    finally:
+        # If submit failed (or we errored pre-submit), release in request thread.
+        if not slot_transferred:
+            processing_lock.release()
 
 
 @router.get("/remix/{session_id}/progress")
