@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -116,6 +117,18 @@ def _post_remix(client):
     )
 
 
+def _post_youtube(client):
+    """Helper to POST a YouTube remix."""
+    return client.post(
+        "/api/remix/youtube",
+        json={
+            "url_a": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "url_b": "https://www.youtube.com/watch?v=9bZkp7q19f0",
+            "prompt": "test remix",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests: POST /api/remix returns session_id immediately
 # ---------------------------------------------------------------------------
@@ -160,6 +173,78 @@ class TestPostRemixAsync:
             # Release the slow pipeline so cleanup happens
             go_event.set()
             done_event.wait(timeout=5)
+
+    def test_mixed_endpoints_share_global_capacity_gate(self, client):
+        """Two mixed endpoint requests may be accepted at capacity=2; third gets 409."""
+        go_event = threading.Event()
+        done_event = threading.Event()
+        done_count = 0
+        done_lock = threading.Lock()
+
+        def _mark_done():
+            nonlocal done_count
+            with done_lock:
+                done_count += 1
+                if done_count == 2:
+                    done_event.set()
+
+        def _slow_pipeline_wrapper(
+            session_id,
+            song_a_path,
+            song_b_path,
+            prompt,
+            session,
+            processing_lock,
+            *_args,
+            **_kwargs,
+        ):
+            try:
+                session.status = "processing"
+                go_event.wait(timeout=5)
+            finally:
+                processing_lock.release()
+                _mark_done()
+
+        def _slow_youtube_wrapper(
+            session_id,
+            url_a,
+            url_b,
+            prompt,
+            session,
+            processing_lock,
+        ):
+            try:
+                session.status = "processing"
+                go_event.wait(timeout=5)
+            finally:
+                processing_lock.release()
+                _mark_done()
+
+        old_executor = client.app.state.executor
+        old_executor.shutdown(wait=False, cancel_futures=True)
+        client.app.state.executor = ThreadPoolExecutor(max_workers=2)
+        client.app.state.processing_lock = threading.BoundedSemaphore(value=2)
+
+        with patch(
+            "musicmixer.api.remix._pipeline_wrapper",
+            side_effect=_slow_pipeline_wrapper,
+        ), patch(
+            "musicmixer.api.remix._youtube_pipeline_wrapper",
+            side_effect=_slow_youtube_wrapper,
+        ):
+            try:
+                resp1 = _post_remix(client)
+                assert resp1.status_code == 200
+
+                resp2 = _post_youtube(client)
+                assert resp2.status_code == 200
+
+                resp3 = _post_remix(client)
+                assert resp3.status_code == 409
+                assert "Another remix" in resp3.json()["detail"]
+            finally:
+                go_event.set()
+                done_event.wait(timeout=5)
 
 
 # ---------------------------------------------------------------------------

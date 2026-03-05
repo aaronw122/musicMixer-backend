@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +21,7 @@ import soundfile as sf
 from musicmixer.services.processor import (
     apply_fades,
     bandpass_filter,
+    check_rubberband_version,
     compute_tempo_plan,
     cross_song_level_match,
     export_mp3,
@@ -135,6 +139,45 @@ class TestTrimAudio:
         trimmed = trim_audio(audio, sr, start_sec=1.0, end_sec=10.0)
         expected_length = int(1.0 * sr)
         assert trimmed.shape[0] == expected_length
+
+
+class TestRubberbandVersionCache:
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        import musicmixer.services.processor as processor_module
+
+        processor_module._rubberband_version = None
+        yield
+        processor_module._rubberband_version = None
+
+    def test_check_rubberband_version_serializes_cache_init(self, monkeypatch):
+        """Concurrent callers should initialize the version cache once."""
+        import musicmixer.services.processor as processor_module
+
+        workers = 20
+        start_barrier = threading.Barrier(workers)
+        call_lock = threading.Lock()
+        subprocess_calls = 0
+
+        def _fake_run(cmd, capture_output, text, timeout):
+            nonlocal subprocess_calls
+            with call_lock:
+                subprocess_calls += 1
+            time.sleep(0.02)
+            return SimpleNamespace(stdout="4.0.0\n", stderr="")
+
+        monkeypatch.setattr(processor_module.subprocess, "run", _fake_run)
+
+        def _worker():
+            start_barrier.wait()
+            return check_rubberband_version()
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_worker) for _ in range(workers)]
+            results = [future.result() for future in futures]
+
+        assert results == [4] * workers
+        assert subprocess_calls == 1
 
 
 class TestBandpassFilter:
