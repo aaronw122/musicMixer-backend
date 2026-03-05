@@ -57,13 +57,16 @@ def client(tmp_path):
         mock_settings.cors_origins = ["http://localhost:5173"]
         mock_settings.youtube_enabled = True
         mock_settings.youtube_max_duration_seconds = 900
+        mock_settings.max_concurrent_mixes = 1
+        mock_settings.distributed_limiter_enabled = False
 
         # Create required directories
         (tmp_path / "uploads").mkdir()
         (tmp_path / "stems").mkdir()
         (tmp_path / "remixes").mkdir()
 
-        with patch("musicmixer.api.remix.settings", mock_settings):
+        with patch("musicmixer.api.remix.settings", mock_settings), \
+             patch("musicmixer.main.settings", mock_settings):
             with TestClient(app) as c:
                 yield c
 
