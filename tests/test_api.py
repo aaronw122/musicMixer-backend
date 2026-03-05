@@ -246,6 +246,41 @@ class TestCreateRemix:
         finally:
             del sys.modules["musicmixer.services.pipeline_day1"]
 
+    def test_submit_failure_releases_processing_slot(self, client):
+        """If executor.submit fails, the slot should be released for the next request."""
+        class FailingExecutor:
+            def submit(self, *args, **kwargs):
+                raise RuntimeError("submit failed")
+
+        original_executor = client.app.state.executor
+        client.app.state.executor = FailingExecutor()
+
+        try:
+            with pytest.raises(RuntimeError, match="submit failed"):
+                client.post(
+                    "/api/remix",
+                    files={
+                        "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                        "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+                    },
+                    data={"prompt": "test"},
+                )
+        finally:
+            client.app.state.executor = original_executor
+
+        # If the slot leaked, this follow-up request would return 409.
+        with patch("musicmixer.api.remix._pipeline_wrapper") as mock_wrapper:
+            mock_wrapper.side_effect = lambda *args, **kwargs: args[5].release()
+            response = client.post(
+                "/api/remix",
+                files={
+                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+                },
+                data={"prompt": "test"},
+            )
+            assert response.status_code == 200
+
 
 class TestCreateRemixNoPrompt:
     """Tests that the /remix endpoint works without a prompt parameter."""
