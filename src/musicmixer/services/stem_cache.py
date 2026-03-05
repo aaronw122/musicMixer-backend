@@ -129,19 +129,24 @@ def cache_stems(cache_key: str, stems_dir: Path) -> None:
             shutil.copy2(wav, tmp_dir / wav.name)
 
         target = cache_dir / cache_key
-        # os.rename is atomic on the same filesystem.
-        # If target exists (concurrent writer finished first), this replaces it.
-        # On some platforms os.rename fails if target is non-empty dir;
-        # use shutil.move as fallback after removing stale target.
+        # Atomic placement: rename temp dir into target.
+        # On macOS, os.rename fails if target is a non-empty dir, so we
+        # remove the target first. A concurrent writer may race us here;
+        # if the rename fails because the other thread placed the target
+        # first, that's fine — both wrote identical stems.
         try:
             if target.exists():
-                shutil.rmtree(target)
+                shutil.rmtree(target, ignore_errors=True)
             os.rename(tmp_dir, target)
         except OSError:
-            # Fallback: if rename fails (cross-device, etc.), use shutil.move
             if target.exists():
-                shutil.rmtree(target)
-            shutil.move(str(tmp_dir), str(target))
+                # Another thread won the race and placed the target.
+                # Clean up our temp dir — the cached result is valid.
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            else:
+                # Genuine failure (cross-device, permissions, etc.)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise
 
         logger.info(
             "Cached %d stems for %s (%s)",
