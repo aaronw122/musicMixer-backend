@@ -47,6 +47,7 @@ dev = [
 
 [project.scripts]
 dev = "musicmixer.main:dev"
+serve = "musicmixer.main:serve"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/musicmixer"]

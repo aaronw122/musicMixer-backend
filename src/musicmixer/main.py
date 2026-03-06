@@ -106,3 +106,12 @@ def dev():
         reload=True,
         reload_excludes=["data", "data/**", "*.pyc", "__pycache__", "notes"],
     )
+
+
+def serve():
+    import uvicorn
+    uvicorn.run(
+        "musicmixer.main:app",
+        host=settings.host,
+        port=settings.port,
+    )
