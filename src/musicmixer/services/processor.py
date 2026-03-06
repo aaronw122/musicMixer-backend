@@ -175,7 +175,10 @@ def rubberband_process(
         cmd += [str(in_path), str(out_path)]
 
         logger.info("Running rubberband: time_ratio=%.4f, semitones=%.2f, cmd=%s", time_ratio, semitones, " ".join(cmd))
-        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+        # Dynamic timeout: 60s base + 2s per second of audio (sized for i5-8500T)
+        audio_duration = len(audio) / sr
+        rb_subprocess_timeout = 60 + int(audio_duration * 2)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=rb_subprocess_timeout)
 
         result, _ = sf.read(str(out_path), dtype="float32")
         return result.astype(np.float32)
