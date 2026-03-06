@@ -771,7 +771,7 @@ def run_pipeline(
         # Dynamic timeout: 60s base + 2s per second of longest song.
         # Sized for modest hardware (e.g., i5-8500T). Generous on fast
         # machines, but timeouts should never fire under normal operation.
-        max_duration = max(vocal_meta.duration, inst_meta.duration)
+        max_duration = max(vocal_meta.duration_seconds, inst_meta.duration_seconds)
         rb_timeout = 60 + int(max_duration * 2)
         for (group, stem_name), future in futures.items():
             result = future.result(timeout=rb_timeout)
