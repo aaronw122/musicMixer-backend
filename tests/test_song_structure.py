@@ -364,10 +364,12 @@ class TestBoundaryDetection:
         combined, _ = compute_adaptive_buckets(bar_rms)
         boundaries = detect_boundaries(bar_rms, combined)
 
-        # Should detect a boundary near bar 16
-        if len(boundaries) > 0:
-            # At least one boundary should be within 4 bars of bar 16
-            assert any(abs(b - 16) <= 4 for b in boundaries)
+        # Should detect at least one boundary
+        assert len(boundaries) > 0, "Expected at least one energy boundary from a 3x energy jump"
+        # At least one boundary should be within 4 bars of bar 16
+        assert any(abs(b - 16) <= 4 for b in boundaries), (
+            f"Expected a boundary within 4 bars of bar 16, got: {boundaries}"
+        )
 
     def test_flat_energy_no_boundaries(self) -> None:
         """Completely flat energy should produce no boundaries (or very few)."""

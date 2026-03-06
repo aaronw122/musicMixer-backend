@@ -1,8 +1,7 @@
 """Tests for the remix API endpoints."""
-import sys
-import types
+import time
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 from fastapi.testclient import TestClient
 
@@ -63,20 +62,11 @@ class TestCreateRemix:
 
     def test_accepts_mp3_files_with_mocked_pipeline(self, client, tmp_path):
         """Should accept .mp3 files and run pipeline successfully when mocked."""
-        # Create a fake pipeline_day1 module
-        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            session.status = "complete"
+            processing_lock.release()
 
-        def fake_pipeline(session_id, song_a_path, song_b_path):
-            remix_dir = tmp_path / "remixes" / session_id
-            remix_dir.mkdir(parents=True, exist_ok=True)
-            remix_path = remix_dir / "remix.mp3"
-            remix_path.write_bytes(b"fake mp3")
-            return remix_path
-
-        fake_module.run_pipeline_sync = fake_pipeline
-        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
-
-        try:
+        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",
                 files={
@@ -88,24 +78,14 @@ class TestCreateRemix:
             assert response.status_code == 200
             data = response.json()
             assert "session_id" in data
-        finally:
-            del sys.modules["musicmixer.services.pipeline_day1"]
 
     def test_successful_remix_returns_session_id(self, client, tmp_path):
         """Should return session_id on successful remix."""
-        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            session.status = "complete"
+            processing_lock.release()
 
-        def fake_pipeline(session_id, song_a_path, song_b_path):
-            remix_dir = tmp_path / "remixes" / session_id
-            remix_dir.mkdir(parents=True, exist_ok=True)
-            remix_path = remix_dir / "remix.mp3"
-            remix_path.write_bytes(b"fake mp3")
-            return remix_path
-
-        fake_module.run_pipeline_sync = fake_pipeline
-        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
-
-        try:
+        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",
                 files={
@@ -121,24 +101,14 @@ class TestCreateRemix:
             # Verify the session_id is a valid UUID format
             import uuid
             uuid.UUID(data["session_id"])  # Raises ValueError if invalid
-        finally:
-            del sys.modules["musicmixer.services.pipeline_day1"]
 
     def test_uploads_saved_to_disk(self, client, tmp_path):
         """Should save uploaded files to the upload directory."""
-        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            session.status = "complete"
+            processing_lock.release()
 
-        def fake_pipeline(session_id, song_a_path, song_b_path):
-            remix_dir = tmp_path / "remixes" / session_id
-            remix_dir.mkdir(parents=True, exist_ok=True)
-            remix_path = remix_dir / "remix.mp3"
-            remix_path.write_bytes(b"fake mp3")
-            return remix_path
-
-        fake_module.run_pipeline_sync = fake_pipeline
-        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
-
-        try:
+        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",
                 files={
@@ -157,15 +127,12 @@ class TestCreateRemix:
             assert (upload_dir / "song_b.wav").exists()
             assert (upload_dir / "song_a.mp3").read_bytes() == b"song a content"
             assert (upload_dir / "song_b.wav").read_bytes() == b"song b content"
-        finally:
-            del sys.modules["musicmixer.services.pipeline_day1"]
 
     def test_pipeline_failure_sets_error_status(self, client, tmp_path):
         """Pipeline failure should set session status to 'error' (Day 2: async).
 
         POST now returns 200 immediately; errors are reported via /status endpoint.
         """
-        import time
         def fake_failing_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
             session.status = "error"
             session.error = "Pipeline exploded"
@@ -194,19 +161,11 @@ class TestCreateRemix:
 
     def test_accepts_wav_files(self, client, tmp_path):
         """Should accept .wav files."""
-        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            session.status = "complete"
+            processing_lock.release()
 
-        def fake_pipeline(session_id, song_a_path, song_b_path):
-            remix_dir = tmp_path / "remixes" / session_id
-            remix_dir.mkdir(parents=True, exist_ok=True)
-            remix_path = remix_dir / "remix.mp3"
-            remix_path.write_bytes(b"fake mp3")
-            return remix_path
-
-        fake_module.run_pipeline_sync = fake_pipeline
-        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
-
-        try:
+        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",
                 files={
@@ -216,35 +175,26 @@ class TestCreateRemix:
                 data={"prompt": "test"},
             )
             assert response.status_code == 200
-        finally:
-            del sys.modules["musicmixer.services.pipeline_day1"]
 
 
     def test_rejects_oversized_upload(self, client, tmp_path):
         """Should return 413 when a file exceeds max_file_size_mb."""
-        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
-        fake_module.run_pipeline_sync = lambda *a: None
-        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
+        # mock_settings.max_file_size_mb is 50, so limit is 50 * 1024 * 1024 bytes
+        # Send a file that exceeds 50MB (we'll set max_file_size_mb=0 via a nested patch)
+        with patch("musicmixer.api.remix.settings") as inner_settings:
+            inner_settings.max_file_size_mb = 0  # 0 MB limit
+            inner_settings.allowed_extensions = {".mp3", ".wav"}
+            inner_settings.data_dir = tmp_path
 
-        try:
-            # mock_settings.max_file_size_mb is 50, so limit is 50 * 1024 * 1024 bytes
-            # Send a file that exceeds 50MB (we'll set max_file_size_mb=0 via a nested patch)
-            with patch("musicmixer.api.remix.settings") as inner_settings:
-                inner_settings.max_file_size_mb = 0  # 0 MB limit
-                inner_settings.allowed_extensions = {".mp3", ".wav"}
-                inner_settings.data_dir = tmp_path
-
-                response = client.post(
-                    "/api/remix",
-                    files={
-                        "song_a": ("song_a.mp3", b"some data", "audio/mpeg"),
-                        "song_b": ("song_b.mp3", b"some data", "audio/mpeg"),
-                    },
-                    data={"prompt": "test"},
-                )
-            assert response.status_code == 413
-        finally:
-            del sys.modules["musicmixer.services.pipeline_day1"]
+            response = client.post(
+                "/api/remix",
+                files={
+                    "song_a": ("song_a.mp3", b"some data", "audio/mpeg"),
+                    "song_b": ("song_b.mp3", b"some data", "audio/mpeg"),
+                },
+                data={"prompt": "test"},
+            )
+        assert response.status_code == 413
 
     def test_submit_failure_releases_processing_slot(self, client):
         """If executor.submit fails, the slot should be released for the next request."""
@@ -287,19 +237,11 @@ class TestCreateRemixNoPrompt:
 
     def test_accepts_mp3_files_without_prompt(self, client, tmp_path):
         """Should accept .mp3 files without a prompt and return session_id."""
-        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            session.status = "complete"
+            processing_lock.release()
 
-        def fake_pipeline(session_id, song_a_path, song_b_path):
-            remix_dir = tmp_path / "remixes" / session_id
-            remix_dir.mkdir(parents=True, exist_ok=True)
-            remix_path = remix_dir / "remix.mp3"
-            remix_path.write_bytes(b"fake mp3")
-            return remix_path
-
-        fake_module.run_pipeline_sync = fake_pipeline
-        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
-
-        try:
+        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",
                 files={
@@ -311,24 +253,14 @@ class TestCreateRemixNoPrompt:
             assert response.status_code == 200
             data = response.json()
             assert "session_id" in data
-        finally:
-            del sys.modules["musicmixer.services.pipeline_day1"]
 
     def test_empty_prompt_accepted(self, client, tmp_path):
         """Should accept an explicitly empty prompt string."""
-        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            session.status = "complete"
+            processing_lock.release()
 
-        def fake_pipeline(session_id, song_a_path, song_b_path):
-            remix_dir = tmp_path / "remixes" / session_id
-            remix_dir.mkdir(parents=True, exist_ok=True)
-            remix_path = remix_dir / "remix.mp3"
-            remix_path.write_bytes(b"fake mp3")
-            return remix_path
-
-        fake_module.run_pipeline_sync = fake_pipeline
-        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
-
-        try:
+        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",
                 files={
@@ -340,12 +272,9 @@ class TestCreateRemixNoPrompt:
             assert response.status_code == 200
             data = response.json()
             assert "session_id" in data
-        finally:
-            del sys.modules["musicmixer.services.pipeline_day1"]
 
     def test_pipeline_receives_empty_prompt_when_omitted(self, client, tmp_path):
         """When no prompt is sent, the pipeline wrapper should receive empty string."""
-        import time
         captured_prompt = []
 
         def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
