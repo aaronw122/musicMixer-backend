@@ -1138,6 +1138,23 @@ def label_sections(
         # Energy trajectory
         trajectory = _energy_trajectory(combined_energy, start_bar, end_bar, buckets)
 
+        # Per-section vocal prominence
+        seg_bar_rms = {k: v[start_bar:end_bar] for k, v in bar_rms_per_stem.items()}
+        seg_vocal_active = vocal_active[start_bar:end_bar]
+
+        # Guard: clip arrays to same length to prevent IndexError
+        min_len = min(len(seg_vocal_active), *(len(v) for v in seg_bar_rms.values())) if seg_bar_rms else 0
+        if min_len > 0:
+            seg_bar_rms = {k: v[:min_len] for k, v in seg_bar_rms.items()}
+            seg_vocal_active = seg_vocal_active[:min_len]
+
+        # Require minimum 3 vocal-active bars for stable prominence
+        active_count = int(np.sum(seg_vocal_active.astype(bool))) if min_len > 0 else 0
+        if active_count >= 3:
+            sec_prominence = compute_vocal_prominence(seg_bar_rms, seg_vocal_active)
+        else:
+            sec_prominence = None
+
         # Annotations
         annotations: list[str] = []
 
@@ -1162,6 +1179,7 @@ def label_sections(
             energy_trajectory=trajectory,
             density=density,
             vocal_status=vocal_status,
+            vocal_prominence_db=round(sec_prominence, 1) if sec_prominence is not None else None,
             annotations=annotations,
         ))
 
@@ -1352,6 +1370,33 @@ def detect_sections(
 
     # Stage 3: Merge and cleanup
     sections = merge_sections(sections)
+
+    # Post-merge: recompute vocal_prominence_db for merged sections that lost it
+    for i, sec in enumerate(sections):
+        if sec.vocal_prominence_db is None and sec.vocal_status != "vox:no":
+            seg_bar_rms = {k: v[sec.start_bar:sec.end_bar] for k, v in bar_rms_per_stem.items()}
+            seg_vocal_active = vocal_active[sec.start_bar:sec.end_bar]
+            min_len = min(len(seg_vocal_active), *(len(v) for v in seg_bar_rms.values())) if seg_bar_rms else 0
+            if min_len > 0:
+                seg_bar_rms = {k: v[:min_len] for k, v in seg_bar_rms.items()}
+                seg_vocal_active = seg_vocal_active[:min_len]
+            active_count = int(np.sum(seg_vocal_active.astype(bool))) if min_len > 0 else 0
+            if active_count >= 3:
+                prom = compute_vocal_prominence(seg_bar_rms, seg_vocal_active)
+                sections[i] = SectionInfo(
+                    start_bar=sec.start_bar,
+                    end_bar=sec.end_bar,
+                    bar_count=sec.bar_count,
+                    start_time=sec.start_time,
+                    end_time=sec.end_time,
+                    label=sec.label,
+                    energy_level=sec.energy_level,
+                    energy_trajectory=sec.energy_trajectory,
+                    density=sec.density,
+                    vocal_status=sec.vocal_status,
+                    vocal_prominence_db=round(prom, 1) if prom is not None else None,
+                    annotations=sec.annotations,
+                )
 
     logger.info("Section detection complete: %d sections", len(sections))
     return sections
