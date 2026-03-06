@@ -517,9 +517,10 @@ class TestHarmonicTempoFeatures:
         meta_a = _make_metadata(bpm=120.0, key="C", scale="major")
         meta_b = _make_metadata(bpm=130.0, key="G", scale="major")
         features = _extract_harmonic_tempo_features(plan, meta_a, meta_b)
-        # C major (8B) to G major (9B) = distance 1
+        # C major (8B) to G major (9B) = Camelot distance 1
         assert features["harmonic_camelot_distance"] == 1.0
-        assert features["harmonic_pitch_shift_semitones"] == 1.0
+        # C to G = 7 semitones clockwise, 5 counter-clockwise -> min = 5
+        assert features["harmonic_pitch_shift_semitones"] == 5.0
         # Tempo stretch should be nonzero
         assert features["tempo_vocal_stretch_pct"] > 0.0
 

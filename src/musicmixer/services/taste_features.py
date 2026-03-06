@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from musicmixer.models import AudioMetadata, RemixPlan, Section
+from musicmixer.services.taste_constraints import _key_semitone_distance
 from musicmixer.services.tempo import estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Computation version -- bump when feature semantics change (even if names
 # stay the same). This ensures the manifest hash changes on logic updates.
 # ---------------------------------------------------------------------------
-_COMPUTATION_VERSION = "1"
+_COMPUTATION_VERSION = "2"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -195,11 +196,11 @@ def _estimate_pitch_shift_semitones(
     if meta_a.scale is None or meta_b.scale is None:
         return 0.0
 
-    # Compute Camelot distance as a proxy for semitone shift.
-    # Each Camelot step ~ 1 semitone (7 semitones on the circle of fifths).
-    dist = _camelot_distance(meta_a.key, meta_a.scale, meta_b.key, meta_b.scale)
-    # Map to semitones: 0->0, 1->1, 2->2, ... 6->6
-    return float(dist)
+    # Compute actual semitone distance on the chromatic circle.
+    semitones = _key_semitone_distance(meta_a.key, meta_b.key)
+    if semitones is None:
+        return 0.0  # Unknown key -> no shift estimate
+    return float(semitones)
 
 
 def _estimate_tempo_stretch(
