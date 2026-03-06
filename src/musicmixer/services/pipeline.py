@@ -755,20 +755,26 @@ def run_pipeline(
 
     with ThreadPoolExecutor(max_workers=6) as rb_executor:
         futures = {}
-        if stretch_vocals:
-            for stem_name in list(vocal_audio.keys()):
-                futures[("vocal", stem_name)] = rb_executor.submit(
-                    rubberband_process, vocal_audio[stem_name], sr,
-                    vocal_meta.bpm, target_bpm, is_vocal=(stem_name == "vocals"),
-                )
+        if stretch_vocals and "vocals" in vocal_audio:
+            # Only stretch the vocal stem — other Song A stems are unused
+            # by the renderer, so stretching them wastes CPU.
+            futures[("vocal", "vocals")] = rb_executor.submit(
+                rubberband_process, vocal_audio["vocals"], sr,
+                vocal_meta.bpm, target_bpm, is_vocal=True,
+            )
         if stretch_instrumentals:
             for stem_name in list(inst_audio.keys()):
                 futures[("inst", stem_name)] = rb_executor.submit(
                     rubberband_process, inst_audio[stem_name], sr,
                     inst_meta.bpm, target_bpm,
                 )
+        # Dynamic timeout: 60s base + 2s per second of longest song.
+        # Sized for modest hardware (e.g., i5-8500T). Generous on fast
+        # machines, but timeouts should never fire under normal operation.
+        max_duration = max(vocal_meta.duration, inst_meta.duration)
+        rb_timeout = 60 + int(max_duration * 2)
         for (group, stem_name), future in futures.items():
-            result = future.result(timeout=120)
+            result = future.result(timeout=rb_timeout)
             if group == "vocal":
                 vocal_audio[stem_name] = result
             else:

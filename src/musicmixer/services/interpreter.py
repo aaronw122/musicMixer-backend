@@ -203,8 +203,8 @@ CAPABILITIES:
 - Design a section-based arrangement with per-stem role assignment (lead, support, background, texture, silent for each of: {stem_list})
 - Choose transitions between sections (fade, crossfade, cut)"""
 
-    # Section 5: Critical Mixing Rules (failure mode guards)
-    section_5 = """CRITICAL MIXING RULES (violations produce bad audio):
+    # Section 7: Critical Mixing Rules (failure mode guards)
+    section_7 = """CRITICAL MIXING RULES (violations produce bad audio):
 1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:--, labeled GOOD INSTRUMENTAL SOURCE). For instrumental breakdowns, assign at least one stem as "lead".
 2. VOCAL-INSTRUMENTAL BALANCE: When vocals are active, assign them "lead" and ensure at least 2-3 instrumental stems are "support" or "background". A mashup should sound like a FULL BAND, not a vocal solo.
 3. VOCAL BLEED AWARENESS: Song A's vocal stem may contain faint drums/bass from the original mix. In low-energy sections where Song B's drums are quiet or silent, this ghost rhythm can become audible and clash. Keep Song B drums, bass, or other active stems at "support" or higher when vocals are active — they mask the bleed. The concern is sections where ALL Song B stems are quiet or "texture" while vocals play — that's where ghost rhythm becomes audible.
@@ -214,8 +214,8 @@ CAPABILITIES:
 7. ROLE VARIATION: Vary stem roles across sections. Strip down to drums+bass+vocals for contrast, then promote more stems to "support" for impact. Flat roles across all sections produces a lifeless mix.
 8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 bar numbers with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section."""
 
-    # Section 3: Stem Role Guidelines (roles, frequency awareness, energy arc, mixing advisory, phrase alignment)
-    section_3 = """STEM ROLE GUIDELINES:
+    # Section 5: Stem Role Guidelines (roles, frequency awareness, energy arc, mixing advisory, phrase alignment)
+    section_5 = """STEM ROLE GUIDELINES:
 - Vocal sections: vocals as "lead", at least 2-3 instrumental stems as "support" or "background"
 - Instrumental sections (breakdowns, intros): at least one "lead" instrumental
 - Drum-bass pair: typically "support" or higher in any rhythmic section
@@ -224,7 +224,7 @@ CAPABILITIES:
 
 FREQUENCY AWARENESS (role assignment guide):
 - Vocals occupy the mid-range (300 Hz - 5 kHz). Guitar, piano, and "other" (synths) overlap this range and WILL mask vocals if too loud. When vocals are "lead", prefer guitar/piano/other at "background" or "texture" unless the stem is rhythmic (choppy guitar) rather than sustained (pad/lead synth).
-- Drums and bass rarely conflict with vocals — they are safe at "support" alongside vocal "lead".
+- Drums and bass rarely conflict with vocals — they are safe at "support" alongside vocal "lead". Exception: heavy sub-bass (808s, deep bass synths) can mud low male vocals or baritone singers. In bass-heavy genres (trap, hip-hop), demote bass to "background" during vocal leads if the vocal energy sits low.
 - The "other" stem is the most dangerous vocal mask when it contains sustained mid-range content (synth leads, pads, sustained strings). Default it to "texture" in vocal sections unless Layer 3 shows it is low-energy or sparse. In hip-hop/R&B, "other" is often horn stabs or samples that sit fine at "background".
 - In medium-energy sections, keep max 3 stems at "support" or above — push the rest to "background". Peak sections are exempt: a full-band climax with 4-5 stems at "support" is what makes it peak.
 
@@ -241,7 +241,7 @@ ARC PRINCIPLES:
 - Strip stems to CREATE contrast, not just to be quiet. A breakdown with only drums+bass makes the following chorus feel massive.
 
 MIXING ADVISORY:
-- Stagger stem entries over 2-4 bars for natural-sounding builds (don't bring everything in at once).
+- Stagger stem entries over 2-4 bars for natural-sounding builds (don't bring everything in at once). Exception: after a breakdown or silence, slamming all stems in on beat one IS the point of a drop — use a "cut" transition with full stem activation.
 - Begin vocal sections 1-2 beats early for pickup notes (vocals often start before the downbeat).
 - PHRASE ALIGNMENT: When choosing start_time_vocal, prefer a point where vocals begin at a phrase boundary (bar 1 of a verse or chorus in Layer 2). Cross-reference Song A's section map to ensure the vocal entry lands on a strong downbeat in your arrangement. Vocal phrases typically run in 4-bar or 8-bar groups.
 - Section labels in the song data are approximate guidance, not rigid constraints. Use them to understand song structure, but your arrangement should serve the remix.
@@ -252,34 +252,72 @@ MIXING ADVISORY:
 - Each entry should be 4, 8, 16, 32, or 64 beats long (max 64 beats per entry)
 - Default: start with instrumental only (establishes the beat before vocals enter)
 - Always end with instrumental only or a fade
-- transition_beats must be less than half the entry length
+- transition_beats must be less than half the entry length, and never more than 8 beats. Long crossfades destroy punch.
 - Label meanings: "chorus" = vocal-led high energy. "drop" = instrumental-led high energy. "bridge" = transitional. "breakdown" = energy decreasing."""
 
-    # Section 4: Genre Guidance
-    section_4 = """GENRE GUIDANCE (infer from BPM + energy profile + section map):
+    # Section 6: Genre Guidance
+    section_6 = """GENRE GUIDANCE (infer from BPM + energy profile + section map):
 - Hip-hop/boom-bap (80-100 BPM, straight): Consistent drums throughout. Build energy through vocal intensity and layering, not drum drops.
-- Trap/modern hip-hop (60-85 BPM half-time, or 130-160 BPM): Sparse hi-hats, heavy 808 bass. Half-time feel — the kick hits every other beat. Use breakdown->drop sparingly; energy comes from bass and vocal flow.
+- Trap/modern hip-hop (130-160 BPM, reported as full-time): Sparse hi-hats, heavy 808 bass. Half-time feel — the kick hits every other beat, so it SOUNDS like 65-80 BPM despite the metadata showing double that. Use breakdown->drop sparingly; energy comes from bass and vocal flow.
 - R&B/soul (70-110 BPM): Smooth transitions, no abrupt changes. Layer elements gradually. Vocals are always the star.
 - Pop/rock (100-140 BPM): Verse-chorus dynamics — stripped for verses, full for choruses. Guitar often drives energy shifts.
 - EDM/dance (120-160 BPM): Breakdown -> build -> drop. Align drops with sections annotated DROP. The "other" stem often carries the main synth hook.
 - Jam/rock (variable BPM): Extended instrumental sections. Vocal gaps are natural entry points.
 - If BPM alone is ambiguous (e.g., 130 BPM could be pop, EDM, or trap), use the section map and energy profile to disambiguate. Trap has sparse density; EDM has full+extra density at drops; pop has verse-chorus alternation."""
 
-    # Section 6: Stem Separation Artifacts
-    section_6 = """STEM SEPARATION ARTIFACTS:
+    # Section 8: Stem Separation Artifacts
+    section_8 = """STEM SEPARATION ARTIFACTS:
 Stem separation leaves residual bleed — ghost vocals in instrumental stems, instrument traces in vocal stems. Song B's per-section vox: values show how prominent vocals were in the original mix; higher values mean more bleed in that section's instrumental stems. Sections marked vox:-- or GOOD INSTRUMENTAL SOURCE have the least bleed. Active stems — especially drums and bass — naturally mask bleed, so it matters most in sparse, exposed passages."""
 
-    # Section 7: Explanation and Warnings
-    section_7 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
+    # Section 3: Transitions (static definitions; stretch advisory is dynamic)
+    section_3 = """TRANSITIONS:
+- "cut": Hard switch with no overlap. Best for maximum impact when moving UP in energy (breakdown-to-drop, build-to-chorus) or for same-energy lateral transitions (verse-to-verse). Avoid for large energy drops — sounds broken.
+- "crossfade": Gradual blend over transition_beats. Default choice — works for ascending, descending, and same-level transitions. Prefer over cut when energy change is gradual.
+- "fade": Volume ramp from/to silence. Use for the first section (fade in) and last section (fade out). Also works for bringing vocals in from nothing.
+- Transitions should land on bar boundaries (multiples of 4 beats). A crossfade starting mid-bar sounds sloppy."""
 
-WARNINGS: Populate this array when:
-- You're uncertain about a genre interpretation from the metadata
-- Tempo/key gap is large and the remix may sound noticeably different from the originals"""
+    # Section 4: Arrangement Approach (reference patterns, not rigid templates)
+    section_4 = """ARRANGEMENT APPROACH:
+Build the arrangement from the source material outward. Examine both songs' section maps, phrase lengths, and energy profiles FIRST, then design sections that align with natural phrase boundaries (4, 8, 16, or 32 bars).
+
+Reference arrangements (use as inspiration, not rigid structures):
+- Standard Mashup: intro -> verse -> chorus -> breakdown -> chorus -> outro
+- DJ Set: intro -> verse -> breakdown -> drop -> outro
+- Quick Hit (short remixes): intro -> chorus -> verse -> chorus -> outro
+- Chill: intro -> verse -> bridge -> verse -> outro
+- Extended Mix: intro -> verse -> chorus -> breakdown -> verse -> chorus -> bridge -> drop -> outro
+
+Every section boundary must land on a phrase boundary from at least one source song. Section durations come from the source material's natural phrase lengths, not fixed percentages. Prefer fewer, longer sections over many short ones — minimum 8 bars per section. Short remixes (under 48 total bars) should have 3-4 sections; longer remixes can have up to 8. You may combine, reorder, or omit sections from the references above."""
+
+    # Section 9: Tempo/Key Rules (static; key_matching_detail is dynamic)
+    section_9 = """TEMPO MATCHING:
+Tempo is handled automatically by the system using an algorithm that balances vocal and instrumental stretch.
+You do NOT choose tempo_source — it is not in your tool schema. Focus on arrangement and stem roles.
+If the BPM gap is large (>20%), mention in your explanation that some tempo stretching was applied.
+
+KEY COMPATIBILITY:
+- Same key = no shifting needed (key_source: "none").
+- Compatible keys that blend WITHOUT pitch shifting: relative major/minor (e.g., Cmin/Ebmaj), perfect fifth apart (e.g., Cmin/Gmin). If songs are in compatible keys, set key_source to "none".
+- Dissonant keys that NEED shifting or avoidance: semitone apart (C/C#), tritone apart (C/F#). If shifting would exceed 4 semitones, set key_source to "none" and add a warning.
+
+PITCH LIMIT:
+- Do not plan shifts above +/-4 semitones. If compatibility would require more, keep original key and add a warning."""
+
+    # Section 10: Explanation and Warnings
+    section_10 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
+
+WARNINGS: Populate this array ONLY for issues that actually degrade audio quality:
+- Tempo/key gap is large and the remix may sound noticeably different from the originals
+- Key shift exceeds 3 semitones
+Do NOT warn about normal characteristics like one song having more vocals than the other — that is expected (Song A provides vocals, Song B provides instrumentals). Empty array is fine."""
 
     # Ordering principle: definitions first, rules after.
-    # Block 1 (ontology): role → arrangement rules → stem roles → genre
-    # Block 2 (constraints): guards → artifact awareness → explanation/warnings
-    static_sections = [section_1, section_2, section_3, section_4, section_5, section_6, section_7]
+    # Block 1 (ontology): role → arrangement rules → transitions → arrangement approach → stem roles → genre
+    # Block 2 (constraints): guards → artifact awareness → tempo/key rules → explanation/warnings
+    static_sections = [
+        section_1, section_2, section_3, section_4, section_5, section_6,
+        section_7, section_8, section_9, section_10,
+    ]
     return {
         "type": "text",
         "text": "\n\n".join(static_sections),
@@ -298,8 +336,8 @@ def _build_dynamic_context(
 ) -> str:
     """Build dynamic context string for injection into the user message.
 
-    Contains all per-request content: transitions, templates, tempo/key
-    guidance, duration, and song data layers. This content varies between
+    Contains per-request content: song data layers, stretch advisory,
+    key matching detail, and duration target. This content varies between
     requests and is NOT cached in the system prompt.
     """
     # Compute per-song beat counts (approximate)
@@ -312,54 +350,36 @@ def _build_dynamic_context(
         instrumental_bpm=song_b_meta.bpm,
     )
 
-    # Section 8: Transitions + stretch advisory
-    stretch_advisory = ""
+    # Dynamic: Stretch advisory (conditional, appended only when stretch > 12%)
+    stretch_section = ""
     if stretch_pct is not None and stretch_pct > 12:
-        stretch_advisory = f"""
-STRETCH WARNING ({stretch_pct:.1f}%):
-- At >12% stretch, limit stretched sections: max 8 bars at up to 15%, max 4 bars above 15%.
-- Prefer stretching instruments over vocals (vocals degrade faster under stretch).
-- This is advisory -- use musical judgment."""
+        if stretch_pct <= 15:
+            impact = "moderate — artifacts noticeable on sustained vocal notes"
+            vocal_budget = "40%"
+        else:
+            impact = "significant — artifacts clearly audible throughout vocals"
+            vocal_budget = "30%"
+        stretch_section = f"""STRETCH ADVISORY ({stretch_pct:.1f}% stretch on vocals):
+Vocal time-stretching above 12% introduces audible artifacts (phasiness, vowel warble). At {stretch_pct:.1f}%, quality impact is {impact}.
 
-    # Section 9: Transitions + Stretch Advisory
-    section_9 = f"""TRANSITIONS:
-- "cut": Hard switch with no overlap. Best for maximum impact when moving UP in energy (breakdown-to-drop, build-to-chorus) or for same-energy lateral transitions (verse-to-verse). Avoid for large energy drops — sounds broken.
-- "crossfade": Gradual blend over transition_beats. Default choice — works for ascending, descending, and same-level transitions. Prefer over cut when energy change is gradual.
-- "fade": Volume ramp from/to silence. Use for the first section (fade in) and last section (fade out). Also works for bringing vocals in from nothing.
-- Transitions should land on bar boundaries (multiples of 4 beats). A crossfade starting mid-bar sounds sloppy.{stretch_advisory}"""
+Arrangement guidance to minimize degradation:
+1. VOCAL BUDGET: Keep vocal sections to ≤{vocal_budget} of total beats. Fill remaining time with instrumental sections (intro, breakdown, outro).
+2. FRAMING: Open and close with instrumental sections — first and last impressions must be clean.
+3. VOCAL SECTION LENGTH: Prefer shorter vocal sections (4-8 bars) over long ones. The ear locks onto stretch artifacts over time; breaks reset perception.
+4. MASKING: Back vocal sections with full, busy instrumental beds (drums + bass + harmony). Sparse accompaniment exposes artifacts. Avoid vocals over minimal or solo-instrument backing.
+5. ENERGY: Place vocals in higher-energy sections where the dense mix provides natural masking.
 
-    # Section 10: Arrangement Templates
-    section_10 = """ARRANGEMENT TEMPLATES:
-Template A (Standard Mashup): intro(~10%) -> verse(~25%) -> chorus(~20%) -> breakdown(~10%) -> chorus(~20%) -> outro(~15%)
-Template B (DJ Set): intro(~15%) -> verse(~25%) -> breakdown(~15%) -> drop(~30%) -> outro(~15%)
-Template C (Quick Hit): intro(~10%) -> chorus(~30%) -> verse(~15%) -> chorus(~30%) -> outro(~15%)
-Template D (Chill): intro(~10%) -> verse(~35%) -> bridge(~15%) -> verse(~30%) -> outro(~10%)
-Template E (Extended Mix): intro(~8%) -> verse(~15%) -> chorus(~10%) -> breakdown(~8%) -> verse(~15%) -> chorus(~15%) -> bridge(~10%) -> drop(~12%) -> outro(~7%)
+These are quality-driven defaults. Override with musical judgment if the prompt demands a vocal-focused arrangement."""
 
-If total beats < 48, use Template C. If 48-192, choose based on genre and energy profile. If > 192, use Template E."""
+    # Dynamic: Key matching detail (varies per song pair)
+    key_section = f"""KEY MATCHING:
+{key_matching_detail}"""
 
-    # Section 11: Tempo and Key Guidance
-    section_11 = f"""TEMPO MATCHING:
-Tempo is handled automatically by the system using an algorithm that balances vocal and instrumental stretch.
-You do NOT choose tempo_source — it is not in your tool schema. Focus on arrangement and stem roles.
-If the BPM gap is large (>20%), mention in your explanation that some tempo stretching was applied.
-
-KEY MATCHING:
-{key_matching_detail}
-
-KEY COMPATIBILITY:
-- Same key = no shifting needed (key_source: "none").
-- Compatible keys that blend WITHOUT pitch shifting: relative major/minor (e.g., Cmin/Ebmaj), perfect fifth apart (e.g., Cmin/Gmin). If songs are in compatible keys, set key_source to "none".
-- Dissonant keys that NEED shifting or avoidance: semitone apart (C/C#), tritone apart (C/F#). If shifting would exceed 4 semitones, set key_source to "none" and add a warning.
-
-PITCH LIMIT:
-- Do not plan shifts above +/-4 semitones. If compatibility would require more, keep original key and add a warning."""
-
-    # Section 12: Duration target
-    section_12 = f"""DURATION: Target = {TARGET_REMIX_DURATION_SECONDS}s = ~{total_available_beats} beats at {target_bpm:.0f} BPM (1 beat = {60 / target_bpm:.2f}s, 1 bar = 4 beats).
+    # Dynamic: Duration target (varies per song pair)
+    duration_section = f"""DURATION: Target = {TARGET_REMIX_DURATION_SECONDS}s = ~{total_available_beats} beats at {target_bpm:.0f} BPM (1 beat = {60 / target_bpm:.2f}s, 1 bar = 4 beats).
 Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)}s will be REJECTED."""
 
-    # Section 8: Song Data (5 layers)
+    # Dynamic: Song Data (5 layers)
     song_a_info = _build_song_info("Song A", song_a_meta, total_beats_a)
     song_b_info = _build_song_info("Song B", song_b_meta, total_beats_b)
     cross_song = _build_cross_song_layer(song_a_meta, song_b_meta, stretch_pct)
@@ -411,10 +431,15 @@ Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)}s will be RE
     if lyrics_layer:
         song_data_parts.append(lyrics_layer)
 
-    section_8 = "SONG DATA:\n\n" + "\n".join(song_data_parts)
+    song_data = "SONG DATA:\n\n" + "\n".join(song_data_parts)
 
     # Song data first so the LLM grounds itself in the material before reading rules.
-    dynamic_sections = [section_8, section_9, section_10, section_11, section_12]
+    # Only truly per-request content remains dynamic.
+    dynamic_sections = [song_data]
+    if stretch_section:
+        dynamic_sections.append(stretch_section)
+    dynamic_sections.append(key_section)
+    dynamic_sections.append(duration_section)
     return "\n\n".join(dynamic_sections)
 
 
@@ -722,16 +747,9 @@ def _build_few_shot_messages() -> list[dict]:
             "role": "user",
             "content": (
                 f'Create a remix plan for this prompt: "{default_prompt}"\n\n'
-                "TRANSITIONS:\n"
-                '- "cut": Hard switch. Best for energy increases or same-energy lateral transitions.\n'
-                '- "crossfade": Default choice. Works for all energy directions.\n'
-                '- "fade": From/to silence. Use for first/last sections.\n\n'
-                "ARRANGEMENT TEMPLATES:\n"
-                "Template A (Standard Mashup): intro(~10%) -> verse(~25%) -> chorus(~20%) -> breakdown(~10%) -> chorus(~20%) -> outro(~15%)\n\n"
+                "KEY MATCHING:\nKey matching: unavailable (key detection not yet implemented)\n\n"
                 "DURATION: Target = 210s = ~413 beats at 118 BPM (1 beat = 0.51s, 1 bar = 4 beats).\n"
                 "Arrangements shorter than 147s will be REJECTED.\n\n"
-                "TEMPO MATCHING:\nTempo is handled automatically.\n\n"
-                "KEY MATCHING:\nKey matching: unavailable (key detection not yet implemented)\n\n"
                 "SONG DATA:\n\n"
                 "=== LAYER 1: SONG OVERVIEW ===\n"
                 'Song A: "Night Ride" -- 120 BPM, Cmin, 4:00, 120 bars.\n'
@@ -818,16 +836,9 @@ def _build_few_shot_messages() -> list[dict]:
             "role": "user",
             "content": (
                 f'Create a remix plan for this prompt: "{default_prompt}"\n\n'
-                "TRANSITIONS:\n"
-                '- "cut": Hard switch. Best for energy increases or same-energy lateral transitions.\n'
-                '- "crossfade": Default choice. Works for all energy directions.\n'
-                '- "fade": From/to silence. Use for first/last sections.\n\n'
-                "ARRANGEMENT TEMPLATES:\n"
-                "Template A (Standard Mashup): intro(~10%) -> verse(~25%) -> chorus(~20%) -> breakdown(~10%) -> chorus(~20%) -> outro(~15%)\n\n"
+                "KEY MATCHING:\nKey matching: unavailable (key detection not yet implemented)\n\n"
                 "DURATION: Target = 210s = ~308 beats at 88 BPM (1 beat = 0.68s, 1 bar = 4 beats).\n"
                 "Arrangements shorter than 147s will be REJECTED.\n\n"
-                "TEMPO MATCHING:\nTempo is handled automatically.\n\n"
-                "KEY MATCHING:\nKey matching: unavailable (key detection not yet implemented)\n\n"
                 "SONG DATA:\n\n"
                 "=== LAYER 1: SONG OVERVIEW ===\n"
                 'Song A: "Slow Jam" -- 88 BPM, Gmin, 3:45, 82 bars.\n'
@@ -1355,7 +1366,7 @@ def interpret_prompt(
                                 f"Target: {TARGET_REMIX_DURATION_SECONDS}s = ~{needed_beats} beats. "
                                 f"You need {beat_delta} more beats. "
                                 f"Create at least {suggested_sections} sections of 16-64 beats each. "
-                                f"Use the Extended Mix template (intro -> verse -> chorus -> "
+                                f"Use the Extended Mix pattern (intro -> verse -> chorus -> "
                                 f"breakdown -> verse -> chorus -> bridge -> drop -> outro)."
                             ),
                         }

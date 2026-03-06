@@ -292,20 +292,21 @@ class TestBuildSystemPromptBlock:
 
         # Key strings that uniquely identify each section
         section_markers = [
-            "You are an expert music mashup artist",           # Section 1
-            "CRITICAL MIXING RULES",                   # Section 2
-            "STEM ROLE GUIDELINES",                    # Section 3
-            "ENERGY LEVELS AND ARC",                   # Section 3
-            "MIXING ADVISORY",                         # Section 3
-            "TRANSITIONS:",                            # Section 4
-            "Template A (Standard Mashup)",            # Section 5
-            "ARRANGEMENT RULES",                       # Section 6
-            "GENRE GUIDANCE",                          # Section 7
-            "TEMPO MATCHING:",                         # Section 8
-            "STEM SEPARATION ARTIFACTS",               # Section 10
-            "EXPLANATION: Write 2-3",                  # Section 11
-            "SONG DATA:",                              # Section 12
-            "1 bar = 4 beats",                         # Duration in Section 9
+            "You are an expert music mashup artist",   # Section 1
+            "ARRANGEMENT RULES",                       # Section 2
+            "TRANSITIONS:",                            # Section 3
+            "ARRANGEMENT APPROACH:",                   # Section 4
+            "Standard Mashup: intro ->",               # Section 4 (reference)
+            "STEM ROLE GUIDELINES",                    # Section 5
+            "ENERGY LEVELS AND ARC",                   # Section 5
+            "MIXING ADVISORY",                         # Section 5
+            "GENRE GUIDANCE",                          # Section 6
+            "CRITICAL MIXING RULES",                   # Section 7
+            "STEM SEPARATION ARTIFACTS",               # Section 8
+            "TEMPO MATCHING:",                         # Section 9
+            "EXPLANATION: Write 2-3",                  # Section 10
+            "SONG DATA:",                              # Dynamic
+            "1 bar = 4 beats",                         # Dynamic (duration)
         ]
         for marker in section_markers:
             assert marker in combined, f"Marker missing: {marker}"
@@ -365,8 +366,8 @@ class TestBuildSystemPromptBlock:
         args = _default_dynamic_args(stretch_pct=18.5)
         ctx = _build_dynamic_context(**args)
         block = _build_system_prompt_block()
-        assert "STRETCH WARNING (18.5%)" in ctx
-        assert "STRETCH WARNING" not in block["text"]
+        assert "STRETCH ADVISORY (18.5% stretch on vocals)" in ctx
+        assert "STRETCH ADVISORY" not in block["text"]
 
     def test_stem_roles_guidance_in_static_block(self):
         """STEM ROLE GUIDELINES section appears in static (cached) block."""
