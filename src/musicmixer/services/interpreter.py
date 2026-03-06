@@ -382,7 +382,12 @@ Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)}s will be RE
         or getattr(song_b_meta, "song_structure", None) is not None
     )
     if has_section_data:
-        song_data_parts.append("\n=== LAYER 2: SECTION MAP ===")
+        song_data_parts.append(
+            "\n=== LAYER 2: SECTION MAP ===\n"
+            "Columns: bars, duration, time, label, energy, density, vocal prominence.\n"
+            "vox:+XdB = vocals X dB above accompaniment (higher = more dominant). "
+            "vox:-- = no vocals detected. (fading) = vocal exit transition."
+        )
         struct_a = getattr(song_a_meta, "song_structure", None)
         if struct_a and struct_a.sections:
             section_map_a = _build_section_map("Song A", struct_a, total_beats_a // 4)
@@ -741,6 +746,9 @@ def _build_few_shot_messages() -> list[dict]:
                 'Song B: "City Groove" -- 118 BPM, Cmaj, 3:30, 103 bars.\n'
                 "Energy: wide dynamic range.\n\n"
                 "=== LAYER 2: SECTION MAP ===\n"
+                "Columns: bars, duration, time, label, energy, density, vocal prominence.\n"
+                "vox:+XdB = vocals X dB above accompaniment (higher = more dominant). "
+                "vox:-- = no vocals detected. (fading) = vocal exit transition.\n"
                 "Song A (120 bars):\n"
                 "    1-8    8b  0:00-0:16 | intro          | medium           | mid        | vox:--              | GOOD INSTRUMENTAL SOURCE\n"
                 "    9-40  32b  0:16-1:20 | verse          | high             | full       | vox:+8dB\n"
@@ -834,6 +842,9 @@ def _build_few_shot_messages() -> list[dict]:
                 'Song B: "Upbeat Track" -- 98 BPM, Amin, 3:30, 86 bars.\n'
                 "Energy: wide dynamic range.\n\n"
                 "=== LAYER 2: SECTION MAP ===\n"
+                "Columns: bars, duration, time, label, energy, density, vocal prominence.\n"
+                "vox:+XdB = vocals X dB above accompaniment (higher = more dominant). "
+                "vox:-- = no vocals detected. (fading) = vocal exit transition.\n"
                 "Song B (86 bars):\n"
                 "    1-8    8b  0:00-0:15 | intro          | low              | sparse     | vox:--              | GOOD INSTRUMENTAL SOURCE\n"
                 "    9-32  24b  0:15-0:57 | verse          | medium           | mid        | vox:+4dB\n"
