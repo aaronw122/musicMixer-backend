@@ -267,14 +267,7 @@ MIXING ADVISORY:
 
     # Section 6: Stem Separation Artifacts
     section_6 = """STEM SEPARATION ARTIFACTS:
-Stem separation is imperfect. Vocal stems may contain instrument traces. Instrumental stems may contain ghost vocals.
-Bleed is less noticeable during high-energy sections with multiple active stems. Prefer sections annotated GOOD INSTRUMENTAL SOURCE for clean instrumental passages.
-When Song B sections show vocal dB values in the section map above, those indicate bleed risk for instrumental passages:
-- Higher dB (>+6 dB): strong bleed — limit purely-instrumental passages using those stems.
-- Moderate dB (+3 to +6 dB): manageable bleed with active drums/bass masking.
-- Low dB (<+3 dB): minimal bleed.
-- vox:-- means no detected vocals — lowest bleed risk.
-These limits relax when Song A drums or bass are active at "background" or above, since they mask bleed."""
+Stem separation leaves residual bleed — ghost vocals in instrumental stems, instrument traces in vocal stems. Song B's per-section vox: values show how prominent vocals were in the original mix; higher values mean more bleed in that section's instrumental stems. Sections marked vox:-- or GOOD INSTRUMENTAL SOURCE have the least bleed. Active stems — especially drums and bass — naturally mask bleed, so it matters most in sparse, exposed passages."""
 
     # Section 7: Explanation and Warnings
     section_7 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
