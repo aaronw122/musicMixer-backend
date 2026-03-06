@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from musicmixer.models import AudioMetadata, RemixPlan, Section
+from musicmixer.services.tempo import estimate_target_bpm
 
 logger = logging.getLogger(__name__)
 
@@ -223,18 +224,8 @@ def check_tempo_stretch_safety(
     if meta_a is None or meta_b is None:
         return violations
 
-    # Determine which song is the tempo source.
-    if plan.tempo_source == "song_a":
-        target_bpm = meta_a.bpm
-    elif plan.tempo_source == "song_b":
-        target_bpm = meta_b.bpm
-    elif plan.tempo_source == "average":
-        target_bpm = (meta_a.bpm + meta_b.bpm) / 2
-    elif plan.tempo_source == "weighted_midpoint":
-        target_bpm = (meta_a.bpm + meta_b.bpm) / 2
-    else:
-        # Unknown tempo source — can't validate
-        return violations
+    # Determine target BPM using the canonical algorithm.
+    target_bpm = estimate_target_bpm(meta_a.bpm, meta_b.bpm, plan.tempo_source)
 
     # The vocal source song stretches its vocals to the target.
     # The instrumental source stretches drums/bass/other to the target.
