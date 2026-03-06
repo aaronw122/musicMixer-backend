@@ -328,6 +328,43 @@ class TestComputeAdaptiveCorrections:
                         f"expected in [1.5, 3.0]"
                     )
 
+    def test_shared_stem_type_routes_to_correct_source(self):
+        """When both songs have an 'other' stem, corrections route by position, not name.
+
+        detect_conflicts() sets stem_a=vocal-source, stem_b=instrumental-source.
+        If the recommended cut is stem_b ('other' from instrumental), it must
+        land in inst_corrections — not vocal_corrections just because 'other'
+        also exists in the vocal profiles.
+        """
+        # Both sources have an "other" stem with energy at the same frequency
+        audio = _make_sine(400.0, amplitude=0.9)
+        vocal_other = compute_spectral_profile(audio, SR, stem_type="other")
+        inst_other = compute_spectral_profile(audio, SR, stem_type="other")
+
+        conflicts = detect_conflicts([vocal_other], [inst_other])
+        assert len(conflicts) >= 1, "Expected at least one conflict for shared 'other' stems"
+
+        vocal_corr, inst_corr = compute_adaptive_corrections(
+            conflicts, [vocal_other], [inst_other]
+        )
+
+        # The conflict's recommended_cut_stem is determined by _resolve_cut_stem.
+        # For equal-priority stems, stem_b (instrumental) gets cut.
+        # Therefore 'other' corrections from cross-stem conflicts must appear
+        # in inst_corrections, NOT vocal_corrections.
+        #
+        # Note: vocal_corr may still have 'other' entries from per-stem anomaly
+        # corrections (step 1), but cross-stem conflict corrections for the
+        # instrumental 'other' must not land in vocal_corr.
+        #
+        # We verify by checking that inst_corr has 'other' entries — if the bug
+        # were present, all 'other' conflict corrections would go to vocal_corr.
+        assert "other" in inst_corr, (
+            f"Instrumental 'other' corrections missing — likely misrouted to "
+            f"vocal_corrections. vocal_corr keys: {list(vocal_corr.keys())}, "
+            f"inst_corr keys: {list(inst_corr.keys())}"
+        )
+
     def test_silent_stems_no_corrections(self):
         """Silent stems should produce no corrections."""
         silent = np.zeros(int(SR * 1.0), dtype=np.float32)
