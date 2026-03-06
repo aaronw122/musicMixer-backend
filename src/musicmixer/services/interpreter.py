@@ -205,7 +205,7 @@ CAPABILITIES:
 
     # Section 5: Critical Mixing Rules (failure mode guards)
     section_5 = """CRITICAL MIXING RULES (violations produce bad audio):
-1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:no, labeled GOOD INSTRUMENTAL SOURCE). For instrumental breakdowns, assign at least one stem as "lead".
+1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:--, labeled GOOD INSTRUMENTAL SOURCE). For instrumental breakdowns, assign at least one stem as "lead".
 2. VOCAL-INSTRUMENTAL BALANCE: When vocals are active, assign them "lead" and ensure at least 2-3 instrumental stems are "support" or "background". A mashup should sound like a FULL BAND, not a vocal solo.
 3. VOCAL BLEED AWARENESS: Song A's vocal stem may contain faint drums/bass from the original mix. In low-energy sections where Song B's drums are quiet or silent, this ghost rhythm can become audible and clash. Keep Song B drums, bass, or other active stems at "support" or higher when vocals are active — they mask the bleed. The concern is sections where ALL Song B stems are quiet or "texture" while vocals play — that's where ghost rhythm becomes audible.
 4. ENERGY MATCHING: Match vocal energy to instrumental energy level. Exception: quiet vocal over minimal beat is acceptable as an intentional artistic choice.
