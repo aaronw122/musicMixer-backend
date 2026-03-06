@@ -7,9 +7,11 @@ import pytest
 
 from musicmixer.models import AudioMetadata, EnergyBuckets, IntentPlan, IntentSection, LyricLine, LyricsData, RemixPlan, Section, StemAnalysis
 from musicmixer.services.interpreter import (
+    TARGET_REMIX_DURATION_SECONDS,
     _build_dynamic_context,
     _build_few_shot_messages,
     _build_system_prompt_block,
+    _validate_intent_duration,
     _validate_intent_plan,
     default_arrangement,
     generate_fallback_plan,
@@ -805,3 +807,101 @@ class TestIntentValidation:
 
         assert result.end_time_vocal <= meta_a.duration_seconds
         assert result.end_time_instrumental <= meta_b.duration_seconds
+
+    def test_early_return_filters_sub4beat_sections(self):
+        """Issue #12: Early return at min-length filter assigns filtered sections to plan."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        # All sections are < 4 beats — should trigger early return
+        sections = [
+            IntentSection("intro", 0, 2, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 0),
+            IntentSection("verse", 2, 5, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 0),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
+
+        # After filtering, plan.sections should be empty (all < 4 beats)
+        assert result.sections == []
+        assert any("no sections >= 4 beats" in w for w in result.warnings)
+
+    def test_early_return_keeps_valid_sections_removes_short(self):
+        """Issue #12: When some sections are < 4 beats, they're removed; valid ones remain."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        sections = [
+            IntentSection("intro", 0, 2, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 0),
+            IntentSection("verse", 2, 128, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 0),
+            IntentSection("drop", 128, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
+
+        # The 2-beat intro should be removed; 3 valid sections remain
+        labels = [s.label for s in result.sections]
+        assert "intro" not in labels
+        assert len(result.sections) >= 2  # at least verse + drop (outro may be kept or intro prepended)
+
+
+class TestIntentDurationValidation:
+    """Tests for _validate_intent_duration() — Issue #11 off-by-one fix."""
+
+    def test_last_section_clamped_after_filter(self):
+        """Issue #11: Last section's end_beat is clamped AFTER filtering, not before."""
+        target_bpm = 120.0
+        max_duration = TARGET_REMIX_DURATION_SECONDS * 1.5  # 315s
+        max_beats = int(max_duration * target_bpm / 60)  # 630
+
+        # Create sections where the last one spans the max_beats boundary
+        # Section C starts before max_beats but ends after it
+        sections = [
+            IntentSection("intro", 0, 100, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("verse", 100, 400, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("drop", 400, 600, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 600, 800, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+
+        result, ok = _validate_intent_duration(plan, target_bpm)
+
+        assert ok is True
+        # The filter should keep sections with start_beat < max_beats (630)
+        # intro(0-100), verse(100-400), drop(400-600), outro(600-800) — outro starts at 600 < 630, kept
+        # The post-filter last section's end_beat should be clamped to max_beats
+        assert result.sections[-1].end_beat == max_beats
+        assert all(s.start_beat < max_beats for s in result.sections)
+
+    def test_all_sections_beyond_max_beats_returns_false(self):
+        """When all sections start beyond max_beats, returns (plan, False)."""
+        target_bpm = 120.0
+        max_duration = TARGET_REMIX_DURATION_SECONDS * 1.5
+        max_beats = int(max_duration * target_bpm / 60)
+
+        # All sections start beyond max_beats — need total to exceed max_duration
+        sections = [
+            IntentSection("drop", max_beats + 10, max_beats + 100, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+
+        result, ok = _validate_intent_duration(plan, target_bpm)
+
+        assert ok is False
+        assert result.sections == []
+
+    def test_within_duration_unchanged(self):
+        """Sections within duration limits pass through unchanged."""
+        target_bpm = 120.0
+        sections = [
+            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("drop", 32, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+
+        result, ok = _validate_intent_duration(plan, target_bpm)
+
+        assert ok is True
+        assert len(result.sections) == 3
+        assert result.sections[-1].end_beat == 416

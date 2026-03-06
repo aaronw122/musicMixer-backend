@@ -988,6 +988,7 @@ def _validate_intent_plan(
     sections = [s for s in sections if s.end_beat - s.start_beat >= 4]
     if not sections:
         # Completely unrecoverable -- caller should use fallback
+        plan.sections = sections
         plan.warnings.append("Section arrangement was invalid (no sections >= 4 beats).")
         return plan
 
@@ -1084,8 +1085,10 @@ def _validate_intent_duration(
         return plan, False
     elif total_seconds > max_duration:
         max_beats = int(max_duration * target_bpm / 60)
-        plan.sections[-1].end_beat = min(plan.sections[-1].end_beat, max_beats)
         plan.sections = [s for s in plan.sections if s.start_beat < max_beats]
+        if not plan.sections:
+            return plan, False
+        plan.sections[-1].end_beat = min(plan.sections[-1].end_beat, max_beats)
         plan.warnings.append("Remix was shortened to fit maximum duration.")
         return plan, True
 
