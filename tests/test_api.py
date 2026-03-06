@@ -246,6 +246,35 @@ class TestCreateRemix:
         finally:
             del sys.modules["musicmixer.services.pipeline_day1"]
 
+    def test_oversized_upload_aborts_without_full_read(self, client, tmp_path):
+        """Should abort chunked read early without buffering the entire file."""
+        fake_module = types.ModuleType("musicmixer.services.pipeline_day1")
+        fake_module.run_pipeline_sync = lambda *a: None
+        sys.modules["musicmixer.services.pipeline_day1"] = fake_module
+
+        try:
+            with patch("musicmixer.api.remix.settings") as inner_settings:
+                inner_settings.max_file_size_mb = 1  # 1 MB limit
+                inner_settings.allowed_extensions = {".mp3", ".wav"}
+                inner_settings.data_dir = tmp_path
+
+                # Create data larger than 1 MB but track how much is actually read
+                oversized_data = b"x" * (2 * 1024 * 1024)  # 2 MB
+
+                response = client.post(
+                    "/api/remix",
+                    files={
+                        "song_a": ("song_a.mp3", oversized_data, "audio/mpeg"),
+                        "song_b": ("song_b.mp3", b"small", "audio/mpeg"),
+                    },
+                    data={"prompt": "test"},
+                )
+                assert response.status_code == 413
+                assert "song_a" in response.json()["detail"]
+                assert "1MB" in response.json()["detail"]
+        finally:
+            del sys.modules["musicmixer.services.pipeline_day1"]
+
     def test_submit_failure_releases_processing_slot(self, client):
         """If executor.submit fails, the slot should be released for the next request."""
         class FailingExecutor:
