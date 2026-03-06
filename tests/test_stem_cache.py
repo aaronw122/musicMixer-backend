@@ -417,20 +417,22 @@ class TestConcurrentAccess:
 
         def write_cache(stems_dir):
             try:
-                with patch("musicmixer.services.stem_cache.settings") as mock_settings:
-                    mock_settings.stem_cache_enabled = True
-                    mock_settings.stem_cache_dir = cache_dir
-                    mock_settings.stem_cache_max_gb = 10.0
-                    cache_stems(cache_key, stems_dir)
+                cache_stems(cache_key, stems_dir)
             except Exception as e:
                 errors.append(e)
 
-        t1 = threading.Thread(target=write_cache, args=(stems_a,))
-        t2 = threading.Thread(target=write_cache, args=(stems_b,))
-        t1.start()
-        t2.start()
-        t1.join(timeout=10)
-        t2.join(timeout=10)
+        # Patch ONCE, outside threads — mock.patch is not thread-safe
+        with patch("musicmixer.services.stem_cache.settings") as mock_settings:
+            mock_settings.stem_cache_enabled = True
+            mock_settings.stem_cache_dir = cache_dir
+            mock_settings.stem_cache_max_gb = 10.0
+
+            t1 = threading.Thread(target=write_cache, args=(stems_a,))
+            t2 = threading.Thread(target=write_cache, args=(stems_b,))
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
 
         assert not errors, f"Concurrent write errors: {errors}"
 
