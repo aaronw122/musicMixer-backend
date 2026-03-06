@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from musicmixer.models import AudioMetadata, RemixPlan, Section
+from musicmixer.services.tempo import estimate_target_bpm
 
 logger = logging.getLogger(__name__)
 
@@ -220,16 +221,8 @@ def _estimate_tempo_stretch(
     if vocal_bpm <= 0 or inst_bpm <= 0:
         return (0.0, 0.0)
 
-    # Estimate target BPM based on tempo_source
-    if plan.tempo_source == "song_a":
-        target = meta_a.bpm
-    elif plan.tempo_source == "song_b":
-        target = meta_b.bpm
-    elif plan.tempo_source == "average":
-        target = (vocal_bpm + inst_bpm) / 2
-    else:
-        # weighted_midpoint: 65/35 instrumental bias
-        target = inst_bpm * 0.65 + vocal_bpm * 0.35
+    # Use the canonical algorithm for target BPM.
+    target = estimate_target_bpm(vocal_bpm, inst_bpm, plan.tempo_source)
 
     vocal_stretch = abs(target - vocal_bpm) / vocal_bpm * 100
     inst_stretch = abs(target - inst_bpm) / inst_bpm * 100
@@ -556,12 +549,7 @@ def _extract_harmonic_tempo_features(
         inst_bpm = meta_b.bpm if plan.vocal_source == "song_a" else meta_a.bpm
 
         if vocal_bpm > 0 and inst_bpm > 0:
-            if plan.tempo_source == "song_a":
-                target = meta_a.bpm
-            elif plan.tempo_source == "song_b":
-                target = meta_b.bpm
-            else:
-                target = inst_bpm * 0.65 + vocal_bpm * 0.35
+            target = estimate_target_bpm(vocal_bpm, inst_bpm, plan.tempo_source)
 
             # Vocal direction: positive = speeding up vocals, negative = slowing down
             vocal_direction = (target - vocal_bpm) / vocal_bpm * 100

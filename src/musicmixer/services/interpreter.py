@@ -1397,7 +1397,7 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
     i_start = inst_meta.duration_seconds * 0.25
     i_end = min(i_start + TARGET_REMIX_DURATION_SECONDS, inst_meta.duration_seconds)
 
-    tempo_src = "average"  # Split stretch burden between both songs
+    tempo_src = "weighted_midpoint"  # Bias toward instrumental BPM to minimize vocal stretch
     fallback_target_bpm = estimate_target_bpm(
         vocal_bpm=vocal_meta.bpm,
         instrumental_bpm=inst_meta.bpm,

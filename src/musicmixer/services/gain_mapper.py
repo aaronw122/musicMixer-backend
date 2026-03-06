@@ -410,7 +410,7 @@ def map_intent_to_gains(
         start_time_instrumental=intent.start_time_instrumental,
         end_time_instrumental=intent.end_time_instrumental,
         sections=sections,
-        tempo_source="song_b",  # default; caller can override
+        tempo_source="weighted_midpoint",
         key_source=intent.key_source,
         explanation=intent.explanation,
         warnings=all_warnings,

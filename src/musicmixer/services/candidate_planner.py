@@ -77,7 +77,7 @@ def _compute_total_beats(meta_a: AudioMetadata, meta_b: AudioMetadata) -> tuple[
     target_bpm = estimate_target_bpm(
         vocal_bpm=meta_a.bpm,
         instrumental_bpm=meta_b.bpm,
-        tempo_source="average",
+        tempo_source="weighted_midpoint",
     )
     total_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
     # Snap total beats to 4-beat grid
@@ -111,7 +111,7 @@ def _build_remix_plan(
         start_time_instrumental=i_start,
         end_time_instrumental=i_end,
         sections=sections,
-        tempo_source="average",
+        tempo_source="weighted_midpoint",
         key_source="none",
         explanation=f"Candidate plan using {family_name} arrangement family.",
         warnings=[],
