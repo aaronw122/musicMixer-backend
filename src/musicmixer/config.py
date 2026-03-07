@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     max_queue_depth: int = 10
     session_ttl_hours: int = 3
     queue_entry_ttl_minutes: int = 150
+    processing_timeout_minutes: int = 20
     distributed_limiter_enabled: bool = False
 
     # Stem separation
@@ -50,7 +51,7 @@ class Settings(BaseSettings):
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()

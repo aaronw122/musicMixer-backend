@@ -30,6 +30,7 @@ class SessionState:
     """In-memory state for a single remix session."""
     status: str = "queued"                      # "queued" | "processing" | "complete" | "error" | "cancelled"
     events: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=100))
+    created_at: float = field(default_factory=time.time)            # Wall-clock time for TTL expiry
     created_at_mono: float = field(default_factory=time.monotonic)
     cancelled: threading.Event = field(default_factory=threading.Event)
     remix_path: str | None = None
