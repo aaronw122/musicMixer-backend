@@ -756,8 +756,15 @@ def run_pipeline(
         rap_vocals=rap_vocals,
     )
     logger.info(
-        "Session %s: Key plan: action=%s, shift_a=%.1f, shift_b=%.1f, reason=%s",
-        session_id, key_plan.action, key_plan.shift_a, key_plan.shift_b, key_plan.reason,
+        "Session %s: [KEY] Song A: %s %s (conf=%.2f, mod=%s) | Song B: %s %s (conf=%.2f, mod=%s)",
+        session_id,
+        meta_a.key, meta_a.scale, meta_a.key_confidence or 0, meta_a.has_modulation,
+        meta_b.key, meta_b.scale, meta_b.key_confidence or 0, meta_b.has_modulation,
+    )
+    logger.info(
+        "Session %s: [KEY] Plan: action=%s, distance=%d, shift_a=%.1f st, shift_b=%.1f st, target=%s %s, reason=%s",
+        session_id, key_plan.action, key_plan.distance, key_plan.shift_a, key_plan.shift_b,
+        key_plan.target_key, key_plan.target_scale, key_plan.reason,
     )
 
     # Extract semitone shifts from key plan
