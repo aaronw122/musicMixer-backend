@@ -1215,6 +1215,16 @@ def run_pipeline(
     # === DONE ===
     session.remix_path = str(output_path)
     session.explanation = plan.explanation
+
+    # Copy plan results to session (needed by /public endpoint)
+    session.used_fallback = plan.used_fallback
+    session.warnings = plan.warnings
+
+    # Capture phone BEFORE setting status to "complete" — once complete,
+    # cleanup considers the session eligible for purging.
+    phone = session.notify_phone
+    session.notify_phone = None
+
     session.status = "complete"
 
     complete_event = {
@@ -1229,5 +1239,14 @@ def run_pipeline(
         complete_event["keyWarning"] = session.key_warning
 
     emit_progress(event_queue, complete_event, session=session)
+
+    # Send SMS notification if a phone was registered
+    if phone:
+        try:
+            from musicmixer.services.sms import send_remix_ready
+
+            send_remix_ready(phone, session_id)
+        except Exception:
+            logger.exception("Session %s: SMS notification failed", session_id)
 
     logger.info("Session %s: Pipeline complete. Output: %s", session_id, output_path)
