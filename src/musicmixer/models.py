@@ -37,6 +37,10 @@ class SessionState:
     explanation: str | None = None
     key_warning: str | None = None              # Key convergence warning (included in SSE complete event)
     last_event: dict | None = None              # Most recent event (for reconnecting SSE clients)
+    # SMS notification fields (Phase 1C)
+    notify_phone: str | None = None             # Deleted after SMS send
+    used_fallback: bool = False                 # Set at pipeline completion if fallback stems were used
+    warnings: list[str] = field(default_factory=list)  # Accumulated pipeline warnings
 
 
 @dataclass

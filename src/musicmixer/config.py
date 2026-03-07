@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     youtube_enabled: bool = True
     youtube_max_duration_seconds: int = 900  # 15 minutes
 
+    # SMS notifications
+    sms_enabled: bool = False
+    app_base_url: str = "http://localhost:5173"
+
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
