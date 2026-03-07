@@ -77,7 +77,6 @@ def _make_plan(
     sections: list[Section] | None = None,
     vocal_source: str = "song_a",
     tempo_source: str = "weighted_midpoint",
-    key_source: str = "none",
 ) -> RemixPlan:
     """Create a RemixPlan with convenient defaults."""
     if sections is None:
@@ -97,7 +96,6 @@ def _make_plan(
         end_time_instrumental=120.0,
         sections=sections,
         tempo_source=tempo_source,
-        key_source=key_source,
         explanation="test plan",
     )
 
@@ -222,7 +220,7 @@ class TestExtractFeaturesBasic:
 
     def test_works_with_full_metadata(self) -> None:
         """Features should work with plan + both AudioMetadata objects."""
-        plan = _make_plan(key_source="song_a")
+        plan = _make_plan()
         meta_a = _make_metadata(bpm=120.0, key="C", scale="major")
         meta_b = _make_metadata(bpm=128.0, key="G", scale="major")
         result = extract_features(plan, meta_a=meta_a, meta_b=meta_b)
@@ -513,14 +511,14 @@ class TestHarmonicTempoFeatures:
 
     def test_harmonic_features_with_metadata(self) -> None:
         """With metadata, should compute real values."""
-        plan = _make_plan(key_source="song_a")
+        plan = _make_plan()
         meta_a = _make_metadata(bpm=120.0, key="C", scale="major")
         meta_b = _make_metadata(bpm=130.0, key="G", scale="major")
         features = _extract_harmonic_tempo_features(plan, meta_a, meta_b)
         # C major (8B) to G major (9B) = Camelot distance 1
         assert features["harmonic_camelot_distance"] == 1.0
-        # C to G = 7 semitones clockwise, 5 counter-clockwise -> min = 5
-        assert features["harmonic_pitch_shift_semitones"] == 5.0
+        # Pitch shift is always 0.0 now (key matching handled by pipeline)
+        assert features["harmonic_pitch_shift_semitones"] == 0.0
         # Tempo stretch should be nonzero
         assert features["tempo_vocal_stretch_pct"] > 0.0
 

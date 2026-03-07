@@ -267,88 +267,6 @@ def check_tempo_stretch_safety(
     return violations
 
 
-def check_pitch_shift_safety(plan: RemixPlan) -> list[ConstraintViolation]:
-    """Constraint 6: Pitch shift safety.
-
-    The absolute pitch shift must be <= 4 semitones. We infer this from
-    key_source: if key_source is "none", no pitch shift is applied (safe).
-    Otherwise, the shift is encoded in the plan warnings or is implied by
-    the key difference. Since we cannot determine exact semitone shift from
-    the plan alone without AudioMetadata key info, this constraint checks
-    that key_source is one of the valid values. Audio-based semitone
-    validation uses the metadata when available.
-    """
-    violations: list[ConstraintViolation] = []
-
-    if plan.key_source not in ("song_a", "song_b", "none"):
-        violations.append(ConstraintViolation(
-            code=ConstraintCode.PITCH_SHIFT_UNSAFE,
-            message=f"key_source '{plan.key_source}' is not a recognized value",
-        ))
-
-    return violations
-
-
-def check_pitch_shift_semitones(
-    plan: RemixPlan,
-    meta_a: AudioMetadata | None = None,
-    meta_b: AudioMetadata | None = None,
-) -> list[ConstraintViolation]:
-    """Constraint 6 (audio-dependent): Validate actual semitone shift <= 4.
-
-    Uses key information from AudioMetadata when available. Skips if key
-    info is not present on both songs.
-    """
-    violations: list[ConstraintViolation] = []
-
-    if meta_a is None or meta_b is None:
-        return violations
-    if meta_a.key is None or meta_b.key is None:
-        return violations
-    if plan.key_source == "none":
-        return violations
-
-    # Compute semitone distance between the two keys.
-    semitones = _key_semitone_distance(meta_a.key, meta_b.key)
-    if semitones is not None and semitones > 4:
-        violations.append(ConstraintViolation(
-            code=ConstraintCode.PITCH_SHIFT_UNSAFE,
-            message=(
-                f"Pitch shift of {semitones} semitones exceeds 4-semitone limit "
-                f"(key_a={meta_a.key}, key_b={meta_b.key})"
-            ),
-        ))
-
-    return violations
-
-
-# Map note names to semitone offsets from C.
-_NOTE_TO_SEMITONE = {
-    "C": 0, "C#": 1, "Db": 1,
-    "D": 2, "D#": 3, "Eb": 3,
-    "E": 4, "Fb": 4,
-    "F": 5, "F#": 6, "Gb": 6,
-    "G": 7, "G#": 8, "Ab": 8,
-    "A": 9, "A#": 10, "Bb": 10,
-    "B": 11, "Cb": 11,
-}
-
-
-def _key_semitone_distance(key_a: str, key_b: str) -> int | None:
-    """Compute the minimum semitone distance between two keys.
-
-    Keys should be note names like "C", "F#", "Bb". Returns the minimum
-    of the clockwise and counter-clockwise distances on the chromatic circle,
-    or None if either key is not recognized.
-    """
-    sa = _NOTE_TO_SEMITONE.get(key_a)
-    sb = _NOTE_TO_SEMITONE.get(key_b)
-    if sa is None or sb is None:
-        return None
-    diff = abs(sa - sb)
-    return min(diff, 12 - diff)
-
-
 def check_transition_bounds(plan: RemixPlan) -> list[ConstraintViolation]:
     """Constraint 7: Transition bounds.
 
@@ -701,8 +619,6 @@ def validate_candidate(
     violations.extend(check_beat_grid_alignment(plan))
     violations.extend(check_mvp_source_split(plan))
     violations.extend(check_tempo_stretch_safety(plan, meta_a, meta_b))
-    violations.extend(check_pitch_shift_safety(plan))
-    violations.extend(check_pitch_shift_semitones(plan, meta_a, meta_b))
     violations.extend(check_transition_bounds(plan))
     violations.extend(check_contrast_requirement(plan))
     violations.extend(check_no_dual_lead_vocals(plan))

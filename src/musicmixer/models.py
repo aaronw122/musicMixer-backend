@@ -32,6 +32,7 @@ class SessionState:
     created_at_mono: float = field(default_factory=time.monotonic)
     remix_path: str | None = None
     explanation: str | None = None
+    key_warning: str | None = None              # Key convergence warning (included in SSE complete event)
     last_event: dict | None = None              # Most recent event (for reconnecting SSE clients)
 
 
@@ -209,8 +210,8 @@ class IntentPlan:
     start_time_instrumental: float
     end_time_instrumental: float
     sections: list[IntentSection]
-    key_source: str               # "song_a" | "song_b" | "none"
     explanation: str
+    vocal_type: str = "sung"      # "sung" | "rap"
     warnings: list[str] = field(default_factory=list)
 
 
@@ -264,7 +265,6 @@ class RemixPlan:
     end_time_instrumental: float
     sections: list[Section]                     # Beat-aligned arrangement
     tempo_source: str                           # "song_a" | "song_b" | "average" | "weighted_midpoint"
-    key_source: str                             # "song_a" | "song_b" | "none"
     explanation: str
     warnings: list[str] = field(default_factory=list)
     used_fallback: bool = False

@@ -337,35 +337,26 @@ def _score_harmonic_fit(
 ) -> float:
     """Score harmonic fit: key distance, pitch shift amount.
 
-    Higher score for key_source != 'none'. When audio metadata with key info
-    is available, score based on Camelot distance. Falls back to plan-only
-    scoring when metadata is unavailable.
+    Key matching is now handled automatically by the pipeline. Score is
+    based purely on Camelot distance when audio metadata is available,
+    or returns a neutral default when metadata is unavailable.
     """
     score = 0.0
 
-    # Key source decision quality (0.4 weight)
-    if plan.key_source != "none":
-        score += 1.0 * 0.4
-    else:
-        score += 0.3 * 0.4
-
-    # If we have key metadata, score Camelot distance (0.6 weight)
+    # If we have key metadata, score Camelot distance
     if meta_a and meta_b and meta_a.key and meta_b.key:
         distance = _camelot_distance(meta_a.key, meta_a.scale, meta_b.key, meta_b.scale)
         if distance <= 1:
-            score += 1.0 * 0.6  # Same or adjacent key
+            score += 1.0  # Same or adjacent key
         elif distance <= 2:
-            score += 0.7 * 0.6
+            score += 0.7
         elif distance <= 3:
-            score += 0.4 * 0.6
+            score += 0.4
         else:
-            score += 0.1 * 0.6  # Very distant keys
+            score += 0.1  # Very distant keys
     else:
-        # No key data -- give moderate credit for having a key source
-        if plan.key_source != "none":
-            score += 0.7 * 0.6
-        else:
-            score += 0.4 * 0.6
+        # No key data -- neutral score
+        score += 0.5
 
     return min(max(score, 0.0), 1.0)
 

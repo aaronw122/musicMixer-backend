@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from musicmixer.models import AudioMetadata, RemixPlan, Section
-from musicmixer.services.taste_constraints import _key_semitone_distance
 from musicmixer.services.tempo import estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -186,21 +185,10 @@ def _estimate_pitch_shift_semitones(
 ) -> float:
     """Estimate the pitch shift in semitones implied by the plan.
 
-    If key_source is set to a song and both songs have key data, compute the
-    semitone difference. Otherwise return 0.0 (no shift).
+    Key matching is now handled automatically by the pipeline, so this
+    always returns 0.0. Retained for feature vector stability.
     """
-    if plan.key_source == "none" or meta_a is None or meta_b is None:
-        return 0.0
-    if meta_a.key is None or meta_b.key is None:
-        return 0.0
-    if meta_a.scale is None or meta_b.scale is None:
-        return 0.0
-
-    # Compute actual semitone distance on the chromatic circle.
-    semitones = _key_semitone_distance(meta_a.key, meta_b.key)
-    if semitones is None:
-        return 0.0  # Unknown key -> no shift estimate
-    return float(semitones)
+    return 0.0
 
 
 def _estimate_tempo_stretch(
@@ -524,8 +512,7 @@ def _extract_harmonic_tempo_features(
         and meta_a.scale is not None and meta_b.scale is not None
     ):
         dist = _camelot_distance(meta_a.key, meta_a.scale, meta_b.key, meta_b.scale)
-        # If a key_source is specified, the pitch shift would close the distance.
-        # For MVP, report raw distance; the model learns the penalty.
+        # Report raw Camelot distance; the model learns the penalty.
         features["harmonic_camelot_distance"] = float(dist)
     else:
         features["harmonic_camelot_distance"] = 3.0  # Neutral unknown
@@ -638,7 +625,6 @@ def _discover_feature_names() -> list[str]:
         end_time_instrumental=60.0,
         sections=[dummy_section],
         tempo_source="weighted_midpoint",
-        key_source="none",
         explanation="dummy",
     )
     features: dict[str, float] = {}

@@ -127,6 +127,7 @@ def run_pipeline(
     )
     from musicmixer.services.ducking import spectral_duck
     from musicmixer.services.eq import apply_corrective_eq
+    from musicmixer.services.key_matching import compute_key_plan
     from musicmixer.services.spectral import (
         compute_adaptive_corrections,
         compute_spectral_profile,
@@ -453,6 +454,12 @@ def run_pipeline(
         lyrics_b=lyrics_b_data,
     )
 
+    # Capture vocal_type before IntentPlan is converted to RemixPlan
+    # (RemixPlan doesn't carry vocal_type). Default to "sung" if unavailable.
+    vocal_type = "sung"
+    if isinstance(intent_or_plan, IntentPlan):
+        vocal_type = getattr(intent_or_plan, "vocal_type", "sung") or "sung"
+
     # If the LLM succeeded, we get an IntentPlan that needs gain mapping.
     # If it fell back, we already have a RemixPlan with concrete gains.
     if isinstance(intent_or_plan, IntentPlan):
@@ -738,35 +745,88 @@ def run_pipeline(
         session_id, target_bpm, stretch_vocals, stretch_instrumentals,
     )
 
+    # === STEP 8.5: Key convergence ===
+    # Compute pitch shifts needed to align the keys of both songs.
+    # Must run AFTER analysis (keys detected) and BEFORE rubberband (which
+    # applies the pitch shifts alongside tempo stretching).
+    rap_vocals = vocal_type == "rap"
+    key_plan = compute_key_plan(
+        meta_a.key, meta_a.scale, meta_a.key_confidence, meta_a.has_modulation,
+        meta_b.key, meta_b.scale, meta_b.key_confidence, meta_b.has_modulation,
+        rap_vocals=rap_vocals,
+    )
+    logger.info(
+        "Session %s: [KEY] Song A: %s %s (conf=%.2f, mod=%s) | Song B: %s %s (conf=%.2f, mod=%s)",
+        session_id,
+        meta_a.key, meta_a.scale, meta_a.key_confidence or 0, meta_a.has_modulation,
+        meta_b.key, meta_b.scale, meta_b.key_confidence or 0, meta_b.has_modulation,
+    )
+    logger.info(
+        "Session %s: [KEY] Plan: action=%s, distance=%d, shift_a=%.1f st, shift_b=%.1f st, target=%s %s, reason=%s",
+        session_id, key_plan.action, key_plan.distance, key_plan.shift_a, key_plan.shift_b,
+        key_plan.target_key, key_plan.target_scale, key_plan.reason,
+    )
+
+    # Extract semitone shifts from key plan
+    vocal_semitones = key_plan.shift_a if key_plan.action in ("shift", "warning") else 0
+    inst_semitones = key_plan.shift_b if key_plan.action in ("shift", "warning") else 0
+
+    # Handle warnings and incompatible cases
+    if key_plan.action == "warning":
+        session.key_warning = (
+            f"Large key difference ({meta_a.key} {meta_a.scale} vs {meta_b.key} {meta_b.scale}) — "
+            "the key match is pushing quality limits."
+        )
+    elif key_plan.action == "incompatible":
+        # Zero out shifts — proceed without key matching
+        session.key_warning = (
+            f"Songs are too far apart in key to match "
+            f"({meta_a.key} {meta_a.scale} vs {meta_b.key} {meta_b.scale}) — "
+            "remix built without key matching."
+        )
+        vocal_semitones = 0
+        inst_semitones = 0
+
     # === STEP 9: Tempo match via rubberband (parallel) ===
     logger.info("Session %s: [9/17] tempo matching via rubberband...", session_id)
 
-    total_stems_to_stretch = (
-        (len(vocal_audio) if stretch_vocals else 0)
-        + (len(inst_audio) if stretch_instrumentals else 0)
+    # Determine which stems need rubberband processing (tempo stretch OR key shift)
+    need_vocal_rb = stretch_vocals or vocal_semitones != 0
+    need_inst_rb = stretch_instrumentals or inst_semitones != 0
+
+    total_stems_to_process = (
+        (len(vocal_audio) if need_vocal_rb else 0)
+        + (len(inst_audio) if need_inst_rb else 0)
     )
 
     # Emit batch-level progress BEFORE the pool starts (avoids 5-10s silent gap in SSE stream)
     emit_progress(event_queue, {
         "step": "processing",
-        "detail": f"Matching tempo (all {total_stems_to_stretch} stems in parallel)...",
+        "detail": f"Matching tempo and key ({total_stems_to_process} stems in parallel)...",
         "progress": 0.62,
     }, session=session)
 
     with ThreadPoolExecutor(max_workers=6) as rb_executor:
         futures = {}
-        if stretch_vocals and "vocals" in vocal_audio:
+        if need_vocal_rb and "vocals" in vocal_audio:
             # Only stretch the vocal stem — other Song A stems are unused
             # by the renderer, so stretching them wastes CPU.
             futures[("vocal", "vocals")] = rb_executor.submit(
                 rubberband_process, vocal_audio["vocals"], sr,
-                vocal_meta.bpm, target_bpm, is_vocal=True,
+                vocal_meta.bpm, target_bpm,
+                semitones=vocal_semitones, is_vocal=True,
             )
-        if stretch_instrumentals:
+        if need_inst_rb:
             for stem_name in list(inst_audio.keys()):
+                # Drums are exempt from pitch shifting — they're unpitched,
+                # and shifting smears transients.
+                # "other" stem from Song B shifts with inst_semitones (keeps
+                # backing elements aligned with the instrumental group).
+                stem_semitones = 0 if stem_name == "drums" else inst_semitones
                 futures[("inst", stem_name)] = rb_executor.submit(
                     rubberband_process, inst_audio[stem_name], sr,
                     inst_meta.bpm, target_bpm,
+                    semitones=stem_semitones,
                 )
         # Dynamic timeout: 60s base + 2s per second of longest song.
         # Sized for modest hardware (e.g., i5-8500T). Generous on fast
@@ -1136,13 +1196,17 @@ def run_pipeline(
     session.explanation = plan.explanation
     session.status = "complete"
 
-    emit_progress(event_queue, {
+    complete_event = {
         "step": "complete",
         "detail": "Remix ready!",
         "progress": 1.0,
         "explanation": plan.explanation,
         "warnings": plan.warnings,
         "usedFallback": plan.used_fallback,
-    }, session=session)
+    }
+    if session.key_warning:
+        complete_event["keyWarning"] = session.key_warning
+
+    emit_progress(event_queue, complete_event, session=session)
 
     logger.info("Session %s: Pipeline complete. Output: %s", session_id, output_path)
