@@ -32,6 +32,7 @@ class SessionState:
     created_at_mono: float = field(default_factory=time.monotonic)
     remix_path: str | None = None
     explanation: str | None = None
+    key_warning: str | None = None              # Key convergence warning (included in SSE complete event)
     last_event: dict | None = None              # Most recent event (for reconnecting SSE clients)
 
 
