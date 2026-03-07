@@ -87,7 +87,7 @@ def _pipeline_wrapper(
     pipeline_start = time.monotonic()
     try:
         session.status = "processing"
-        from musicmixer.services.pipeline import run_pipeline
+        from musicmixer.services.pipeline import CancelledError, run_pipeline
 
         run_pipeline(
             session_id=session_id,
@@ -100,6 +100,16 @@ def _pipeline_wrapper(
             song_b_original_filename=song_b_original_filename,
         )
         _update_avg_remix_duration(time.monotonic() - pipeline_start)
+    except CancelledError:
+        logger.info("Session %s: pipeline cancelled by user", session_id)
+        session.status = "cancelled"
+        from musicmixer.services.pipeline import emit_progress
+
+        emit_progress(session.events, {
+            "step": "cancelled",
+            "detail": "Remix cancelled",
+            "progress": 0,
+        }, session=session)
     except BaseException as exc:
         logger.exception("Session %s: pipeline failed", session_id)
         session.status = "error"
@@ -204,7 +214,7 @@ def _youtube_pipeline_wrapper(
     pipeline_start = time.monotonic()
     try:
         session.status = "processing"
-        from musicmixer.services.pipeline import emit_progress, run_pipeline
+        from musicmixer.services.pipeline import CancelledError, emit_progress, run_pipeline
         from musicmixer.services.youtube import download_youtube_audio
 
         upload_dir = settings.data_dir / "uploads" / session_id
@@ -281,6 +291,10 @@ def _youtube_pipeline_wrapper(
 
         _emit_monotonic("Both songs downloaded!", 0.45)
 
+        # Check cancellation before starting heavy pipeline work
+        from musicmixer.services.pipeline import check_cancelled
+        check_cancelled(session)
+
         logger.info(
             "Session %s: YouTube downloads complete. A=%r (%ds, %s %dkbps), B=%r (%ds, %s %dkbps)",
             session_id,
@@ -316,11 +330,17 @@ def _youtube_pipeline_wrapper(
         )
         _update_avg_remix_duration(time.monotonic() - pipeline_start)
 
+    except CancelledError:
+        logger.info("Session %s: YouTube pipeline cancelled by user", session_id)
+        session.status = "cancelled"
+        emit_progress(session.events, {
+            "step": "cancelled",
+            "detail": "Remix cancelled",
+            "progress": 0,
+        }, session=session)
     except BaseException as exc:
         logger.exception("Session %s: YouTube pipeline failed", session_id)
         session.status = "error"
-        from musicmixer.services.pipeline import emit_progress
-
         emit_progress(session.events, {
             "step": "error",
             "detail": str(exc),
@@ -378,6 +398,12 @@ def _process_next_queued(app_state) -> None:
                 "detail": "Queue wait time exceeded, please try again",
                 "progress": 0,
             }, session=item.session)
+            continue
+
+        # Check if session was cancelled or abandoned while queued
+        if item.session.cancelled.is_set() or item.session.status == "cancelled":
+            logger.info("Session %s: cancelled while queued, skipping", item.session_id)
+            item.session.status = "cancelled"
             continue
 
         # Check if the SSE client is still connected by checking session status.
@@ -675,6 +701,34 @@ def create_remix(
     return {"session_id": session_id}
 
 
+@router.post("/remix/{session_id}/cancel")
+async def cancel_remix(session_id: str, request: Request):
+    """Cancel a running or queued remix session."""
+    _validate_uuid(session_id)
+
+    with request.app.state.sessions_lock:
+        session = request.app.state.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+
+    if session.status in ("complete", "error", "cancelled"):
+        return {"status": session.status, "message": "Session already finished"}
+
+    session.cancelled.set()
+    logger.info("Session %s: cancel requested (status was %s)", session_id, session.status)
+
+    if session.status == "queued":
+        session.status = "cancelled"
+        from musicmixer.services.pipeline import emit_progress
+        emit_progress(session.events, {
+            "step": "cancelled",
+            "detail": "Remix cancelled",
+            "progress": 0,
+        }, session=session)
+
+    return {"status": "cancelling", "message": "Cancel signal sent"}
+
+
 @router.get("/remix/{session_id}/progress")
 async def get_progress(session_id: str, request: Request):
     """SSE endpoint streaming pipeline progress events."""
@@ -744,15 +798,18 @@ async def _event_stream(
                 yield 'data: {"step":"keepalive","detail":"","progress":-1}\n\n'
             continue
         except asyncio.CancelledError:
-            # Client disconnected — mark session as abandoned if still queued
+            # Client disconnected — cancel the session
             if session.status == "queued":
                 session.status = "abandoned"
+            elif session.status == "processing":
+                session.cancelled.set()
+                logger.info("Session %s: SSE client disconnected, cancelling pipeline", session_id)
             break
 
         session.last_event = event
         yield f"data: {json.dumps(event)}\n\n"
 
-        if event.get("step") in ("complete", "error"):
+        if event.get("step") in ("complete", "error", "cancelled"):
             break
 
 
