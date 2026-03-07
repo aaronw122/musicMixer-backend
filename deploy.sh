@@ -7,7 +7,7 @@ cd "$SCRIPT_DIR"
 
 cleanup() {
     echo "Cleaning up staged frontend build..."
-    rm -rf ./static-build
+    rm -rf "$SCRIPT_DIR/static-build"
 }
 trap cleanup EXIT
 

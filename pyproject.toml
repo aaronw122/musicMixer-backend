@@ -5,17 +5,14 @@ description = "AI-powered music remix tool"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.84.0",
-    "audio-separator>=0.41.1",
     "fastapi>=0.133.0",
     "librosa>=0.11.0",
     "modal>=1.3.4",
     "mutagen>=1.47.0",
     "numpy>=2.4.2",
     "pedalboard>=0.9.0",
-    "onnxruntime>=1.24.2",
     "pydantic-settings>=2.13.1",
     "pydub>=0.25.1",
-    "pedalboard>=0.9.0",
     "pyloudnorm>=0.2.0",
     "python-multipart>=0.0.22",
     "scipy>=1.17.1",
@@ -27,6 +24,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local = [
+    "audio-separator>=0.41.1",
+    "onnxruntime>=1.24.2",
+]
 analysis = [
     "essentia; python_version < '3.12'",
 ]
