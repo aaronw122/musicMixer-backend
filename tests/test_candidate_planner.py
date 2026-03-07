@@ -133,14 +133,12 @@ class TestStructureHash:
         plan1 = RemixPlan(
             vocal_source="song_a", start_time_vocal=0, end_time_vocal=60,
             start_time_instrumental=0, end_time_instrumental=60,
-            sections=sections, tempo_source="average", key_source="none",
-            explanation="test", used_fallback=False,
+            sections=sections, tempo_source="average",            explanation="test", used_fallback=False,
         )
         plan2 = RemixPlan(
             vocal_source="song_a", start_time_vocal=0, end_time_vocal=60,
             start_time_instrumental=0, end_time_instrumental=60,
-            sections=sections, tempo_source="average", key_source="none",
-            explanation="different explanation", used_fallback=False,
+            sections=sections, tempo_source="average",            explanation="different explanation", used_fallback=False,
         )
         assert _structure_hash(plan1) == _structure_hash(plan2)
 
@@ -158,14 +156,12 @@ class TestStructureHash:
         plan_a = RemixPlan(
             vocal_source="song_a", start_time_vocal=0, end_time_vocal=60,
             start_time_instrumental=0, end_time_instrumental=60,
-            sections=sections_a, tempo_source="average", key_source="none",
-            explanation="test", used_fallback=False,
+            sections=sections_a, tempo_source="average",            explanation="test", used_fallback=False,
         )
         plan_b = RemixPlan(
             vocal_source="song_a", start_time_vocal=0, end_time_vocal=60,
             start_time_instrumental=0, end_time_instrumental=60,
-            sections=sections_b, tempo_source="average", key_source="none",
-            explanation="test", used_fallback=False,
+            sections=sections_b, tempo_source="average",            explanation="test", used_fallback=False,
         )
         assert _structure_hash(plan_a) != _structure_hash(plan_b)
 

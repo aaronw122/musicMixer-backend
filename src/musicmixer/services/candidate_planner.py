@@ -112,7 +112,6 @@ def _build_remix_plan(
         end_time_instrumental=i_end,
         sections=sections,
         tempo_source="weighted_midpoint",
-        key_source="none",
         explanation=f"Candidate plan using {family_name} arrangement family.",
         warnings=[],
         used_fallback=False,

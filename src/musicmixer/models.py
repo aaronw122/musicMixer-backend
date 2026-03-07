@@ -209,8 +209,8 @@ class IntentPlan:
     start_time_instrumental: float
     end_time_instrumental: float
     sections: list[IntentSection]
-    key_source: str               # "song_a" | "song_b" | "none"
     explanation: str
+    vocal_type: str = "sung"      # "sung" | "rap"
     warnings: list[str] = field(default_factory=list)
 
 
@@ -264,7 +264,6 @@ class RemixPlan:
     end_time_instrumental: float
     sections: list[Section]                     # Beat-aligned arrangement
     tempo_source: str                           # "song_a" | "song_b" | "average" | "weighted_midpoint"
-    key_source: str                             # "song_a" | "song_b" | "none"
     explanation: str
     warnings: list[str] = field(default_factory=list)
     used_fallback: bool = False

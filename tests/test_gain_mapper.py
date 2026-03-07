@@ -68,7 +68,6 @@ def _make_intent_section(
 
 def _make_intent_plan(
     sections: list[IntentSection] | None = None,
-    key_source: str = "song_b",
     explanation: str = "Test plan",
     warnings: list[str] | None = None,
 ) -> IntentPlan:
@@ -88,7 +87,6 @@ def _make_intent_plan(
         start_time_instrumental=0.0,
         end_time_instrumental=90.0,
         sections=sections,
-        key_source=key_source,
         explanation=explanation,
         warnings=warnings or [],
     )
@@ -548,11 +546,6 @@ class TestOutputShape:
         assert plan.start_time_instrumental == intent.start_time_instrumental
         assert plan.end_time_instrumental == intent.end_time_instrumental
 
-    def test_key_source_copied(self):
-        intent = _make_intent_plan(key_source="song_a")
-        plan = map_intent_to_gains(intent)
-        assert plan.key_source == "song_a"
-
     def test_explanation_copied(self):
         intent = _make_intent_plan(explanation="Custom explanation")
         plan = map_intent_to_gains(intent)
@@ -690,7 +683,6 @@ class TestEndToEnd:
                     transition_in="fade", transition_beats=8,
                 ),
             ],
-            key_source="song_b",
             explanation="Vocal-forward remix with a heavy drop section.",
             warnings=["Key conflict between songs may cause dissonance."],
         )

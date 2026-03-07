@@ -22,8 +22,6 @@ from musicmixer.services.taste_constraints import (
     check_mvp_source_split,
     check_no_dual_lead_vocals,
     check_outro_quality,
-    check_pitch_shift_safety,
-    check_pitch_shift_semitones,
     check_section_min_length,
     check_stem_quality_gate,
     check_tempo_stretch_safety,
@@ -63,7 +61,6 @@ def _make_valid_plan(
     sections: list[Section] | None = None,
     vocal_source: str = "song_a",
     tempo_source: str = "song_a",
-    key_source: str = "none",
 ) -> RemixPlan:
     """Create a valid RemixPlan that passes all plan-level constraints.
 
@@ -99,7 +96,6 @@ def _make_valid_plan(
         end_time_instrumental=60.0,
         sections=sections,
         tempo_source=tempo_source,
-        key_source=key_source,
         explanation="Test plan",
     )
 
@@ -386,76 +382,6 @@ class TestTempoStretchSafety:
         meta_b = _make_audio_metadata(bpm=114.0)
         # Target = 107, vocal stretch = |107-100|/100 = 7%, drum stretch = |107-114|/114 = 6.1%
         violations = check_tempo_stretch_safety(plan, meta_a, meta_b)
-        assert violations == []
-
-
-# ---------------------------------------------------------------------------
-# Constraint 6: Pitch shift safety
-# ---------------------------------------------------------------------------
-
-
-class TestPitchShiftSafety:
-
-    def test_valid_key_sources(self):
-        for ks in ("song_a", "song_b", "none"):
-            plan = _make_valid_plan(key_source=ks)
-            violations = check_pitch_shift_safety(plan)
-            assert violations == [], f"key_source='{ks}' should be valid"
-
-    def test_invalid_key_source(self):
-        plan = _make_valid_plan(key_source="auto")
-        violations = check_pitch_shift_safety(plan)
-        assert len(violations) == 1
-        assert violations[0].code == ConstraintCode.PITCH_SHIFT_UNSAFE
-
-
-class TestPitchShiftSemitones:
-
-    def test_small_shift_passes(self):
-        """2-semitone shift should pass."""
-        plan = _make_valid_plan(key_source="song_a")
-        meta_a = _make_audio_metadata(key="C")
-        meta_b = _make_audio_metadata(key="D")
-        violations = check_pitch_shift_semitones(plan, meta_a, meta_b)
-        assert violations == []
-
-    def test_large_shift_fails(self):
-        """6-semitone shift should fail."""
-        plan = _make_valid_plan(key_source="song_a")
-        meta_a = _make_audio_metadata(key="C")
-        meta_b = _make_audio_metadata(key="F#")
-        violations = check_pitch_shift_semitones(plan, meta_a, meta_b)
-        assert len(violations) == 1
-        assert violations[0].code == ConstraintCode.PITCH_SHIFT_UNSAFE
-
-    def test_four_semitones_passes(self):
-        """Exactly 4 semitones should pass."""
-        plan = _make_valid_plan(key_source="song_a")
-        meta_a = _make_audio_metadata(key="C")
-        meta_b = _make_audio_metadata(key="E")
-        violations = check_pitch_shift_semitones(plan, meta_a, meta_b)
-        assert violations == []
-
-    def test_skips_when_no_key_data(self):
-        plan = _make_valid_plan(key_source="song_a")
-        meta_a = _make_audio_metadata(key=None)
-        meta_b = _make_audio_metadata(key="C")
-        violations = check_pitch_shift_semitones(plan, meta_a, meta_b)
-        assert violations == []
-
-    def test_skips_when_key_source_none(self):
-        plan = _make_valid_plan(key_source="none")
-        meta_a = _make_audio_metadata(key="C")
-        meta_b = _make_audio_metadata(key="F#")
-        violations = check_pitch_shift_semitones(plan, meta_a, meta_b)
-        assert violations == []
-
-    def test_wraps_around_chromatic_circle(self):
-        """B to C is 1 semitone, not 11."""
-        plan = _make_valid_plan(key_source="song_a")
-        meta_a = _make_audio_metadata(key="B")
-        meta_b = _make_audio_metadata(key="C")
-        violations = check_pitch_shift_semitones(plan, meta_a, meta_b)
         assert violations == []
 
 
@@ -889,7 +815,6 @@ class TestValidateCandidate:
         plan = _make_valid_plan(
             vocal_source="song_a",
             tempo_source="song_a",
-            key_source="song_a",
         )
         meta_a = _make_audio_metadata(bpm=120.0, key="C")
         meta_b = _make_audio_metadata(bpm=125.0, key="D")

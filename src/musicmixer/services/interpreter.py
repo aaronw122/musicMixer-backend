@@ -65,7 +65,7 @@ REMIX_PLAN_TOOL: dict = {
         "required": [
             "start_time_vocal", "end_time_vocal",
             "start_time_instrumental", "end_time_instrumental",
-            "sections", "key_source",
+            "sections", "vocal_type",
             "explanation", "warnings",
         ],
         "properties": {
@@ -148,10 +148,10 @@ REMIX_PLAN_TOOL: dict = {
                 },
             },
             # tempo_source removed — always computed algorithmically via weighted_midpoint
-            "key_source": {
+            "vocal_type": {
                 "type": "string",
-                "enum": ["song_a", "song_b", "none"],
-                "description": "Which song's key to match to. 'none' to skip key matching.",
+                "enum": ["sung", "rap"],
+                "description": "Whether Song A's vocals are melodic/sung or rap/spoken word. Only flag 'rap' if the vocals are ENTIRELY rapped or spoken with NO melodic singing. If the artist sings at all (hooks, choruses, melodic sections), use 'sung' — the sung portions need key matching and the rapped portions tolerate the shift fine.",
             },
             "explanation": {
                 "type": "string",
@@ -290,19 +290,14 @@ Reference arrangements (use as inspiration, not rigid structures):
 
 Every section boundary must land on a phrase boundary from at least one source song. Section durations come from the source material's natural phrase lengths, not fixed percentages. Prefer fewer, longer sections over many short ones — minimum 8 bars per section. Short remixes (under 48 total bars) should have 3-4 sections; longer remixes can have up to 8. You may combine, reorder, or omit sections from the references above."""
 
-    # Section 9: Tempo/Key Rules (static; key_matching_detail is dynamic)
+    # Section 9: Tempo Rules and Vocal Type
     section_9 = """TEMPO MATCHING:
 Tempo is handled automatically by the system using an algorithm that balances vocal and instrumental stretch.
 You do NOT choose tempo_source — it is not in your tool schema. Focus on arrangement and stem roles.
 If the BPM gap is large (>20%), mention in your explanation that some tempo stretching was applied.
 
-KEY COMPATIBILITY:
-- Same key = no shifting needed (key_source: "none").
-- Compatible keys that blend WITHOUT pitch shifting: relative major/minor (e.g., Cmin/Ebmaj), perfect fifth apart (e.g., Cmin/Gmin). If songs are in compatible keys, set key_source to "none".
-- Dissonant keys that NEED shifting or avoidance: semitone apart (C/C#), tritone apart (C/F#). If shifting would exceed 4 semitones, set key_source to "none" and add a warning.
-
-PITCH LIMIT:
-- Do not plan shifts above +/-4 semitones. If compatibility would require more, keep original key and add a warning."""
+VOCAL TYPE:
+Classify Song A's vocal_type as 'rap' only if the vocals are ENTIRELY rapped or spoken with NO melodic singing. If the artist sings at all (hooks, choruses, melodic sections), use 'sung' — the sung portions need key matching and the rapped portions tolerate the shift fine."""
 
     # Section 10: Explanation and Warnings
     section_10 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
@@ -329,7 +324,6 @@ Do NOT warn about normal characteristics like one song having more vocals than t
 def _build_dynamic_context(
     song_a_meta: AudioMetadata,
     song_b_meta: AudioMetadata,
-    key_matching_detail: str,
     total_available_beats: int,
     stretch_pct: float | None = None,
     lyrics_a: LyricsData | None = None,
@@ -338,8 +332,8 @@ def _build_dynamic_context(
     """Build dynamic context string for injection into the user message.
 
     Contains per-request content: song data layers, stretch advisory,
-    key matching detail, and duration target. This content varies between
-    requests and is NOT cached in the system prompt.
+    and duration target. This content varies between requests and is NOT
+    cached in the system prompt.
     """
     # Compute per-song beat counts (approximate)
     total_beats_a = song_a_meta.total_beats
@@ -371,10 +365,6 @@ Arrangement guidance to minimize degradation:
 5. ENERGY: Place vocals in higher-energy sections where the dense mix provides natural masking.
 
 These are quality-driven defaults. Override with musical judgment if the prompt demands a vocal-focused arrangement."""
-
-    # Dynamic: Key matching detail (varies per song pair)
-    key_section = f"""KEY MATCHING:
-{key_matching_detail}"""
 
     # Dynamic: Duration target (varies per song pair)
     duration_section = f"""DURATION: Target = {TARGET_REMIX_DURATION_SECONDS}s = ~{total_available_beats} beats at {target_bpm:.0f} BPM (1 beat = {60 / target_bpm:.2f}s, 1 bar = 4 beats).
@@ -439,7 +429,6 @@ Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)}s will be RE
     dynamic_sections = [song_data]
     if stretch_section:
         dynamic_sections.append(stretch_section)
-    dynamic_sections.append(key_section)
     dynamic_sections.append(duration_section)
     return "\n\n".join(dynamic_sections)
 
@@ -685,45 +674,6 @@ def _build_cross_song_layer(
 
 
 # ---------------------------------------------------------------------------
-# Key matching guidance
-# ---------------------------------------------------------------------------
-
-def _compute_key_guidance(
-    meta_a: AudioMetadata, meta_b: AudioMetadata,
-) -> tuple[bool, str]:
-    """Pre-compute key matching decision for the LLM context.
-
-    Returns (available, detail_string). Degrades gracefully if key detection
-    fields are not present on AudioMetadata.
-    """
-    key_confidence_a = getattr(meta_a, "key_confidence", None)
-    key_confidence_b = getattr(meta_b, "key_confidence", None)
-
-    # If key detection is not implemented yet, bail out
-    if key_confidence_a is None or key_confidence_b is None:
-        return False, "Key matching: unavailable (key detection not yet implemented)"
-
-    has_mod_a = getattr(meta_a, "has_modulation", False)
-    has_mod_b = getattr(meta_b, "has_modulation", False)
-
-    if has_mod_a or has_mod_b:
-        return False, "Key matching: unavailable (one or both songs modulate key mid-song)"
-
-    # key_confidence here is from BPM confidence; for key we use a separate
-    # attribute if/when it exists. For now degrade if not available.
-    key_conf_a = getattr(meta_a, "key_confidence", 0.0)
-    key_conf_b = getattr(meta_b, "key_confidence", 0.0)
-    min_confidence = min(key_conf_a, key_conf_b)
-
-    if min_confidence < 0.40:
-        return False, f"Key matching: unavailable (low confidence: {min_confidence:.2f})"
-    elif min_confidence < 0.55:
-        return True, f"Key matching: available with half shift (moderate confidence: {min_confidence:.2f})"
-    else:
-        return True, f"Key matching: available (confidence: {min_confidence:.2f})"
-
-
-# ---------------------------------------------------------------------------
 # Few-shot examples
 # ---------------------------------------------------------------------------
 
@@ -748,7 +698,6 @@ def _build_few_shot_messages() -> list[dict]:
             "role": "user",
             "content": (
                 f'Create a remix plan for this prompt: "{default_prompt}"\n\n'
-                "KEY MATCHING:\nKey matching: unavailable (key detection not yet implemented)\n\n"
                 "DURATION: Target = 210s = ~413 beats at 118 BPM (1 beat = 0.51s, 1 bar = 4 beats).\n"
                 "Arrangements shorter than 147s will be REJECTED.\n\n"
                 "SONG DATA:\n\n"
@@ -823,7 +772,7 @@ def _build_few_shot_messages() -> list[dict]:
                             {"label": "chorus", "start_beat": 288, "end_beat": 368, "energy": "peak", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
                             {"label": "outro", "start_beat": 368, "end_beat": 416, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
-                        "key_source": "none",
+                        "vocal_type": "sung",
                         "explanation": "Night Ride's vocals over City Groove's beat with a warm, building arrangement. The hook ('Roll with me') lands at the first chorus for impact, and the second verse promotes guitar from background to support for variety.",
                         "warnings": [],
                     },
@@ -837,7 +786,6 @@ def _build_few_shot_messages() -> list[dict]:
             "role": "user",
             "content": (
                 f'Create a remix plan for this prompt: "{default_prompt}"\n\n'
-                "KEY MATCHING:\nKey matching: unavailable (key detection not yet implemented)\n\n"
                 "DURATION: Target = 210s = ~308 beats at 88 BPM (1 beat = 0.68s, 1 bar = 4 beats).\n"
                 "Arrangements shorter than 147s will be REJECTED.\n\n"
                 "SONG DATA:\n\n"
@@ -884,7 +832,7 @@ def _build_few_shot_messages() -> list[dict]:
                             {"label": "chorus", "start_beat": 192, "end_beat": 264, "energy": "high", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
                             {"label": "outro", "start_beat": 264, "end_beat": 312, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
-                        "key_source": "none",
+                        "vocal_type": "sung",
                         "explanation": "Slow Jam's vocals sit over Upbeat Track's instrumental, keeping a relaxed feel. The bridge section uses guitar as lead for contrast before the final vocal chorus.",
                         "warnings": ["Song B's tempo was adjusted ~10% to match Song A. Minor artifacts may be audible in sustained instruments."],
                     },
@@ -926,7 +874,7 @@ def _parse_intent_plan(
         start_time_instrumental=float(raw["start_time_instrumental"]),
         end_time_instrumental=float(raw["end_time_instrumental"]),
         sections=sections,
-        key_source=raw["key_source"],
+        vocal_type=raw.get("vocal_type", "sung"),
         explanation=raw["explanation"],
         warnings=list(raw.get("warnings", [])),
     )
@@ -1192,11 +1140,6 @@ def interpret_prompt(
         timeout=settings.llm_timeout_seconds,
     )
 
-    # Pre-compute key matching decision
-    _key_available, key_matching_detail = _compute_key_guidance(
-        song_a_meta, song_b_meta,
-    )
-
     # Compute total available beats (Song A=vocal, Song B=instrumental).
     target_bpm = estimate_target_bpm(
         vocal_bpm=song_a_meta.bpm,
@@ -1212,7 +1155,6 @@ def interpret_prompt(
     # Build dynamic context for user message
     dynamic_context = _build_dynamic_context(
         song_a_meta, song_b_meta,
-        key_matching_detail,
         total_available_beats,
         stretch_pct=stretch_pct,
         lyrics_a=lyrics_a,
@@ -1441,7 +1383,6 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
         end_time_instrumental=i_end,
         sections=default_arrangement(total_beats),
         tempo_source=tempo_src,
-        key_source="none",
         explanation=(
             "We created a remix using the strongest sections of each song. "
             "Vocals from Song A layered over Song B's instrumentals."
