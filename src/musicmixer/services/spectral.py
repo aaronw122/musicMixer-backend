@@ -287,9 +287,10 @@ def compute_adaptive_corrections(
             inst_corrections.setdefault(profile.stem_type, []).extend(corrections)
 
     # 2. Cross-stem conflict corrections
-    # Determine which stems belong to which source
-    vocal_stem_types = {p.stem_type for p in vocal_profiles}
-
+    # Route based on positional convention: detect_conflicts() always sets
+    # stem_a = vocal-source, stem_b = instrumental-source.  Using set
+    # membership on stem type strings would misroute stems that share type
+    # names across sources (e.g., both songs have an "other" stem).
     for conflict in conflicts:
         cut_stem = conflict.recommended_cut_stem
         correction = (
@@ -297,7 +298,7 @@ def compute_adaptive_corrections(
             conflict.recommended_cut_db,
             conflict.recommended_q,
         )
-        if cut_stem in vocal_stem_types:
+        if cut_stem == conflict.stem_a:
             vocal_corrections.setdefault(cut_stem, []).append(correction)
         else:
             inst_corrections.setdefault(cut_stem, []).append(correction)

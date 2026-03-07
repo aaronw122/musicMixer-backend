@@ -406,11 +406,21 @@ def create_remix(
             ("song_a", song_a, song_a_path),
             ("song_b", song_b, song_b_path),
         ]:
-            data = file.file.read()
-            if len(data) > max_bytes:
-                raise HTTPException(
-                    413, f"{label} exceeds {settings.max_file_size_mb}MB limit"
-                )
+            file.file.seek(0)
+            chunks = []
+            total = 0
+            while True:
+                chunk = file.file.read(1024 * 1024)  # 1 MB chunks
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        413,
+                        f"{label} exceeds {settings.max_file_size_mb}MB limit",
+                    )
+                chunks.append(chunk)
+            data = b"".join(chunks)
             dest.write_bytes(data)
 
         logger.info(
