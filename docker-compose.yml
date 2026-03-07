@@ -9,7 +9,7 @@ services:
     env_file: .env
     volumes:
       - musicmixer-data:/app/data
-      - ~/.modal.toml:/root/.modal.toml:ro
+      - /home/lobo/.modal.toml:/root/.modal.toml:ro
 
 volumes:
   musicmixer-data:

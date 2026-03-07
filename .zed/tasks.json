@@ -1,0 +1,11 @@
+[
+  {
+    "label": "deploy musicmixer",
+    "command": "/Users/aaron/Projects/musicMixer/backend/deploy.sh",
+    "args": [],
+    "shell": {
+      "program": "/bin/zsh"
+    },
+    "allow_concurrent_runs": false
+  }
+]
