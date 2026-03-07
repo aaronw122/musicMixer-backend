@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     # File limits
     max_file_size_mb: int = 50
+    max_upload_duration_seconds: int = 900  # 15 minutes
     allowed_extensions: set[str] = {".mp3", ".wav"}
 
     # Storage

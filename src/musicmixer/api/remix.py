@@ -18,6 +18,8 @@ import functools
 import json
 import logging
 import queue
+import shutil
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -41,6 +43,25 @@ router = APIRouter()
 # Updated after each completed remix for better accuracy.
 _AVG_REMIX_DURATION_S = 600.0  # initial estimate: 10 minutes
 _avg_lock = threading.Lock()
+
+
+def _probe_duration(file_path: Path) -> float | None:
+    """Return audio duration in seconds via ffprobe, or None on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(file_path),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return None
 
 
 def _update_avg_remix_duration(elapsed_seconds: float) -> None:
@@ -673,6 +694,18 @@ def create_remix(
         song_a_path.name,
         song_b_path.name,
     )
+
+    # Validate duration via ffprobe
+    max_dur = settings.max_upload_duration_seconds
+    for label, path in [("song_a", song_a_path), ("song_b", song_b_path)]:
+        duration = _probe_duration(path)
+        if duration is not None and duration > max_dur:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise HTTPException(
+                413,
+                f"{label} duration ({int(duration)}s) exceeds "
+                f"{max_dur // 60} minute limit",
+            )
 
     # Create session state
     session = SessionState()

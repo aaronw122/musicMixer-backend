@@ -20,6 +20,7 @@ def client(tmp_path):
         mock_settings.max_queue_depth = 10
         mock_settings.session_ttl_hours = 3
         mock_settings.queue_entry_ttl_minutes = 15
+        mock_settings.max_upload_duration_seconds = 900
         mock_settings.distributed_limiter_enabled = False
 
         # Create required directories
@@ -250,6 +251,61 @@ class TestCreateRemix:
         # If the slot leaked, this follow-up request would return 409.
         with patch("musicmixer.api.remix._pipeline_wrapper") as mock_wrapper:
             mock_wrapper.side_effect = lambda *args, **kwargs: args[5].release()
+            response = client.post(
+                "/api/remix",
+                files={
+                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+                },
+                data={"prompt": "test"},
+            )
+            assert response.status_code == 200
+
+
+class TestUploadDurationGuard:
+    """Tests that uploads exceeding max duration are rejected."""
+
+    def test_rejects_upload_exceeding_duration_limit(self, client):
+        """Should return 413 when a song exceeds the duration limit."""
+        # ffprobe returns 3600s (1 hour) — well over the 900s limit
+        with patch("musicmixer.api.remix._probe_duration", return_value=3600.0):
+            response = client.post(
+                "/api/remix",
+                files={
+                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+                },
+                data={"prompt": "test"},
+            )
+            assert response.status_code == 413
+            assert "duration" in response.json()["detail"].lower()
+
+    def test_accepts_upload_under_duration_limit(self, client):
+        """Should pass through when duration is under the limit."""
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            session.status = "complete"
+            processing_lock.release()
+
+        with patch("musicmixer.api.remix._probe_duration", return_value=300.0), \
+             patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
+            response = client.post(
+                "/api/remix",
+                files={
+                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+                },
+                data={"prompt": "test"},
+            )
+            assert response.status_code == 200
+
+    def test_accepts_upload_when_ffprobe_fails(self, client):
+        """Should not reject when ffprobe can't determine duration."""
+        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+            session.status = "complete"
+            processing_lock.release()
+
+        with patch("musicmixer.api.remix._probe_duration", return_value=None), \
+             patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",
                 files={
