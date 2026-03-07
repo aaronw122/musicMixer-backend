@@ -99,12 +99,12 @@ app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 def dev():
     import uvicorn
+    # Force deterministic fallback — no LLM API calls during dev
+    settings.anthropic_api_key = ""
     uvicorn.run(
         "musicmixer.main:app",
         host=settings.host,
         port=settings.port,
-        reload=True,
-        reload_excludes=["data", "data/**", "*.pyc", "__pycache__", "notes"],
     )
 
 
