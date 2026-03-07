@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     max_concurrent_mixes: int = Field(default=1, ge=1, le=8)
     max_queue_depth: int = 10
     session_ttl_hours: int = 3
-    queue_entry_ttl_minutes: int = 15
+    queue_entry_ttl_minutes: int = 150
     distributed_limiter_enabled: bool = False
 
     # Stem separation
