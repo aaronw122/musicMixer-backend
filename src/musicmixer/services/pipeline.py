@@ -153,7 +153,7 @@ def run_pipeline(
     logger.info("Session %s: [1/17] separating stems + analyzing audio...", session_id)
     emit_progress(event_queue, {
         "step": "separating",
-        "detail": "Extracting stems from both songs...",
+        "detail": "Pulling each instrument out of the mix...",
         "progress": 0.10,
     }, session=session)
 
@@ -235,7 +235,7 @@ def run_pipeline(
 
     emit_progress(event_queue, {
         "step": "separating",
-        "detail": "Stems extracted!",
+        "detail": "Got all the pieces!",
         "progress": 0.50,
     }, session=session)
 
@@ -245,7 +245,7 @@ def run_pipeline(
     # step ordering for SSE clients (separating -> analyzing -> processing -> ...)
     emit_progress(event_queue, {
         "step": "analyzing",
-        "detail": "Detecting tempo and key...",
+        "detail": "Figuring out the BPM and musical key...",
         "progress": 0.52,
     }, session=session)
 
@@ -271,7 +271,7 @@ def run_pipeline(
 
     emit_progress(event_queue, {
         "step": "analyzing",
-        "detail": f"Song A: {meta_a.bpm:.0f} BPM, Song B: {meta_b.bpm:.0f} BPM",
+        "detail": f"Song A vibes at {meta_a.bpm:.0f} BPM, Song B grooves at {meta_b.bpm:.0f} BPM",
         "progress": 0.55,
     }, session=session)
 
@@ -282,7 +282,7 @@ def run_pipeline(
     logger.info("Session %s: [3.5/17] analyzing song structure...", session_id)
     emit_progress(event_queue, {
         "step": "analyzing",
-        "detail": "Analyzing song structure...",
+        "detail": "Mapping out verses, choruses, drops...",
         "progress": 0.56,
     }, session=session)
 
@@ -336,7 +336,7 @@ def run_pipeline(
 
     emit_progress(event_queue, {
         "step": "analyzing",
-        "detail": "Song structure analyzed!",
+        "detail": "Got the blueprint!",
         "progress": 0.57,
     }, session=session)
 
@@ -442,7 +442,7 @@ def run_pipeline(
     logger.info("Session %s: [4/17] interpreting prompt via LLM...", session_id)
     emit_progress(event_queue, {
         "step": "interpreting",
-        "detail": "Planning your remix...",
+        "detail": "Your AI DJ is reading the prompt...",
         "progress": 0.58,
     }, session=session)
 
@@ -538,7 +538,7 @@ def run_pipeline(
 
     emit_progress(event_queue, {
         "step": "processing",
-        "detail": "Standardizing audio...",
+        "detail": "Getting everything on the same page...",
         "progress": 0.58,
     }, session=session)
 
@@ -615,7 +615,7 @@ def run_pipeline(
     # === STEP 7.7: Vocal pre-filter bandpass ===
     emit_progress(event_queue, {
         "step": "processing",
-        "detail": "Pre-filtering vocals...",
+        "detail": "Cleaning up the vocals...",
         "progress": 0.59,
     }, session=session)
     # Apply 150Hz-16kHz bandpass to vocal stems before tempo stretching.
@@ -802,7 +802,7 @@ def run_pipeline(
     # Emit batch-level progress BEFORE the pool starts (avoids 5-10s silent gap in SSE stream)
     emit_progress(event_queue, {
         "step": "processing",
-        "detail": f"Matching tempo and key ({total_stems_to_process} stems in parallel)...",
+        "detail": f"Syncing up the speeds and tuning ({total_stems_to_process} tracks)...",
         "progress": 0.62,
     }, session=session)
 
@@ -843,7 +843,7 @@ def run_pipeline(
     # Emit completion progress AFTER all futures resolve
     emit_progress(event_queue, {
         "step": "processing",
-        "detail": "Tempo matched!",
+        "detail": "Everything's locked in!",
         "progress": 0.75,
     }, session=session)
 
@@ -916,7 +916,7 @@ def run_pipeline(
     # post-compression loudness (otherwise level match is wasted).
     emit_progress(event_queue, {
         "step": "processing",
-        "detail": "Normalizing loudness...",
+        "detail": "Balancing the volume...",
         "progress": 0.80,
     }, session=session)
 
@@ -959,7 +959,7 @@ def run_pipeline(
     # === STEP 11.8: Pre-limit drum and bass transients ===
     emit_progress(event_queue, {
         "step": "processing",
-        "detail": "Taming drum transients...",
+        "detail": "Smoothing out the drum hits...",
         "progress": 0.82,
     }, session=session)
     # Drum transients have 12-15 dB crest factor, consuming all headroom
@@ -998,7 +998,7 @@ def run_pipeline(
     logger.info("Session %s: [12/17] rendering arrangement...", session_id)
     emit_progress(event_queue, {
         "step": "rendering",
-        "detail": "Building your remix...",
+        "detail": "Stitching the pieces together...",
         "progress": 0.85,
     }, session=session)
 
@@ -1039,7 +1039,7 @@ def run_pipeline(
     logger.info("Session %s: [12.5/17] applying spectral ducking...", session_id)
     emit_progress(event_queue, {
         "step": "rendering",
-        "detail": "Applying spectral ducking...",
+        "detail": "Making room so nothing clashes...",
         "progress": 0.87,
     }, session=session)
 
@@ -1098,7 +1098,7 @@ def run_pipeline(
     # === STEPS 14/14.5/15/15.5: Mastering chain (mutual exclusion) ===
     emit_progress(event_queue, {
         "step": "rendering",
-        "detail": "Mastering: peak limiting...",
+        "detail": "Final polish...",
         "progress": 0.89,
     }, session=session)
     # === STEP 14: Static mastering chain ===
@@ -1172,7 +1172,7 @@ def run_pipeline(
     # === STEP 16: Fades ===
     emit_progress(event_queue, {
         "step": "rendering",
-        "detail": "Applying fades...",
+        "detail": "Adding smooth transitions...",
         "progress": 0.93,
     }, session=session)
     skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
@@ -1185,7 +1185,7 @@ def run_pipeline(
     logger.info("Session %s: [17/17] exporting MP3...", session_id)
     emit_progress(event_queue, {
         "step": "rendering",
-        "detail": "Rendering final mix...",
+        "detail": "Bouncing your remix...",
         "progress": 0.95,
     }, session=session)
 
@@ -1198,7 +1198,7 @@ def run_pipeline(
 
     complete_event = {
         "step": "complete",
-        "detail": "Remix ready!",
+        "detail": "Your remix is ready! 🎧",
         "progress": 1.0,
         "explanation": plan.explanation,
         "warnings": plan.warnings,
