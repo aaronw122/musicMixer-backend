@@ -1,5 +1,6 @@
 import logging
 import os
+import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -72,6 +73,10 @@ async def lifespan(app: FastAPI):
     app.state.sessions_lock = threading.Lock()
     # Shared global capacity gate across ALL remix creation endpoints
     app.state.processing_lock = threading.BoundedSemaphore(value=mix_capacity)
+    # Wait queue for requests when all processing slots are busy
+    app.state.wait_queue = queue.Queue(maxsize=settings.max_queue_depth)
+    # Lock protecting wait queue operations for accurate position reporting
+    app.state.queue_lock = threading.Lock()
 
     logger.info("musicMixer backend started (max_concurrent_mixes=%d)", mix_capacity)
     yield

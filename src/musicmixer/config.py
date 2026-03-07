@@ -6,8 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
-    port: int = 8000
-    cors_origins: list[str] = ["http://localhost:5173"]
+    port: int = 8880
+    cors_origins: list[str] = ["http://localhost:5173", "https://mixer.awill.co"]
 
     # File limits
     max_file_size_mb: int = 50
@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # Storage
     data_dir: Path = Path("data")
     max_concurrent_mixes: int = Field(default=1, ge=1, le=8)
+    max_queue_depth: int = 10
+    session_ttl_hours: int = 3
+    queue_entry_ttl_minutes: int = 15
     distributed_limiter_enabled: bool = False
 
     # Stem separation
