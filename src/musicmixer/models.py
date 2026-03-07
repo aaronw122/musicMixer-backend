@@ -6,6 +6,7 @@ All dataclasses used across services are defined here to avoid circular imports.
 from __future__ import annotations
 
 import queue
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -27,9 +28,10 @@ VOCAL_SOURCE: str = "song_a"
 @dataclass
 class SessionState:
     """In-memory state for a single remix session."""
-    status: str = "queued"                      # "queued" | "processing" | "complete" | "error"
+    status: str = "queued"                      # "queued" | "processing" | "complete" | "error" | "cancelled"
     events: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=100))
     created_at_mono: float = field(default_factory=time.monotonic)
+    cancelled: threading.Event = field(default_factory=threading.Event)
     remix_path: str | None = None
     explanation: str | None = None
     key_warning: str | None = None              # Key convergence warning (included in SSE complete event)

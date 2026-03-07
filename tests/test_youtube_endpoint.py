@@ -58,6 +58,9 @@ def client(tmp_path):
         mock_settings.youtube_enabled = True
         mock_settings.youtube_max_duration_seconds = 900
         mock_settings.max_concurrent_mixes = 1
+        mock_settings.max_queue_depth = 10
+        mock_settings.session_ttl_hours = 3
+        mock_settings.queue_entry_ttl_minutes = 15
         mock_settings.distributed_limiter_enabled = False
 
         # Create required directories
@@ -66,7 +69,8 @@ def client(tmp_path):
         (tmp_path / "remixes").mkdir()
 
         with patch("musicmixer.api.remix.settings", mock_settings), \
-             patch("musicmixer.main.settings", mock_settings):
+             patch("musicmixer.main.settings", mock_settings), \
+             patch("musicmixer.api.remix.cleanup_expired_sessions"):
             with TestClient(app) as c:
                 yield c
 
@@ -213,8 +217,11 @@ class TestYouTubeRemixEndpoint:
         """Successful request should return a valid session_id immediately."""
         with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
             # Simulate the wrapper releasing the lock
-            def fake_wrapper(session_id, url_a, url_b, prompt, session, lock):
+            def fake_wrapper(session_id, url_a, url_b, prompt, session, lock, app_state=None):
                 lock.release()
+                if app_state:
+                    from musicmixer.api.remix import _process_next_queued
+                    _process_next_queued(app_state)
 
             mock_wrapper.side_effect = fake_wrapper
 
@@ -233,8 +240,8 @@ class TestYouTubeRemixEndpoint:
             # Verify it's a valid UUID
             uuid.UUID(data["session_id"])
 
-    def test_409_when_processing_lock_held(self, client):
-        """Should return 409 immediately if another remix is being processed."""
+    def test_queues_when_processing_lock_held(self, client):
+        """Should queue the request (return 200) if another remix is being processed."""
         # Acquire the lock to simulate an in-progress remix
         processing_lock = client.app.state.processing_lock
         processing_lock.acquire()
@@ -248,36 +255,53 @@ class TestYouTubeRemixEndpoint:
                     "prompt": "test remix",
                 },
             )
-            assert response.status_code == 409
-            assert "Another remix" in response.json()["detail"]
+            # Request should be queued, not rejected
+            assert response.status_code == 200
+            assert "session_id" in response.json()
         finally:
             processing_lock.release()
 
-    def test_409_prevents_download(self, client):
-        """409 should be returned before any download is attempted (fail-fast)."""
+    def test_503_when_queue_full(self, client):
+        """Should return 503 when processing slot is held and queue is full."""
         processing_lock = client.app.state.processing_lock
         processing_lock.acquire()
 
-        with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
-            try:
-                response = client.post(
-                    "/api/remix/youtube",
-                    json={
-                        "url_a": VALID_YT_URL_A,
-                        "url_b": VALID_YT_URL_B,
-                        "prompt": "test remix",
-                    },
-                )
-                assert response.status_code == 409
-                # The pipeline wrapper should never be called
-                mock_wrapper.assert_not_called()
-            finally:
-                processing_lock.release()
+        # Replace with a queue of capacity 1 and pre-fill it
+        import queue as _queue
+        from musicmixer.api.remix import _QueueItem
+        from musicmixer.models import SessionState
+
+        old_queue = client.app.state.wait_queue
+        tiny_queue = _queue.Queue(maxsize=1)
+        dummy_item = _QueueItem(
+            session_id="dummy", session=SessionState(), run_fn=lambda: None,
+        )
+        tiny_queue.put(dummy_item)
+        client.app.state.wait_queue = tiny_queue
+
+        try:
+            response = client.post(
+                "/api/remix/youtube",
+                json={
+                    "url_a": VALID_YT_URL_A,
+                    "url_b": VALID_YT_URL_B,
+                    "prompt": "test remix",
+                },
+            )
+            assert response.status_code == 503
+            assert "capacity" in response.json()["detail"]
+        finally:
+            processing_lock.release()
+            client.app.state.wait_queue = old_queue
 
     def test_session_created_in_app_state(self, client):
         """Session should be stored in app.state.sessions."""
         with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
-            mock_wrapper.side_effect = lambda *a: a[5].release()
+            def _fake(*a):
+                a[5].release()  # processing_lock
+                from musicmixer.api.remix import _process_next_queued
+                _process_next_queued(a[6])  # app_state
+            mock_wrapper.side_effect = _fake
 
             response = client.post(
                 "/api/remix/youtube",
@@ -387,8 +411,15 @@ class TestYouTubePipelineWrapper:
                 return result_a
             return result_b
 
+        mock_app_state = MagicMock()
+        mock_app_state.wait_queue = queue.Queue(maxsize=10)
+        mock_app_state.queue_lock = threading.Lock()
+        mock_app_state.processing_lock = lock
+        mock_app_state.executor = MagicMock()
+
         with patch("musicmixer.api.remix.settings") as mock_settings:
             mock_settings.data_dir = tmp_path
+            mock_settings.queue_entry_ttl_minutes = 15
 
             with patch("musicmixer.services.pipeline.run_pipeline") as mock_pipeline:
                 with patch("musicmixer.services.youtube.download_youtube_audio", new=fake_download):
@@ -399,6 +430,7 @@ class TestYouTubePipelineWrapper:
                         prompt="test prompt",
                         session=session,
                         processing_lock=lock,
+                        app_state=mock_app_state,
                     )
 
         # Both songs downloaded
@@ -441,8 +473,15 @@ class TestYouTubePipelineWrapper:
                 progress_callback(0.5, "50%")
             return result
 
+        mock_app_state = MagicMock()
+        mock_app_state.wait_queue = queue.Queue(maxsize=10)
+        mock_app_state.queue_lock = threading.Lock()
+        mock_app_state.processing_lock = lock
+        mock_app_state.executor = MagicMock()
+
         with patch("musicmixer.api.remix.settings") as mock_settings:
             mock_settings.data_dir = tmp_path
+            mock_settings.queue_entry_ttl_minutes = 15
 
             with patch("musicmixer.services.pipeline.run_pipeline"):
                 with patch("musicmixer.services.youtube.download_youtube_audio", new=fake_download):
@@ -453,6 +492,7 @@ class TestYouTubePipelineWrapper:
                         prompt="test",
                         session=session,
                         processing_lock=lock,
+                        app_state=mock_app_state,
                     )
 
         # Collect all events from the queue
@@ -491,8 +531,15 @@ class TestYouTubePipelineWrapper:
         async def failing_download(url, output_dir, progress_callback=None):
             raise RuntimeError("Download failed: video unavailable")
 
+        mock_app_state = MagicMock()
+        mock_app_state.wait_queue = queue.Queue(maxsize=10)
+        mock_app_state.queue_lock = threading.Lock()
+        mock_app_state.processing_lock = lock
+        mock_app_state.executor = MagicMock()
+
         with patch("musicmixer.api.remix.settings") as mock_settings:
             mock_settings.data_dir = tmp_path
+            mock_settings.queue_entry_ttl_minutes = 15
 
             with patch("musicmixer.services.youtube.download_youtube_audio", new=failing_download):
                 _youtube_pipeline_wrapper(
@@ -502,6 +549,7 @@ class TestYouTubePipelineWrapper:
                     prompt="test",
                     session=session,
                     processing_lock=lock,
+                    app_state=mock_app_state,
                 )
 
         # Lock must be released
@@ -526,7 +574,7 @@ class TestYouTubeProgressFlow:
         """After wrapper runs, last_event should reflect download progress."""
         completed = threading.Event()
 
-        def fake_wrapper(session_id, url_a, url_b, prompt, session, lock):
+        def fake_wrapper(session_id, url_a, url_b, prompt, session, lock, app_state=None):
             from musicmixer.services.pipeline import emit_progress
             emit_progress(session.events, {
                 "step": "downloading",
@@ -545,6 +593,9 @@ class TestYouTubeProgressFlow:
             }, session=session)
             session.status = "complete"
             lock.release()
+            if app_state:
+                from musicmixer.api.remix import _process_next_queued
+                _process_next_queued(app_state)
             completed.set()
 
         with patch("musicmixer.api.remix._youtube_pipeline_wrapper", side_effect=fake_wrapper):

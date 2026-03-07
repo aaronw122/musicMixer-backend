@@ -13,6 +13,7 @@ Day 3: Admin/debug stem endpoints.
 """
 
 import asyncio
+import dataclasses
 import functools
 import json
 import logging
@@ -23,7 +24,7 @@ import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Callable
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -31,10 +32,41 @@ from pydantic import BaseModel
 
 from musicmixer.config import settings
 from musicmixer.models import SessionState
+from musicmixer.services.cleanup import cleanup_expired_sessions
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Average remix duration in seconds, used for queue wait estimates.
+# Updated after each completed remix for better accuracy.
+_AVG_REMIX_DURATION_S = 600.0  # initial estimate: 10 minutes
+_avg_lock = threading.Lock()
+
+
+def _update_avg_remix_duration(elapsed_seconds: float) -> None:
+    """Update the running average remix duration with exponential smoothing."""
+    global _AVG_REMIX_DURATION_S
+    with _avg_lock:
+        # Exponential moving average (alpha=0.3 gives recent runs more weight)
+        _AVG_REMIX_DURATION_S = 0.7 * _AVG_REMIX_DURATION_S + 0.3 * elapsed_seconds
+
+
+# ---------------------------------------------------------------------------
+# Queue work item — what gets enqueued when all slots are busy
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class _QueueItem:
+    """A queued remix request waiting for a processing slot."""
+    session_id: str
+    session: SessionState
+    run_fn: Callable[[], None]  # callable that runs the pipeline (already bound)
+    enqueued_at: float = dataclasses.field(default_factory=time.monotonic)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline wrappers
+# ---------------------------------------------------------------------------
 
 def _pipeline_wrapper(
     session_id: str,
@@ -43,6 +75,7 @@ def _pipeline_wrapper(
     prompt: str,
     session: SessionState,
     processing_lock,
+    app_state,
     song_a_original_filename: str = "",
     song_b_original_filename: str = "",
 ) -> None:
@@ -51,9 +84,10 @@ def _pipeline_wrapper(
     Ownership note: after successful executor.submit(), this wrapper is the sole
     owner of the acquired processing slot and MUST release it on exit.
     """
+    pipeline_start = time.monotonic()
     try:
         session.status = "processing"
-        from musicmixer.services.pipeline import run_pipeline
+        from musicmixer.services.pipeline import CancelledError, run_pipeline
 
         run_pipeline(
             session_id=session_id,
@@ -65,6 +99,17 @@ def _pipeline_wrapper(
             song_a_original_filename=song_a_original_filename,
             song_b_original_filename=song_b_original_filename,
         )
+        _update_avg_remix_duration(time.monotonic() - pipeline_start)
+    except CancelledError:
+        logger.info("Session %s: pipeline cancelled by user", session_id)
+        session.status = "cancelled"
+        from musicmixer.services.pipeline import emit_progress
+
+        emit_progress(session.events, {
+            "step": "cancelled",
+            "detail": "Remix cancelled",
+            "progress": 0,
+        }, session=session)
     except BaseException as exc:
         logger.exception("Session %s: pipeline failed", session_id)
         session.status = "error"
@@ -77,6 +122,7 @@ def _pipeline_wrapper(
         }, session=session)
     finally:
         processing_lock.release()
+        _process_next_queued(app_state)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +200,7 @@ def _youtube_pipeline_wrapper(
     prompt: str,
     session: SessionState,
     processing_lock,
+    app_state,
 ) -> None:
     """Downloads YouTube audio in parallel, then runs the pipeline.
 
@@ -164,9 +211,10 @@ def _youtube_pipeline_wrapper(
     Ownership note: after successful executor.submit(), this wrapper is the sole
     owner of the acquired processing slot and MUST release it on exit.
     """
+    pipeline_start = time.monotonic()
     try:
         session.status = "processing"
-        from musicmixer.services.pipeline import emit_progress, run_pipeline
+        from musicmixer.services.pipeline import CancelledError, emit_progress, run_pipeline
         from musicmixer.services.youtube import download_youtube_audio
 
         upload_dir = settings.data_dir / "uploads" / session_id
@@ -243,6 +291,10 @@ def _youtube_pipeline_wrapper(
 
         _emit_monotonic("Both songs downloaded!", 0.45)
 
+        # Check cancellation before starting heavy pipeline work
+        from musicmixer.services.pipeline import check_cancelled
+        check_cancelled(session)
+
         logger.info(
             "Session %s: YouTube downloads complete. A=%r (%ds, %s %dkbps), B=%r (%ds, %s %dkbps)",
             session_id,
@@ -276,12 +328,19 @@ def _youtube_pipeline_wrapper(
             source_quality_a=source_quality_a,
             source_quality_b=source_quality_b,
         )
+        _update_avg_remix_duration(time.monotonic() - pipeline_start)
 
+    except CancelledError:
+        logger.info("Session %s: YouTube pipeline cancelled by user", session_id)
+        session.status = "cancelled"
+        emit_progress(session.events, {
+            "step": "cancelled",
+            "detail": "Remix cancelled",
+            "progress": 0,
+        }, session=session)
     except BaseException as exc:
         logger.exception("Session %s: YouTube pipeline failed", session_id)
         session.status = "error"
-        from musicmixer.services.pipeline import emit_progress
-
         emit_progress(session.events, {
             "step": "error",
             "detail": str(exc),
@@ -289,6 +348,7 @@ def _youtube_pipeline_wrapper(
         }, session=session)
     finally:
         processing_lock.release()
+        _process_next_queued(app_state)
 
 
 def _run_sync(coro):
@@ -301,6 +361,198 @@ def _run_sync(coro):
         loop.close()
 
 
+# ---------------------------------------------------------------------------
+# Queue management
+# ---------------------------------------------------------------------------
+
+def _process_next_queued(app_state) -> None:
+    """Pull the next valid item from the wait queue and submit it.
+
+    Called from the pipeline finally block after releasing the processing lock.
+    Skips items whose SSE clients have disconnected or that have exceeded
+    the queue entry TTL.
+    """
+    from musicmixer.services.pipeline import emit_progress
+
+    queue_entry_ttl_s = settings.queue_entry_ttl_minutes * 60
+
+    while True:
+        try:
+            item: _QueueItem = app_state.wait_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        # Broadcast updated positions to remaining queued sessions
+        _broadcast_queue_positions(app_state)
+
+        # Check if this queue entry has expired
+        if time.monotonic() - item.enqueued_at > queue_entry_ttl_s:
+            logger.info(
+                "Session %s: queue entry expired (waited %.0fs), skipping",
+                item.session_id,
+                time.monotonic() - item.enqueued_at,
+            )
+            item.session.status = "error"
+            emit_progress(item.session.events, {
+                "step": "error",
+                "detail": "Queue wait time exceeded, please try again",
+                "progress": 0,
+            }, session=item.session)
+            continue
+
+        # Check if session was cancelled or abandoned while queued
+        if item.session.cancelled.is_set() or item.session.status == "cancelled":
+            logger.info("Session %s: cancelled while queued, skipping", item.session_id)
+            item.session.status = "cancelled"
+            continue
+
+        # Check if the SSE client is still connected by checking session status.
+        # If the session was marked as abandoned (client disconnected), skip it.
+        if item.session.status == "abandoned":
+            logger.info(
+                "Session %s: client disconnected while queued, skipping",
+                item.session_id,
+            )
+            continue
+
+        # Acquire slot and start processing
+        if not app_state.processing_lock.acquire(blocking=False):
+            # Slot was taken (race condition); re-queue the item
+            try:
+                app_state.wait_queue.put_nowait(item)
+            except queue.Full:
+                item.session.status = "error"
+                emit_progress(item.session.events, {
+                    "step": "error",
+                    "detail": "Server overloaded, please try again",
+                    "progress": 0,
+                }, session=item.session)
+            return
+
+        # Emit processing_started event
+        emit_progress(item.session.events, {
+            "step": "processing_started",
+            "detail": "Your remix is starting now",
+            "progress": 0,
+        }, session=item.session)
+
+        try:
+            app_state.executor.submit(item.run_fn)
+        except Exception:
+            app_state.processing_lock.release()
+            logger.exception("Session %s: failed to submit queued pipeline", item.session_id)
+            item.session.status = "error"
+            emit_progress(item.session.events, {
+                "step": "error",
+                "detail": "Failed to start pipeline",
+                "progress": 0,
+            }, session=item.session)
+            continue
+        return
+
+
+def _get_queue_position(app_state, session_id: str) -> tuple[int, int]:
+    """Return (position, total) for a session in the wait queue.
+
+    Position is 1-based. Returns (0, total) if not found in queue.
+    Thread-safe: reads queue internals under queue_lock.
+    """
+    with app_state.queue_lock:
+        # Access the underlying deque for read-only position lookup
+        items = list(app_state.wait_queue.queue)
+        total = len(items)
+        for i, item in enumerate(items):
+            if item.session_id == session_id:
+                return (i + 1, total)
+    return (0, total)
+
+
+def _broadcast_queue_positions(app_state) -> None:
+    """Send updated queue_position events to all queued sessions."""
+    from musicmixer.services.pipeline import emit_progress
+
+    with app_state.queue_lock:
+        items = list(app_state.wait_queue.queue)
+
+    for i, item in enumerate(items):
+        position = i + 1
+        total = len(items)
+        emit_progress(item.session.events, {
+            "step": "queue_position",
+            "detail": f"Position {position} of {total}",
+            "position": position,
+            "total": total,
+            "progress": 0,
+        }, session=item.session)
+        emit_progress(item.session.events, {
+            "step": "queue_estimate",
+            "detail": f"Estimated wait: {int(position * _AVG_REMIX_DURATION_S)}s",
+            "wait_seconds": int(position * _AVG_REMIX_DURATION_S),
+            "progress": 0,
+        }, session=item.session)
+
+
+def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn: Callable[[], None]) -> None:
+    """Try to acquire a processing slot; if busy, enqueue the request.
+
+    Raises HTTPException(503) if the queue is full.
+    """
+    from musicmixer.services.pipeline import emit_progress
+
+    processing_lock = app_state.processing_lock
+
+    if processing_lock.acquire(blocking=False):
+        # Slot available — submit immediately
+        emit_progress(session.events, {
+            "step": "processing_started",
+            "detail": "Your remix is starting now",
+            "progress": 0,
+        }, session=session)
+        try:
+            app_state.executor.submit(run_fn)
+        except Exception:
+            processing_lock.release()
+            raise
+        return
+
+    # All slots busy — enqueue
+    item = _QueueItem(
+        session_id=session_id,
+        session=session,
+        run_fn=run_fn,
+    )
+
+    try:
+        app_state.wait_queue.put_nowait(item)
+    except queue.Full:
+        raise HTTPException(503, "Server is at capacity, please try again later")
+
+    # Get position and send queue events
+    position, total = _get_queue_position(app_state, session_id)
+    emit_progress(session.events, {
+        "step": "queue_position",
+        "detail": f"Position {position} of {total}",
+        "position": position,
+        "total": total,
+        "progress": 0,
+    }, session=session)
+    emit_progress(session.events, {
+        "step": "queue_estimate",
+        "detail": f"Estimated wait: {int(position * _AVG_REMIX_DURATION_S)}s",
+        "wait_seconds": int(position * _AVG_REMIX_DURATION_S),
+        "progress": 0,
+    }, session=session)
+
+    logger.info(
+        "Session %s: queued at position %d/%d",
+        session_id, position, total,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST endpoints
+# ---------------------------------------------------------------------------
+
 @router.post("/remix/youtube")
 def create_youtube_remix(
     request: Request,
@@ -309,8 +561,8 @@ def create_youtube_remix(
     """Accept two YouTube URLs, download audio, and start remix pipeline.
 
     Both URLs must be valid YouTube links. Returns session_id immediately.
-    Shared global capacity gate applies across both create endpoints.
-    Returns 409 if capacity is currently full.
+    If all processing slots are busy, the request is queued.
+    Returns 503 if the queue is full.
     """
     if not settings.youtube_enabled:
         raise HTTPException(403, "YouTube input is disabled")
@@ -319,39 +571,35 @@ def create_youtube_remix(
     _validate_youtube_url(body.url_a)
     _validate_youtube_url(body.url_b)
 
-    # Fail-fast: acquire a global capacity slot BEFORE downloading
-    # (don't waste time if capacity is already full).
-    processing_lock = request.app.state.processing_lock
-    if not processing_lock.acquire(blocking=False):
-        raise HTTPException(409, "Another remix is being processed")
-    slot_transferred = False
+    # Clean up expired sessions before processing
+    cleanup_expired_sessions()
 
-    try:
-        # Generate session ID
-        session_id = str(uuid.uuid4())
+    # Generate session ID
+    session_id = str(uuid.uuid4())
 
-        # Create session state
-        session = SessionState()
-        with request.app.state.sessions_lock:
-            request.app.state.sessions[session_id] = session
+    # Create session state
+    session = SessionState()
+    with request.app.state.sessions_lock:
+        request.app.state.sessions[session_id] = session
 
-        # Submit YouTube download + pipeline to background executor
-        request.app.state.executor.submit(
-            _youtube_pipeline_wrapper,
+    app_state = request.app.state
+    processing_lock = app_state.processing_lock
+
+    # Build the run function (binds all args for deferred execution)
+    def run_fn():
+        _youtube_pipeline_wrapper(
             session_id,
             body.url_a,
             body.url_b,
             body.prompt,
             session,
             processing_lock,
+            app_state,
         )
-        slot_transferred = True
 
-        return {"session_id": session_id}
-    finally:
-        # If submit failed, release in request thread (ownership never transferred).
-        if not slot_transferred:
-            processing_lock.release()
+    _enqueue_or_start(app_state, session_id, session, run_fn)
+
+    return {"session_id": session_id}
 
 
 @router.post("/remix")
@@ -363,8 +611,8 @@ def create_remix(
 ):
     """Accept two songs, start async pipeline, return session ID immediately.
 
-    Shared global capacity gate applies across both create endpoints.
-    Returns 409 if capacity is currently full.
+    If all processing slots are busy, the request is queued.
+    Returns 503 if the queue is full.
     """
     max_bytes = settings.max_file_size_mb * 1024 * 1024
 
@@ -378,82 +626,107 @@ def create_remix(
                 f"Allowed: {settings.allowed_extensions}",
             )
 
-    # Acquire a global capacity slot (non-blocking) -- authoritative gate
-    processing_lock = request.app.state.processing_lock
-    if not processing_lock.acquire(blocking=False):
-        raise HTTPException(409, "Another remix is being processed")
-    slot_transferred = False
+    # Clean up expired sessions before processing
+    cleanup_expired_sessions()
 
-    try:
-        # Generate session ID
-        session_id = str(uuid.uuid4())
+    # Generate session ID
+    session_id = str(uuid.uuid4())
 
-        # Save uploaded files
-        upload_dir = settings.data_dir / "uploads" / session_id
-        upload_dir.mkdir(parents=True, exist_ok=True)
+    # Save uploaded files
+    upload_dir = settings.data_dir / "uploads" / session_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
-        # Capture original filenames before saving (needed for lyrics lookup)
-        song_a_original_filename = song_a.filename or ""
-        song_b_original_filename = song_b.filename or ""
+    # Capture original filenames before saving (needed for lyrics lookup)
+    song_a_original_filename = song_a.filename or ""
+    song_b_original_filename = song_b.filename or ""
 
-        song_a_ext = Path(song_a.filename or "song_a.mp3").suffix.lower()
-        song_b_ext = Path(song_b.filename or "song_b.mp3").suffix.lower()
+    song_a_ext = Path(song_a.filename or "song_a.mp3").suffix.lower()
+    song_b_ext = Path(song_b.filename or "song_b.mp3").suffix.lower()
 
-        song_a_path = upload_dir / f"song_a{song_a_ext}"
-        song_b_path = upload_dir / f"song_b{song_b_ext}"
+    song_a_path = upload_dir / f"song_a{song_a_ext}"
+    song_b_path = upload_dir / f"song_b{song_b_ext}"
 
-        for label, file, dest in [
-            ("song_a", song_a, song_a_path),
-            ("song_b", song_b, song_b_path),
-        ]:
-            file.file.seek(0)
-            chunks = []
-            total = 0
-            while True:
-                chunk = file.file.read(1024 * 1024)  # 1 MB chunks
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise HTTPException(
-                        413,
-                        f"{label} exceeds {settings.max_file_size_mb}MB limit",
-                    )
-                chunks.append(chunk)
-            data = b"".join(chunks)
-            dest.write_bytes(data)
+    for label, file, dest in [
+        ("song_a", song_a, song_a_path),
+        ("song_b", song_b, song_b_path),
+    ]:
+        file.file.seek(0)
+        chunks = []
+        total = 0
+        while True:
+            chunk = file.file.read(1024 * 1024)  # 1 MB chunks
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    413,
+                    f"{label} exceeds {settings.max_file_size_mb}MB limit",
+                )
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        dest.write_bytes(data)
 
-        logger.info(
-            "Session %s: saved uploads (%s, %s)",
-            session_id,
-            song_a_path.name,
-            song_b_path.name,
-        )
+    logger.info(
+        "Session %s: saved uploads (%s, %s)",
+        session_id,
+        song_a_path.name,
+        song_b_path.name,
+    )
 
-        # Create session state
-        session = SessionState()
-        with request.app.state.sessions_lock:
-            request.app.state.sessions[session_id] = session
+    # Create session state
+    session = SessionState()
+    with request.app.state.sessions_lock:
+        request.app.state.sessions[session_id] = session
 
-        # Submit pipeline to background executor
-        request.app.state.executor.submit(
-            _pipeline_wrapper,
+    app_state = request.app.state
+    processing_lock = app_state.processing_lock
+
+    # Build the run function (binds all args for deferred execution)
+    def run_fn():
+        _pipeline_wrapper(
             session_id,
             song_a_path,
             song_b_path,
             prompt,
             session,
             processing_lock,
+            app_state,
             song_a_original_filename,
             song_b_original_filename,
         )
-        slot_transferred = True
 
-        return {"session_id": session_id}
-    finally:
-        # If submit failed (or we errored pre-submit), release in request thread.
-        if not slot_transferred:
-            processing_lock.release()
+    _enqueue_or_start(app_state, session_id, session, run_fn)
+
+    return {"session_id": session_id}
+
+
+@router.post("/remix/{session_id}/cancel")
+async def cancel_remix(session_id: str, request: Request):
+    """Cancel a running or queued remix session."""
+    _validate_uuid(session_id)
+
+    with request.app.state.sessions_lock:
+        session = request.app.state.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+
+    if session.status in ("complete", "error", "cancelled"):
+        return {"status": session.status, "message": "Session already finished"}
+
+    session.cancelled.set()
+    logger.info("Session %s: cancel requested (status was %s)", session_id, session.status)
+
+    if session.status == "queued":
+        session.status = "cancelled"
+        from musicmixer.services.pipeline import emit_progress
+        emit_progress(session.events, {
+            "step": "cancelled",
+            "detail": "Remix cancelled",
+            "progress": 0,
+        }, session=session)
+
+    return {"status": "cancelling", "message": "Cancel signal sent"}
 
 
 @router.get("/remix/{session_id}/progress")
@@ -469,7 +742,7 @@ async def get_progress(session_id: str, request: Request):
     sse_executor = request.app.state.sse_executor
 
     return StreamingResponse(
-        _event_stream(session, sse_executor),
+        _event_stream(session, sse_executor, request.app.state, session_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -482,10 +755,13 @@ async def get_progress(session_id: str, request: Request):
 async def _event_stream(
     session: SessionState,
     sse_executor,
+    app_state=None,
+    session_id: str = "",
 ) -> AsyncGenerator[str, None]:
     """Generate SSE data events from the session's event queue."""
     loop = asyncio.get_running_loop()
     start = time.monotonic()
+    last_heartbeat = time.monotonic()
 
     # On connect: send current state so reconnecting clients catch up
     if session.last_event:
@@ -512,16 +788,28 @@ async def _event_stream(
                 functools.partial(session.events.get, timeout=5),
             )
         except queue.Empty:
-            # Send keepalive as a data event (not SSE comment) so EventSource.onmessage fires
-            yield 'data: {"step":"keepalive","detail":"","progress":-1}\n\n'
+            now = time.monotonic()
+            # Send heartbeat every 15s while queued, keepalive otherwise
+            if session.status == "queued" and now - last_heartbeat >= 15:
+                yield 'data: {"step":"heartbeat","detail":"","progress":0}\n\n'
+                last_heartbeat = now
+            else:
+                # Send keepalive as a data event (not SSE comment) so EventSource.onmessage fires
+                yield 'data: {"step":"keepalive","detail":"","progress":-1}\n\n'
             continue
         except asyncio.CancelledError:
+            # Client disconnected — cancel the session
+            if session.status == "queued":
+                session.status = "abandoned"
+            elif session.status == "processing":
+                session.cancelled.set()
+                logger.info("Session %s: SSE client disconnected, cancelling pipeline", session_id)
             break
 
         session.last_event = event
         yield f"data: {json.dumps(event)}\n\n"
 
-        if event.get("step") in ("complete", "error"):
+        if event.get("step") in ("complete", "error", "cancelled"):
             break
 
 

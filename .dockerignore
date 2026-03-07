@@ -1,0 +1,13 @@
+.git
+data/
+__pycache__
+.env
+.env.production
+.venv
+tests/
+examples/
+notes/
+*.md
+.claude/
+scripts/
+architecture.excalidraw

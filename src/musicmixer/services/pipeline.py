@@ -21,6 +21,17 @@ logger = logging.getLogger(__name__)
 DSP_STEP_TIMEOUT_S = 120.0
 
 
+class CancelledError(Exception):
+    """Raised when a session is cancelled by the user."""
+    pass
+
+
+def check_cancelled(session: SessionState | None) -> None:
+    """Raise CancelledError if the session has been cancelled."""
+    if session is not None and session.cancelled.is_set():
+        raise CancelledError(f"Session cancelled by user")
+
+
 def emit_progress(
     event_queue: queue.Queue,
     event: dict,
@@ -36,7 +47,7 @@ def emit_progress(
     try:
         event_queue.put_nowait(event)
     except queue.Full:
-        if event.get("step") in ("complete", "error"):
+        if event.get("step") in ("complete", "error", "cancelled"):
             try:
                 event_queue.get_nowait()
             except queue.Empty:
@@ -241,6 +252,8 @@ def run_pipeline(
 
     logger.info("Session %s: [1/17] stems done (%d song_a, %d song_b)", session_id, len(song_a_stems), len(song_b_stems))
 
+    check_cancelled(session)
+
     # Emit analyzing progress AFTER separation progress to maintain monotonic
     # step ordering for SSE clients (separating -> analyzing -> processing -> ...)
     emit_progress(event_queue, {
@@ -438,6 +451,8 @@ def run_pipeline(
         session_id, len(vocal_stem_lufs), len(inst_stem_lufs),
     )
 
+    check_cancelled(session)
+
     # === STEP 4: Interpret prompt via LLM (fallback to deterministic plan) ===
     logger.info("Session %s: [4/17] interpreting prompt via LLM...", session_id)
     emit_progress(event_queue, {
@@ -611,6 +626,8 @@ def run_pipeline(
 
     vocal_audio = _filter_inactive(vocal_audio, "vocal")
     inst_audio = _filter_inactive(inst_audio, "instrumental")
+
+    check_cancelled(session)
 
     # === STEP 7.7: Vocal pre-filter bandpass ===
     emit_progress(event_queue, {
@@ -994,6 +1011,8 @@ def run_pipeline(
             session_id, pre_bass_peak, post_bass_peak,
         )
 
+    check_cancelled(session)
+
     # === STEP 12: Render arrangement ===
     logger.info("Session %s: [12/17] rendering arrangement...", session_id)
     emit_progress(event_queue, {
@@ -1180,6 +1199,8 @@ def run_pipeline(
     # final fade stage here in the pipeline for every remix.
     skip_fade_out = False
     mixed = apply_fades(mixed, sr, skip_fade_in=skip_fade_in, skip_fade_out=skip_fade_out)
+
+    check_cancelled(session)
 
     # === STEP 17: Export to MP3 ===
     logger.info("Session %s: [17/17] exporting MP3...", session_id)
