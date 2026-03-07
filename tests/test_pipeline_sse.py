@@ -30,8 +30,11 @@ def client(tmp_path):
         mock_settings.max_file_size_mb = 50
         mock_settings.cors_origins = ["http://localhost:5173"]
         mock_settings.host = "0.0.0.0"
-        mock_settings.port = 8000
+        mock_settings.port = 8880
         mock_settings.max_concurrent_mixes = 1
+        mock_settings.max_queue_depth = 10
+        mock_settings.session_ttl_hours = 3
+        mock_settings.queue_entry_ttl_minutes = 15
         mock_settings.distributed_limiter_enabled = False
 
         # Create required directories
@@ -40,7 +43,8 @@ def client(tmp_path):
         (tmp_path / "remixes").mkdir()
 
         with patch("musicmixer.api.remix.settings", mock_settings), \
-             patch("musicmixer.main.settings", mock_settings):
+             patch("musicmixer.main.settings", mock_settings), \
+             patch("musicmixer.api.remix.cleanup_expired_sessions"):
             with TestClient(app) as c:
                 yield c
 
@@ -156,29 +160,29 @@ class TestPostRemixAsync:
         import uuid
         uuid.UUID(data["session_id"])
 
-    def test_returns_409_when_processing(self, client, mock_pipeline_slow):
-        """A second POST while pipeline is running should return 409."""
+    def test_queues_when_processing(self, client, mock_pipeline_slow):
+        """A second POST while pipeline is running should be queued (return 200)."""
         slow_fn, go_event, done_event = mock_pipeline_slow
 
         with patch("musicmixer.services.pipeline.run_pipeline", side_effect=slow_fn):
-            # First request -- should succeed
+            # First request -- should succeed and start immediately
             resp1 = _post_remix(client)
             assert resp1.status_code == 200
 
             # Give the executor a moment to start the pipeline
             time.sleep(0.3)
 
-            # Second request -- should get 409
+            # Second request -- should be queued, not rejected
             resp2 = _post_remix(client)
-            assert resp2.status_code == 409
-            assert "Another remix" in resp2.json()["detail"]
+            assert resp2.status_code == 200
+            assert "session_id" in resp2.json()
 
             # Release the slow pipeline so cleanup happens
             go_event.set()
             done_event.wait(timeout=5)
 
     def test_mixed_endpoints_share_global_capacity_gate(self, client):
-        """Two mixed endpoint requests may be accepted at capacity=2; third gets 409."""
+        """Two mixed endpoint requests fill capacity=2; third is queued (not rejected)."""
         go_event = threading.Event()
         done_event = threading.Event()
         done_count = 0
@@ -215,6 +219,8 @@ class TestPostRemixAsync:
             prompt,
             session,
             processing_lock,
+            *_args,
+            **_kwargs,
         ):
             try:
                 session.status = "processing"
@@ -242,9 +248,10 @@ class TestPostRemixAsync:
                 resp2 = _post_youtube(client)
                 assert resp2.status_code == 200
 
+                # Third request is queued, not rejected
                 resp3 = _post_remix(client)
-                assert resp3.status_code == 409
-                assert "Another remix" in resp3.json()["detail"]
+                assert resp3.status_code == 200
+                assert "session_id" in resp3.json()
             finally:
                 go_event.set()
                 done_event.wait(timeout=5)

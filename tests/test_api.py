@@ -16,6 +16,11 @@ def client(tmp_path):
         mock_settings.allowed_extensions = {".mp3", ".wav"}
         mock_settings.max_file_size_mb = 50
         mock_settings.cors_origins = ["http://localhost:5173"]
+        mock_settings.max_concurrent_mixes = 1
+        mock_settings.max_queue_depth = 10
+        mock_settings.session_ttl_hours = 3
+        mock_settings.queue_entry_ttl_minutes = 15
+        mock_settings.distributed_limiter_enabled = False
 
         # Create required directories
         (tmp_path / "uploads").mkdir()
@@ -23,7 +28,9 @@ def client(tmp_path):
         (tmp_path / "remixes").mkdir()
 
         # Also patch settings in the remix module since it imports at module level
-        with patch("musicmixer.api.remix.settings", mock_settings):
+        with patch("musicmixer.api.remix.settings", mock_settings), \
+             patch("musicmixer.main.settings", mock_settings), \
+             patch("musicmixer.api.remix.cleanup_expired_sessions"):
             with TestClient(app) as c:
                 yield c
 
