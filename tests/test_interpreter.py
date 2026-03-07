@@ -53,7 +53,6 @@ class TestGenerateFallbackPlan:
         assert isinstance(plan.sections, list)
         assert all(isinstance(s, Section) for s in plan.sections)
         assert isinstance(plan.tempo_source, str)
-        assert isinstance(plan.key_source, str)
         assert isinstance(plan.explanation, str)
         assert isinstance(plan.warnings, list)
         assert isinstance(plan.used_fallback, bool)
@@ -91,7 +90,6 @@ class TestGenerateFallbackPlan:
 
         assert plan.vocal_source == "song_a"
         assert plan.tempo_source == "weighted_midpoint"
-        assert plan.key_source == "none"
 
     def test_fallback_plan_time_ranges(self):
         """Start/end times are within each song's duration."""
@@ -225,14 +223,12 @@ def _default_dynamic_args(
     """Build kwargs dict for _build_dynamic_context."""
     meta_a = _make_metadata(bpm=bpm_a, duration=duration_a)
     meta_b = _make_metadata(bpm=bpm_b, duration=duration_b)
-    from musicmixer.services.interpreter import _compute_key_guidance, estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
-    _key_available, key_detail = _compute_key_guidance(meta_a, meta_b)
+    from musicmixer.services.interpreter import estimate_target_bpm, TARGET_REMIX_DURATION_SECONDS
     target_bpm = estimate_target_bpm(vocal_bpm=meta_a.bpm, instrumental_bpm=meta_b.bpm)
     total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
     return dict(
         song_a_meta=meta_a,
         song_b_meta=meta_b,
-        key_matching_detail=key_detail,
         total_available_beats=total_available_beats,
         stretch_pct=stretch_pct,
         lyrics_a=lyrics_a,
@@ -477,7 +473,7 @@ class TestInterpretPromptCaching:
                  "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 8},
             ],
-            "key_source": "none",
+            "vocal_type": "sung",
             "explanation": "Test explanation.",
             "warnings": [],
         }
@@ -549,7 +545,7 @@ class TestInterpretPromptCaching:
                  "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 8},
             ],
-            "key_source": "none",
+            "vocal_type": "sung",
             "explanation": "Test.",
             "warnings": [],
         }
@@ -672,7 +668,7 @@ def _make_intent_plan_with_sections(sections: list[IntentSection]) -> IntentPlan
         start_time_instrumental=0.0,
         end_time_instrumental=200.0,
         sections=sections,
-        key_source="none",
+        vocal_type="sung",
         explanation="Test plan.",
         warnings=[],
     )

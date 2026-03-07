@@ -62,7 +62,6 @@ def _make_good_plan() -> RemixPlan:
             ),
         ],
         tempo_source="song_a",
-        key_source="song_a",
         explanation="Well-structured plan with build-peak-release arc",
     )
 
@@ -90,7 +89,6 @@ def _make_bad_plan() -> RemixPlan:
             ),
         ],
         tempo_source="song_a",
-        key_source="none",
         explanation="Bad plan: flat, maxed, no arc",
     )
 
@@ -130,7 +128,6 @@ def _make_conservative_plan() -> RemixPlan:
             ),
         ],
         tempo_source="song_a",
-        key_source="song_a",
         explanation="Conservative plan with moderate levels",
     )
 
@@ -188,7 +185,6 @@ def _make_risky_plan() -> RemixPlan:
             ),
         ],
         tempo_source="song_a",
-        key_source="song_a",
         explanation="Risky plan with more sections and higher gains",
     )
 
@@ -346,7 +342,6 @@ class TestSelectBest:
                 end_time_instrumental=plan.end_time_instrumental,
                 sections=list(plan.sections),
                 tempo_source=plan.tempo_source,
-                key_source=plan.key_source,
                 explanation=plan.explanation,
             )
             for _ in range(3)
@@ -425,8 +420,7 @@ class TestTieBreaking:
                     transition_in="crossfade", transition_beats=4,
                 ),
             ],
-            tempo_source="song_a", key_source="song_a",
-            explanation="low gain plan",
+            tempo_source="song_a",            explanation="low gain plan",
         )
         high_gain = RemixPlan(
             vocal_source="song_a",
@@ -439,8 +433,7 @@ class TestTieBreaking:
                     transition_in="crossfade", transition_beats=4,
                 ),
             ],
-            tempo_source="song_a", key_source="song_a",
-            explanation="high gain plan",
+            tempo_source="song_a",            explanation="high gain plan",
         )
         assert _conservatism_score(low_gain) < _conservatism_score(high_gain)
 
@@ -519,8 +512,7 @@ class TestEdgeCases:
             start_time_vocal=0.0, end_time_vocal=60.0,
             start_time_instrumental=0.0, end_time_instrumental=60.0,
             sections=[],
-            tempo_source="song_a", key_source="none",
-            explanation="Empty plan",
+            tempo_source="song_a",            explanation="Empty plan",
         )
         result = score_candidate(plan)
         assert 0.0 <= result.total_score <= 1.0
@@ -538,8 +530,7 @@ class TestEdgeCases:
                     transition_in="fade", transition_beats=4,
                 ),
             ],
-            tempo_source="song_a", key_source="song_a",
-            explanation="Single section plan",
+            tempo_source="song_a",            explanation="Single section plan",
         )
         result = score_candidate(plan)
         assert 0.0 <= result.total_score <= 1.0
@@ -563,8 +554,7 @@ class TestEdgeCases:
                     transition_in="fade", transition_beats=4,
                 ),
             ],
-            tempo_source="song_a", key_source="none",
-            explanation="Silent plan",
+            tempo_source="song_a",            explanation="Silent plan",
         )
         result = score_candidate(plan)
         assert 0.0 <= result.total_score <= 1.0
@@ -604,8 +594,7 @@ class TestEdgeCases:
                         stem_gains={"vocals": 0.0, "drums": 0.4},
                         transition_in="fade", transition_beats=4),
             ],
-            tempo_source="song_a", key_source="song_a",
-            explanation="Aligned",
+            tempo_source="song_a",            explanation="Aligned",
         )
         misaligned = RemixPlan(
             vocal_source="song_a",
@@ -622,8 +611,7 @@ class TestEdgeCases:
                         stem_gains={"vocals": 0.0, "drums": 0.4},
                         transition_in="fade", transition_beats=3),
             ],
-            tempo_source="song_a", key_source="song_a",
-            explanation="Misaligned",
+            tempo_source="song_a",            explanation="Misaligned",
         )
         score_aligned = score_candidate(aligned)
         score_misaligned = score_candidate(misaligned)

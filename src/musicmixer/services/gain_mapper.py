@@ -411,7 +411,6 @@ def map_intent_to_gains(
         end_time_instrumental=intent.end_time_instrumental,
         sections=sections,
         tempo_source="weighted_midpoint",
-        key_source=intent.key_source,
         explanation=intent.explanation,
         warnings=all_warnings,
     )
