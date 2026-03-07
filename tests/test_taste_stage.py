@@ -63,7 +63,6 @@ def _make_remix_plan(**overrides) -> RemixPlan:
             ),
         ],
         tempo_source="song_a",
-        key_source="none",
         explanation="Test plan",
     )
     defaults.update(overrides)
