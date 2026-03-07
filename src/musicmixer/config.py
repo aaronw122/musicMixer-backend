@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
+    # Twilio SMS notifications
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""
+    sms_enabled: bool = False
+    app_base_url: str = "http://localhost:5173"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
