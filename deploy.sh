@@ -22,6 +22,7 @@ cp -r ../frontend/dist ./static-build
 # Copy secrets to homeserver
 echo "Deploying secrets..."
 scp .env.production homeserver:~/musicmixer/.env
+scp ~/.modal.toml homeserver:~/.modal.toml
 
 # Deploy via remote Docker context
 echo "Deploying to homeserver..."
