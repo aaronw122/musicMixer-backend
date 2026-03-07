@@ -61,6 +61,7 @@ def client(tmp_path):
         mock_settings.max_queue_depth = 10
         mock_settings.session_ttl_hours = 3
         mock_settings.queue_entry_ttl_minutes = 15
+        mock_settings.max_upload_duration_seconds = 900
         mock_settings.distributed_limiter_enabled = False
 
         # Create required directories
