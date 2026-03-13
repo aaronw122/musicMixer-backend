@@ -594,7 +594,7 @@ def create_youtube_remix(
     _validate_youtube_url(body.url_b)
 
     # Clean up expired sessions before processing
-    cleanup_expired_sessions()
+    cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -649,7 +649,7 @@ def create_remix(
             )
 
     # Clean up expired sessions before processing
-    cleanup_expired_sessions()
+    cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
 
     # Generate session ID
     session_id = str(uuid.uuid4())
