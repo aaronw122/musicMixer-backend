@@ -23,13 +23,14 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import AsyncGenerator, Callable
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from musicmixer.config import settings
@@ -593,7 +594,7 @@ def create_youtube_remix(
     _validate_youtube_url(body.url_b)
 
     # Clean up expired sessions before processing
-    cleanup_expired_sessions()
+    cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -648,7 +649,7 @@ def create_remix(
             )
 
     # Clean up expired sessions before processing
-    cleanup_expired_sessions()
+    cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -760,6 +761,79 @@ async def cancel_remix(session_id: str, request: Request):
         }, session=session)
 
     return {"status": "cancelling", "message": "Cancel signal sent"}
+
+
+# ---------------------------------------------------------------------------
+# SMS notification registration
+# ---------------------------------------------------------------------------
+
+# E.164: '+' followed by 10-15 digits
+_E164_RE = re.compile(r"^\+\d{10,15}$")
+
+
+class NotifySmsRequest(BaseModel):
+    phone: str
+
+
+@router.post("/remix/{session_id}/notify-sms")
+def register_sms_notification(
+    session_id: str,
+    body: NotifySmsRequest,
+    request: Request,
+):
+    """Register a phone number to receive an SMS when the remix is ready.
+
+    - 202: phone stored, confirmation SMS sent (best-effort)
+    - 200: session already complete, ready notification sent directly
+    - 409: session in error state
+    - 422: invalid phone format
+    - 503: SMS feature disabled
+    """
+    _validate_uuid(session_id)
+
+    if not settings.sms_enabled:
+        raise HTTPException(503, "SMS notifications are not available")
+
+    if not _E164_RE.match(body.phone):
+        raise HTTPException(422, "Phone must be E.164 format (e.g. +15551234567)")
+
+    with request.app.state.sessions_lock:
+        session = request.app.state.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+
+    if session.status == "error":
+        raise HTTPException(409, "Session failed — cannot register for notification")
+
+    if session.status == "complete":
+        # Remix already done — send ready notification directly, no confirmation
+        from musicmixer.services.sms import send_remix_ready
+
+        try:
+            send_remix_ready(body.phone, session_id)
+        except Exception:
+            logger.exception(
+                "Session %s: failed to send ready SMS", session_id
+            )
+        return {"status": "sent", "message": "Remix is already ready — notification sent"}
+
+    # Store phone on session (idempotent: overwrites any previous value)
+    session.notify_phone = body.phone
+
+    # Send confirmation SMS (best-effort — failure is non-blocking)
+    from musicmixer.services.sms import send_confirmation
+
+    try:
+        send_confirmation(body.phone)
+    except Exception:
+        logger.exception(
+            "Session %s: failed to send confirmation SMS", session_id
+        )
+
+    return JSONResponse(
+        status_code=202,
+        content={"status": "registered", "message": "We'll text you when your remix is ready"},
+    )
 
 
 @router.get("/remix/{session_id}/progress")
@@ -938,6 +1012,57 @@ async def get_stem(session_id: str, song: str, stem_name: str):
         media_type="audio/wav",
         filename=f"{song}_{stem_name}.wav",
     )
+
+
+@router.get("/remix/{session_id}/public")
+async def get_public_remix(session_id: str, request: Request):
+    """Public endpoint for share/listen links.
+
+    Returns remix info for completed sessions, 202 for in-progress,
+    404 for not found, and 410 for expired or errored sessions.
+    """
+    _validate_uuid(session_id)
+
+    with request.app.state.sessions_lock:
+        session = request.app.state.sessions.get(session_id)
+
+    # 1. Session not found
+    if session is None:
+        raise HTTPException(404, "Session not found")
+
+    # 2. Session expired (TTL check)
+    ttl_seconds = settings.session_ttl_hours * 3600
+    created_at = getattr(session, "created_at", None)
+    if created_at is not None and (time.time() - created_at) > ttl_seconds:
+        return JSONResponse(status_code=410, content={"status": "expired"})
+
+    # 3. Complete + remix file exists -> 200
+    if session.status == "complete":
+        remix_path = settings.data_dir / "remixes" / session_id / "remix.mp3"
+        if remix_path.exists():
+            from datetime import datetime, timezone
+
+            warnings = getattr(session, "warnings", [])
+            used_fallback = getattr(session, "used_fallback", False)
+            expires_at_ts = created_at + ttl_seconds if created_at else time.time() + ttl_seconds
+            expires_at = datetime.fromtimestamp(expires_at_ts, tz=timezone.utc).isoformat()
+
+            return {
+                "session_id": session_id,
+                "status": "ready",
+                "audio_url": f"/api/remix/{session_id}/audio",
+                "explanation": session.explanation or "",
+                "warnings": warnings,
+                "usedFallback": used_fallback,
+                "expires_at": expires_at,
+            }
+
+    # 4. Processing or queued -> 202
+    if session.status in ("processing", "queued"):
+        return JSONResponse(status_code=202, content={"status": "processing"})
+
+    # 5. Error (or any other terminal state) -> 410
+    return JSONResponse(status_code=410, content={"status": "error"})
 
 
 def _validate_uuid(session_id: str) -> None:

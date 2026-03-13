@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import queue
@@ -11,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from musicmixer.api import health, remix
 from musicmixer.config import settings
+from musicmixer.services.cleanup import cleanup_expired_sessions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -79,7 +81,36 @@ async def lifespan(app: FastAPI):
     app.state.queue_lock = threading.Lock()
 
     logger.info("musicMixer backend started (max_concurrent_mixes=%d)", mix_capacity)
+
+    # Run cleanup once on startup to clear stale data from previous runs
+    await asyncio.to_thread(
+        cleanup_expired_sessions,
+        app.state.sessions,
+        app.state.sessions_lock,
+    )
+
+    # Background task: run cleanup every 30 minutes
+    async def _periodic_cleanup() -> None:
+        while True:
+            await asyncio.sleep(30 * 60)
+            try:
+                await asyncio.to_thread(
+                    cleanup_expired_sessions,
+                    app.state.sessions,
+                    app.state.sessions_lock,
+                )
+            except Exception:
+                logger.exception("Periodic cleanup failed")
+
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
+
     yield
+
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
 
     logger.info("musicMixer backend shutting down")
     app.state.executor.shutdown(wait=False)
