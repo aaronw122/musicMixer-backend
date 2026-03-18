@@ -45,9 +45,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Constants (spec section 3)
 # ---------------------------------------------------------------------------
-SMOOTHING_WINDOW: int = 4                # bars
-BOUNDARY_THRESHOLD_MULT: float = 3.0     # x median
+SMOOTHING_WINDOW_MIN: int = 2             # bars (tempo-adaptive lower bound)
+SMOOTHING_WINDOW_MAX: int = 6             # bars (tempo-adaptive upper bound)
+BOUNDARY_THRESHOLD_MULT: float = 2.0      # x median (lowered from 3.0 for pop)
+BOUNDARY_THRESHOLD_FALLBACK: float = 1.5  # secondary pass if still sparse
 BOUNDARY_THRESHOLD_FLOOR: float = 0.05
+MIN_EXPECTED_SECTIONS: int = 3            # songs shorter than 16 bars exempt
 PHRASE_GRID: int = 4                      # bars
 MIN_SECTION_BARS: int = 4
 BUILD_RATIO: float = 1.5
@@ -778,16 +781,19 @@ def _moving_average(arr: np.ndarray, window: int) -> np.ndarray:
 def detect_boundaries(
     bar_rms_per_stem: dict[str, np.ndarray],
     combined_energy: np.ndarray,
+    bpm: float = 120.0,
 ) -> np.ndarray:
     """Stage 1: Derivative boundary detection with per-stem max pool.
 
-    1. Smooth combined energy (4-bar window).
-    2. Compute absolute derivative of smoothed combined energy.
-    3. For each stem, smooth and take absolute derivative.
-    4. Take element-wise max across all per-stem derivatives.
-    5. change_signal = max(combined_deriv, max_stem_deriv).
-    6. Threshold = max(median(change_signal) * 3.0, 0.05).
-    7. Find peaks above threshold, minimum 4 bars apart.
+    1. Compute tempo-adaptive smoothing window (~8 seconds).
+    2. Smooth combined energy.
+    3. Compute absolute derivative of smoothed combined energy.
+    4. For each stem, smooth and take absolute derivative.
+    5. Take element-wise max across all per-stem derivatives.
+    6. change_signal = max(combined_deriv, max_stem_deriv).
+    7. Threshold = max(median(change_signal) * 2.0, 0.05).
+    8. Find peaks above threshold, minimum 4 bars apart.
+    9. If too few peaks for a long song, retry with fallback threshold (1.5×).
 
     Returns array of bar indices where boundaries occur.
     """
@@ -795,8 +801,13 @@ def detect_boundaries(
     if n_bars < 2:
         return np.array([], dtype=np.intp)
 
+    # Tempo-adaptive smoothing: aim for ~8 seconds
+    seconds_per_bar = 4 * 60.0 / bpm if bpm > 0 else 2.0
+    smooth_window = int(round(8.0 / seconds_per_bar))
+    smooth_window = max(SMOOTHING_WINDOW_MIN, min(SMOOTHING_WINDOW_MAX, smooth_window))
+
     # Smooth combined energy
-    smoothed = _moving_average(combined_energy, SMOOTHING_WINDOW)
+    smoothed = _moving_average(combined_energy, smooth_window)
 
     # Absolute derivative of combined energy
     deriv = np.abs(np.diff(smoothed))
@@ -804,7 +815,7 @@ def detect_boundaries(
     # Per-stem derivatives with max pool
     stem_derivs: list[np.ndarray] = []
     for name in bar_rms_per_stem:
-        stem_smoothed = _moving_average(bar_rms_per_stem[name], SMOOTHING_WINDOW)
+        stem_smoothed = _moving_average(bar_rms_per_stem[name], smooth_window)
         stem_deriv = np.abs(np.diff(stem_smoothed))
         stem_derivs.append(stem_deriv)
 
@@ -825,7 +836,30 @@ def detect_boundaries(
     threshold = max(median_val * BOUNDARY_THRESHOLD_MULT, BOUNDARY_THRESHOLD_FLOOR)
 
     # Find peaks above threshold, minimum 4 bars apart
-    peaks, _ = find_peaks(change_signal, height=threshold, distance=MIN_SECTION_BARS)
+    peaks, props = find_peaks(change_signal, height=threshold, distance=MIN_SECTION_BARS)
+
+    # Diagnostic logging
+    logger.info(
+        "Boundary detection: n_bars=%d, median_change=%.4f, threshold=%.4f, "
+        "peak_count=%d, peak_heights=%s, smooth_window=%d",
+        n_bars, median_val, threshold, len(peaks),
+        np.round(props["peak_heights"], 4).tolist() if len(peaks) > 0 else [],
+        smooth_window,
+    )
+
+    # Adaptive fallback: if song is long enough but we found too few boundaries
+    expected_min_boundaries = max(2, n_bars // 16)
+    if len(peaks) < expected_min_boundaries and n_bars >= 16:
+        fallback_threshold = max(
+            median_val * BOUNDARY_THRESHOLD_FALLBACK, BOUNDARY_THRESHOLD_FLOOR,
+        )
+        peaks, props = find_peaks(
+            change_signal, height=fallback_threshold, distance=MIN_SECTION_BARS,
+        )
+        logger.info(
+            "Boundary detection fallback: threshold %.4f -> %.4f, found %d peaks",
+            threshold, fallback_threshold, len(peaks),
+        )
 
     # Offset by 1 since diff shifts indices (boundary is at bar after the derivative)
     boundaries = peaks + 1
@@ -875,6 +909,7 @@ def quantize_to_phrases(
 
     # Filter: keep boundaries that don't create too-short segments
     # Iteratively remove boundaries that create short segments
+    snapped_count = len(quantized)
     valid = list(quantized)
     changed = True
     while changed:
@@ -890,6 +925,11 @@ def quantize_to_phrases(
             else:
                 changed = True
         valid = new_valid
+
+    logger.debug(
+        "Quantize: %d raw -> %d snapped -> %d after min-length filter, total_bars=%d",
+        len(boundaries), snapped_count, len(valid), total_bars,
+    )
 
     return np.array(valid, dtype=np.intp)
 
@@ -1322,6 +1362,53 @@ def _merge_vocal_status(a: str, b: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Chroma-based fallback for section detection
+# ---------------------------------------------------------------------------
+
+
+def _compute_bar_chroma(
+    audio: np.ndarray,
+    bar_boundaries: np.ndarray,
+    sr: int = ANALYSIS_SR,
+) -> np.ndarray:
+    """Compute mean chroma vector per bar. Returns (n_bars, 12) array."""
+    chroma = librosa.feature.chroma_cqt(y=audio, sr=sr)
+    hop_length = 512
+    n_bars = len(bar_boundaries) - 1
+    bar_chroma = np.zeros((n_bars, 12))
+    for i in range(n_bars):
+        start_frame = int(bar_boundaries[i]) // hop_length
+        end_frame = int(bar_boundaries[i + 1]) // hop_length
+        end_frame = min(end_frame, chroma.shape[1])
+        if end_frame > start_frame:
+            bar_chroma[i] = np.mean(chroma[:, start_frame:end_frame], axis=1)
+    return bar_chroma
+
+
+def detect_chroma_boundaries(
+    bar_chroma: np.ndarray,
+    n_bars: int,
+) -> np.ndarray:
+    """Detect boundaries via chroma cosine distance between adjacent bars."""
+    if n_bars < 4 or bar_chroma.shape[0] < 2:
+        return np.array([], dtype=np.intp)
+
+    norms = np.linalg.norm(bar_chroma, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-10)
+    normed = bar_chroma / norms
+    cos_sim = np.sum(normed[:-1] * normed[1:], axis=1)
+    cos_dist = 1.0 - cos_sim
+
+    smoothed = _moving_average(cos_dist, 2)
+    median_val = float(np.median(smoothed))
+    threshold = max(median_val * 2.0, 0.05)
+    peaks, _ = find_peaks(smoothed, height=threshold, distance=MIN_SECTION_BARS)
+
+    boundaries = peaks + 1
+    return boundaries[boundaries < n_bars].astype(np.intp)
+
+
+# ---------------------------------------------------------------------------
 # Full section detection pipeline
 # ---------------------------------------------------------------------------
 
@@ -1334,19 +1421,32 @@ def detect_sections(
     bpm: float,
     bar_boundaries_frames: np.ndarray,
     sr: int = ANALYSIS_SR,
+    bar_chroma: Optional[np.ndarray] = None,
 ) -> list[SectionInfo]:
     """Run the full 3-stage section detection pipeline.
 
     Stage 1: Detect boundaries via derivative analysis.
     Stage 1b: Quantize to phrase grid.
+    Stage 1c: Chroma fallback if boundaries still sparse.
     Stage 2: Label sections.
     Stage 3: Merge adjacent same-label and absorb short sections.
     """
     # Stage 1: Boundary detection
-    raw_boundaries = detect_boundaries(bar_rms_per_stem, combined_energy)
+    raw_boundaries = detect_boundaries(bar_rms_per_stem, combined_energy, bpm=bpm)
 
     # Stage 1b: Phrase quantization
     quantized = quantize_to_phrases(raw_boundaries, total_bars)
+
+    # Stage 1c: Chroma fallback if boundaries are still sparse
+    if len(quantized) < max(2, total_bars // 16) and bar_chroma is not None:
+        chroma_boundaries = detect_chroma_boundaries(bar_chroma, total_bars)
+        chroma_quantized = quantize_to_phrases(chroma_boundaries, total_bars)
+        merged = np.unique(np.concatenate([quantized, chroma_quantized]))
+        quantized = quantize_to_phrases(merged, total_bars)
+        logger.info(
+            "Chroma fallback: %d chroma boundaries, %d total after merge",
+            len(chroma_boundaries), len(quantized),
+        )
 
     logger.info(
         "Section detection: %d raw boundaries -> %d quantized, %d total bars",
@@ -1582,6 +1682,14 @@ def analyze_stems(
     # Vocal gap detection
     vocal_gaps = detect_vocal_gaps(vocal_active)
 
+    # Compute combined audio for chroma analysis
+    combined_audio = np.zeros(audio_length, dtype=np.float32)
+    for name in STEM_NAMES:
+        stem_data = stems[name]
+        if len(stem_data) > 0:
+            combined_audio[:len(stem_data)] += stem_data[:audio_length]
+    bar_chroma = _compute_bar_chroma(combined_audio, bar_boundaries, sr=ANALYSIS_SR)
+
     # Section detection
     sections = detect_sections(
         bar_rms_per_stem=bar_rms,
@@ -1592,6 +1700,7 @@ def analyze_stems(
         bpm=bpm,
         bar_boundaries_frames=bar_boundaries,
         sr=ANALYSIS_SR,
+        bar_chroma=bar_chroma,
     )
 
     stem_analysis = StemAnalysis(
