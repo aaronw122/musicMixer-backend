@@ -706,51 +706,51 @@ def run_pipeline(
         vocal_corrections = {}
         inst_corrections = {}
 
-    # === STEP 7.75: Broad preset EQ + adaptive corrections (before tempo stretch) ===
-    # Apply corrective EQ profiles per stem type. Only broad cuts/boosts (Q~1-3)
-    # are safe before stretching.  When adaptive EQ is enabled, per-stem
-    # adaptive corrections are passed alongside presets for a single-pass apply.
+    # === STEP 7.75: Corrective EQ: adaptive-only when available, preset fallback otherwise ===
+    # Apply corrective EQ per stem type. Only broad cuts/boosts (Q~1-3)
+    # are safe before stretching.  When adaptive EQ produced corrections,
+    # preset is skipped to avoid overcorrection; preset serves as fallback only.
     for stem_type, audio in vocal_audio.items():
         _pre = vocal_audio[stem_type]
         _adaptive = vocal_corrections.get(stem_type) or None
         _t0 = time.monotonic()
-        _result = apply_corrective_eq(audio, sr, stem_type, apply_preset=True, adaptive_corrections=_adaptive)
+        _result = apply_corrective_eq(audio, sr, stem_type, apply_preset=(_adaptive is None), adaptive_corrections=_adaptive)
         _elapsed = time.monotonic() - _t0
         if _elapsed > DSP_STEP_TIMEOUT_S:
             logger.error(
-                "Session %s: DSP step 'preset_eq vocal/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                "Session %s: DSP step 'eq vocal/%s' exceeded %.0fs timeout (%.1fs), skipping",
                 session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
             )
             vocal_audio[stem_type] = _pre
         else:
             vocal_audio[stem_type] = _result
-            logger.info("Session %s: preset_eq vocal/%s took %.2fs (adaptive=%s)", session_id, stem_type, _elapsed, _adaptive is not None)
+            logger.info("Session %s: EQ vocal/%s: path=%s, took %.2fs", session_id, stem_type, "adaptive" if _adaptive is not None else "preset-fallback", _elapsed)
     for stem_type, audio in inst_audio.items():
         _pre = inst_audio[stem_type]
         _adaptive = inst_corrections.get(stem_type) or None
         _t0 = time.monotonic()
-        _result = apply_corrective_eq(audio, sr, stem_type, apply_preset=True, adaptive_corrections=_adaptive)
+        _result = apply_corrective_eq(audio, sr, stem_type, apply_preset=(_adaptive is None), adaptive_corrections=_adaptive)
         _elapsed = time.monotonic() - _t0
         if _elapsed > DSP_STEP_TIMEOUT_S:
             logger.error(
-                "Session %s: DSP step 'preset_eq inst/%s' exceeded %.0fs timeout (%.1fs), skipping",
+                "Session %s: DSP step 'eq inst/%s' exceeded %.0fs timeout (%.1fs), skipping",
                 session_id, stem_type, DSP_STEP_TIMEOUT_S, _elapsed,
             )
             inst_audio[stem_type] = _pre
         else:
             inst_audio[stem_type] = _result
-            logger.info("Session %s: preset_eq inst/%s took %.2fs (adaptive=%s)", session_id, stem_type, _elapsed, _adaptive is not None)
+            logger.info("Session %s: EQ inst/%s: path=%s, took %.2fs", session_id, stem_type, "adaptive" if _adaptive is not None else "preset-fallback", _elapsed)
 
-    # LUFS checkpoint: after preset EQ
+    # LUFS checkpoint: after corrective EQ
     _eq_meter = pyln.Meter(sr)
     for stem_type, audio in vocal_audio.items():
         _eq_lufs = _eq_meter.integrated_loudness(audio)
-        logger.info("Session %s: LUFS after preset EQ (vocal/%s): %.1f", session_id, stem_type, _eq_lufs)
+        logger.info("Session %s: LUFS after corrective EQ (vocal/%s): %.1f", session_id, stem_type, _eq_lufs)
     for stem_type, audio in inst_audio.items():
         _eq_lufs = _eq_meter.integrated_loudness(audio)
-        logger.info("Session %s: LUFS after preset EQ (inst/%s): %.1f", session_id, stem_type, _eq_lufs)
+        logger.info("Session %s: LUFS after corrective EQ (inst/%s): %.1f", session_id, stem_type, _eq_lufs)
 
-    logger.info("Session %s: Preset EQ applied", session_id)
+    logger.info("Session %s: Corrective EQ applied", session_id)
 
     # === STEP 8: Compute tempo plan ===
     target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings, stretch_pct = compute_tempo_plan(
