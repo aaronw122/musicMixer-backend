@@ -245,8 +245,8 @@ class TestAdaptiveCorrections:
             f"(expected < -2.0 dB)"
         )
 
-    def test_adaptive_correction_combined_with_preset(self):
-        """Adaptive corrections should stack on top of preset EQ in a single pass."""
+    def test_preset_and_adaptive_combined_when_both_enabled(self):
+        """Adaptive corrections should stack on top of preset EQ when both explicitly enabled."""
         audio = _make_stereo_sine(freq=400.0, amplitude=0.5, duration=3.0)
 
         # Preset-only result
@@ -327,3 +327,24 @@ class TestAdaptiveCorrections:
         assert result.shape == audio.shape
         assert result.dtype == np.float32
         assert np.all(np.isfinite(result))
+
+    def test_adaptive_skips_preset_by_default(self):
+        """With apply_preset=False + adaptive, result differs from preset+adaptive."""
+        audio = _make_stereo_sine(freq=400.0, amplitude=0.5, duration=3.0)
+        corrections = [(400.0, -3.0, 2.0)]
+
+        # Adaptive-only (preset skipped — the new default when adaptive is available)
+        result_adaptive_only = apply_corrective_eq(
+            audio.copy(), SR, "other", apply_preset=False, adaptive_corrections=corrections
+        )
+
+        # Preset + adaptive (legacy combined path)
+        result_both = apply_corrective_eq(
+            audio.copy(), SR, "other", apply_preset=True, adaptive_corrections=corrections
+        )
+
+        # They must differ — preset adds extra filters on top of adaptive
+        assert not np.allclose(result_adaptive_only, result_both, atol=1e-6), (
+            "Adaptive-only and preset+adaptive should produce different results "
+            "(preset adds additional filters)"
+        )

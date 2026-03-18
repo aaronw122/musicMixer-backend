@@ -1,8 +1,10 @@
-"""Per-stem corrective EQ with preset profiles.
+"""Per-stem corrective EQ: adaptive-primary, preset-fallback.
 
-Gentle corrective EQ applied per stem type before mixing. All boosts capped
-at +0.75 dB to avoid stripping character from source material. Cuts are
-slightly more aggressive since removing problems is lower-risk.
+When adaptive EQ corrections are available (from spectral analysis), only
+adaptive filters are applied. When adaptive is unavailable (None), preset
+profiles provide a safety-net fallback. All boosts capped at +0.75 dB to
+avoid stripping character from source material. Cuts are slightly more
+aggressive since removing problems is lower-risk.
 """
 
 from __future__ import annotations
@@ -95,20 +97,21 @@ def apply_corrective_eq(
 ) -> np.ndarray:
     """Apply corrective EQ to a stem.
 
-    Applies broad preset EQ profiles per stem type, optionally followed by
-    adaptive corrections from spectral analysis. All filters run in a single
-    pedalboard pass — no extra audio processing cost.
+    Adaptive-primary, preset-fallback: when adaptive corrections are provided,
+    only those are applied. When adaptive is None, preset EQ profiles provide
+    a safety-net fallback. Both paths run through a single pedalboard pass.
 
     Args:
         audio: Input audio, shape (samples, channels) or (samples,).
         sr: Sample rate in Hz.
         stem_type: One of vocals, drums, bass, guitar, piano, other.
             Unknown types fall back to "other".
-        apply_preset: Whether to apply the preset EQ profile.
+        apply_preset: Whether to apply the preset EQ profile. Callers
+            should set this to ``adaptive_corrections is None`` so preset
+            only fires as a fallback.
         adaptive_corrections: Optional list of (frequency_hz, gain_db, q_factor)
-            tuples. Each becomes a PeakFilter appended to the preset board.
-            Clamping is handled upstream (spectral.py); this function applies
-            whatever values it receives.
+            tuples. Each becomes a PeakFilter. Clamping is handled upstream
+            (spectral.py); this function applies whatever values it receives.
         **kwargs: Accepted for backward compatibility.
 
     Returns:
@@ -147,8 +150,9 @@ def apply_corrective_eq(
             )
 
         result = process_with_pedalboard(audio, board, sr)
-        logger.debug("Applied EQ for stem_type='%s' (preset=%s, adaptive=%s)",
-                      stem_type, has_preset, has_adaptive)
+        _path = "adaptive" if has_adaptive else "preset-fallback"
+        logger.debug("Applied EQ for stem_type='%s' (path=%s, preset=%s, adaptive=%s)",
+                      stem_type, _path, has_preset, has_adaptive)
         return result
 
     return audio
