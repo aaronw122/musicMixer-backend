@@ -37,6 +37,10 @@ ALL_STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
 # Target remix duration in seconds. Controls beat budget, LLM guidance, and fallback plans.
 TARGET_REMIX_DURATION_SECONDS = 210  # 3.5 minutes
 
+# Max output tokens for LLM remix plan generation.
+# 3072 gives comfortable headroom for 9-12 section plans (~1450 tokens typical).
+LLM_MAX_TOKENS = 3072
+
 
 class _DurationTooShortError(Exception):
     """Raised when the LLM's arrangement is too short for the target duration."""
@@ -1183,7 +1187,7 @@ def interpret_prompt(
         try:
             response = client.messages.create(
                 model=settings.llm_model,
-                max_tokens=1536,
+                max_tokens=LLM_MAX_TOKENS,
                 system=system_blocks,
                 messages=messages,
                 tools=[tool_schema],
@@ -1196,7 +1200,7 @@ def interpret_prompt(
                 try:
                     response = client.messages.create(
                         model=settings.llm_model,
-                        max_tokens=1536,
+                        max_tokens=LLM_MAX_TOKENS,
                         system=system_blocks,
                         messages=messages,
                         tools=[tool_schema],
@@ -1242,7 +1246,29 @@ def interpret_prompt(
 
         # Check stop reason
         if response.stop_reason == "max_tokens":
-            logger.warning("LLM hit max_tokens, using fallback")
+            logger.warning(
+                "LLM hit max_tokens (attempt %d/%d, output=%d tokens)",
+                attempt + 1, max_duration_attempts, output_tokens,
+            )
+            partial_block = next(
+                (b for b in response.content if b.type == "tool_use"), None
+            )
+            if partial_block is not None:
+                try:
+                    partial_plan = _parse_intent_plan(partial_block.input)
+                    partial_plan = _validate_intent_plan(partial_plan, song_a_meta, song_b_meta)
+                    logger.info(
+                        "Salvaged partial plan from truncated response: %d sections",
+                        len(partial_plan.sections),
+                    )
+                    partial_plan.warnings.append("Plan recovered from truncated LLM response.")
+                    return partial_plan
+                except _DurationTooShortError:
+                    if attempt < max_duration_attempts - 1:
+                        continue  # retry with duration feedback
+                    logger.warning("Partial plan also too short, using fallback")
+                except Exception:
+                    logger.warning("Could not parse partial plan", exc_info=True)
             return generate_fallback_plan(song_a_meta, song_b_meta)
 
         # Extract tool_use result
@@ -1287,37 +1313,20 @@ def interpret_prompt(
                     attempt + 1, max_duration_attempts,
                     actual_beats, needed_beats, beat_delta,
                 )
-                # Append the tool result + correction message for the retry
-                messages.append({
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": tool_use_block.id,
-                            "name": "create_remix_plan",
-                            "input": raw_plan,
-                        }
-                    ],
-                })
-                messages.append({
+                # Replace original user message with condensed retry guidance
+                # (avoids duplicating the full plan JSON in input tokens and
+                # prevents the LLM from anchoring on its failed output)
+                retry_guidance = (
+                    f"IMPORTANT: Your previous arrangement was REJECTED — "
+                    f"only {actual_beats} beats ({actual_beats * 60 / e.target_bpm:.0f}s), "
+                    f"need ~{needed_beats} beats ({TARGET_REMIX_DURATION_SECONDS}s). "
+                    f"Create at least {suggested_sections} sections."
+                )
+                original_content = messages[-1]["content"]
+                messages[-1] = {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_block.id,
-                            "content": (
-                                f"REJECTED: Your arrangement is too short. "
-                                f"You produced {actual_beats} beats = "
-                                f"{actual_beats * 60 / e.target_bpm:.0f}s at {e.target_bpm:.0f} BPM. "
-                                f"Target: {TARGET_REMIX_DURATION_SECONDS}s = ~{needed_beats} beats. "
-                                f"You need {beat_delta} more beats. "
-                                f"Create at least {suggested_sections} sections of 16-64 beats each. "
-                                f"Use the Extended Mix pattern (intro -> verse -> chorus -> "
-                                f"breakdown -> verse -> chorus -> bridge -> drop -> outro)."
-                            ),
-                        }
-                    ],
-                })
+                    "content": f"{retry_guidance}\n\n{original_content}",
+                }
                 continue  # retry
             else:
                 logger.warning(

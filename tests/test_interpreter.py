@@ -7,6 +7,7 @@ import pytest
 
 from musicmixer.models import AudioMetadata, EnergyBuckets, IntentPlan, IntentSection, LyricLine, LyricsData, RemixPlan, Section, StemAnalysis
 from musicmixer.services.interpreter import (
+    LLM_MAX_TOKENS,
     TARGET_REMIX_DURATION_SECONDS,
     _build_dynamic_context,
     _build_few_shot_messages,
@@ -901,3 +902,217 @@ class TestIntentDurationValidation:
         assert ok is True
         assert len(result.sections) == 3
         assert result.sections[-1].end_beat == 416
+
+
+# ---------------------------------------------------------------------------
+# LLM max_tokens truncation and retry behaviour tests
+# ---------------------------------------------------------------------------
+
+
+def _valid_plan_input(total_end_beat: int = 416) -> dict:
+    """Return a valid tool_use input dict for create_remix_plan."""
+    return {
+        "start_time_vocal": 0.0,
+        "end_time_vocal": 200.0,
+        "start_time_instrumental": 0.0,
+        "end_time_instrumental": 200.0,
+        "sections": [
+            {"label": "intro", "start_beat": 0, "end_beat": 32,
+             "energy": "low",
+             "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support",
+                            "guitar": "background", "piano": "background", "other": "texture"},
+             "transition_in": "fade", "transition_beats": 4},
+            {"label": "verse", "start_beat": 32, "end_beat": 128,
+             "energy": "medium",
+             "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support",
+                            "guitar": "background", "piano": "texture", "other": "texture"},
+             "transition_in": "crossfade", "transition_beats": 4},
+            {"label": "breakdown", "start_beat": 128, "end_beat": 192,
+             "energy": "low",
+             "stem_roles": {"vocals": "background", "drums": "background", "bass": "support",
+                            "guitar": "lead", "piano": "background", "other": "texture"},
+             "transition_in": "crossfade", "transition_beats": 4},
+            {"label": "drop", "start_beat": 192, "end_beat": total_end_beat - 64,
+             "energy": "peak",
+             "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support",
+                            "guitar": "support", "piano": "background", "other": "background"},
+             "transition_in": "cut", "transition_beats": 0},
+            {"label": "outro", "start_beat": total_end_beat - 64, "end_beat": total_end_beat,
+             "energy": "low",
+             "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background",
+                            "guitar": "background", "piano": "background", "other": "texture"},
+             "transition_in": "crossfade", "transition_beats": 8},
+        ],
+        "vocal_type": "sung",
+        "explanation": "Test explanation.",
+        "warnings": [],
+    }
+
+
+def _mock_response(stop_reason: str, plan_input: dict | None = None,
+                   input_tokens: int = 100, output_tokens: int = 50):
+    """Build a mock Anthropic response."""
+    content = []
+    if plan_input is not None:
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.id = "test_id"
+        tool_block.input = plan_input
+        content.append(tool_block)
+
+    resp = MagicMock()
+    resp.stop_reason = stop_reason
+    resp.content = content
+    resp.model = "claude-sonnet-4-20250514"
+    resp.usage = MagicMock()
+    resp.usage.input_tokens = input_tokens
+    resp.usage.output_tokens = output_tokens
+    resp.usage.cache_read_input_tokens = 0
+    resp.usage.cache_creation_input_tokens = 0
+    return resp
+
+
+def _interpret_with_mock(mock_responses):
+    """Run interpret_prompt with mocked LLM returning given responses in sequence."""
+    meta_a = _make_metadata(bpm=120.0, duration=240.0)
+    meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+    with patch("musicmixer.services.interpreter.settings") as mock_settings, \
+         patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
+        mock_settings.stem_backend = "modal"
+        mock_settings.anthropic_api_key = "test-key"
+        mock_settings.llm_model = "claude-sonnet-4-20250514"
+        mock_settings.llm_timeout_seconds = 30
+        mock_settings.llm_max_retries = 1
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = mock_responses
+        mock_anthropic.Anthropic.return_value = mock_client
+
+        plan = interpret_prompt("test prompt", meta_a, meta_b)
+        return plan, mock_client
+
+
+class TestMaxTokensPartialParse:
+    """Tests for partial JSON parse recovery when LLM hits max_tokens."""
+
+    def test_max_tokens_salvages_valid_partial_plan(self):
+        """When stop_reason is max_tokens but tool_use has valid plan, salvage it."""
+        valid_input = _valid_plan_input(total_end_beat=416)
+        response = _mock_response("max_tokens", plan_input=valid_input, output_tokens=1536)
+
+        plan, _ = _interpret_with_mock([response])
+
+        assert isinstance(plan, IntentPlan)
+        assert len(plan.sections) >= 2
+        assert any("truncated" in w.lower() for w in plan.warnings)
+
+    def test_max_tokens_unparseable_falls_back(self):
+        """When stop_reason is max_tokens and tool_use input is garbage, fall back."""
+        garbage_input = {"sections": "not a list", "explanation": "x"}
+        response = _mock_response("max_tokens", plan_input=garbage_input, output_tokens=1536)
+
+        plan, _ = _interpret_with_mock([response])
+
+        # Should get a fallback RemixPlan, not an IntentPlan
+        assert isinstance(plan, RemixPlan)
+        assert plan.used_fallback is True
+
+    def test_max_tokens_no_tool_block_falls_back(self):
+        """When stop_reason is max_tokens with no tool_use block, fall back."""
+        response = _mock_response("max_tokens", plan_input=None, output_tokens=1536)
+
+        plan, _ = _interpret_with_mock([response])
+
+        assert isinstance(plan, RemixPlan)
+        assert plan.used_fallback is True
+
+
+class TestRetryMessageReplacement:
+    """Tests for retry message replacement (not accumulation) on _DurationTooShortError."""
+
+    def test_retry_does_not_accumulate_messages(self):
+        """After _DurationTooShortError, messages list length should be unchanged."""
+        # First response: too-short plan (only 100 beats ~ 50s at 120 BPM, well under 147s min)
+        short_input = _valid_plan_input(total_end_beat=100)
+        short_response = _mock_response("tool_use", plan_input=short_input)
+
+        # Second response: valid-length plan
+        good_input = _valid_plan_input(total_end_beat=416)
+        good_response = _mock_response("tool_use", plan_input=good_input)
+
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        with patch("musicmixer.services.interpreter.settings") as mock_settings, \
+             patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
+            mock_settings.stem_backend = "modal"
+            mock_settings.anthropic_api_key = "test-key"
+            mock_settings.llm_model = "claude-sonnet-4-20250514"
+            mock_settings.llm_timeout_seconds = 30
+            mock_settings.llm_max_retries = 1
+
+            mock_client = MagicMock()
+            mock_client.messages.create.side_effect = [short_response, good_response]
+            mock_anthropic.Anthropic.return_value = mock_client
+
+            plan = interpret_prompt("test prompt", meta_a, meta_b)
+
+            # Both calls should have the same number of messages
+            first_call_msgs = mock_client.messages.create.call_args_list[0].kwargs["messages"]
+            second_call_msgs = mock_client.messages.create.call_args_list[1].kwargs["messages"]
+            assert len(first_call_msgs) == len(second_call_msgs), (
+                f"Message count changed: {len(first_call_msgs)} -> {len(second_call_msgs)}. "
+                "Retry should replace, not accumulate messages."
+            )
+
+    def test_retry_prepends_guidance_to_user_message(self):
+        """Retry should prepend rejection guidance to the user message content."""
+        short_input = _valid_plan_input(total_end_beat=100)
+        short_response = _mock_response("tool_use", plan_input=short_input)
+
+        good_input = _valid_plan_input(total_end_beat=416)
+        good_response = _mock_response("tool_use", plan_input=good_input)
+
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        with patch("musicmixer.services.interpreter.settings") as mock_settings, \
+             patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
+            mock_settings.stem_backend = "modal"
+            mock_settings.anthropic_api_key = "test-key"
+            mock_settings.llm_model = "claude-sonnet-4-20250514"
+            mock_settings.llm_timeout_seconds = 30
+            mock_settings.llm_max_retries = 1
+
+            mock_client = MagicMock()
+            mock_client.messages.create.side_effect = [short_response, good_response]
+            mock_anthropic.Anthropic.return_value = mock_client
+
+            interpret_prompt("test prompt", meta_a, meta_b)
+
+            # Second call's last user message should contain retry guidance
+            second_call_msgs = mock_client.messages.create.call_args_list[1].kwargs["messages"]
+            last_user_msg = second_call_msgs[-1]
+            assert "IMPORTANT" in last_user_msg["content"]
+            assert "REJECTED" in last_user_msg["content"]
+            # Original prompt content should still be present
+            assert "test prompt" in last_user_msg["content"]
+
+
+class TestLLMMaxTokensConstant:
+    """Tests for the LLM_MAX_TOKENS constant."""
+
+    def test_llm_max_tokens_is_3072(self):
+        """LLM_MAX_TOKENS should be 3072."""
+        assert LLM_MAX_TOKENS == 3072
+
+    def test_interpret_prompt_uses_llm_max_tokens(self):
+        """interpret_prompt passes LLM_MAX_TOKENS to the API call."""
+        valid_input = _valid_plan_input(total_end_beat=416)
+        response = _mock_response("tool_use", plan_input=valid_input)
+
+        _, mock_client = _interpret_with_mock([response])
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert call_kwargs["max_tokens"] == LLM_MAX_TOKENS
