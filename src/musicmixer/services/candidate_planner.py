@@ -20,7 +20,7 @@ import logging
 from collections import Counter
 
 from musicmixer.models import AudioMetadata, RemixPlan, Section
-from musicmixer.services.tempo import estimate_target_bpm
+from musicmixer.services.tempo import estimate_material_budget, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,29 @@ def _compute_total_beats(meta_a: AudioMetadata, meta_b: AudioMetadata) -> tuple[
         instrumental_bpm=meta_b.bpm,
         tempo_source="weighted_midpoint",
     )
-    total_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+    ideal_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+
+    material_duration = estimate_material_budget(
+        vocal_bpm=meta_a.bpm,
+        vocal_duration=meta_a.duration_seconds,
+        instrumental_bpm=meta_b.bpm,
+        instrumental_duration=meta_b.duration_seconds,
+        target_bpm=target_bpm,
+    )
+    material_beats = int(target_bpm * material_duration / 60)
+    total_beats = min(ideal_beats, material_beats)
+
+    if total_beats < ideal_beats:
+        logger.warning(
+            "Material budget caps remix: %.1fs available (%.0f beats) vs %.0fs target (%.0f beats). "
+            "Song A: %.1f BPM/%.0fs, Song B: %.1f BPM/%.0fs, target: %.1f BPM",
+            material_duration, material_beats,
+            TARGET_REMIX_DURATION_SECONDS, ideal_beats,
+            meta_a.bpm, meta_a.duration_seconds,
+            meta_b.bpm, meta_b.duration_seconds,
+            target_bpm,
+        )
+
     # Snap total beats to 4-beat grid
     total_beats = _snap_to_grid(total_beats)
     if total_beats < 32:

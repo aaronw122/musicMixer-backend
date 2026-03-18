@@ -97,3 +97,46 @@ def compute_stretch_pct(
     vocal_stretch = abs(target - vocal_bpm) / vocal_bpm * 100
     inst_stretch = abs(target - instrumental_bpm) / instrumental_bpm * 100
     return max(vocal_stretch, inst_stretch)
+
+
+def estimate_material_budget(
+    vocal_bpm: float,
+    vocal_duration: float,
+    instrumental_bpm: float,
+    instrumental_duration: float,
+    target_bpm: float,
+    region_start_pct: float = 0.25,
+    max_duration: float = 210.0,
+) -> float:
+    """Estimate max remix duration (seconds) the source material supports post-stretch.
+
+    After tempo-stretching, a song's duration changes by (original_bpm / target_bpm).
+    A slow song sped up becomes shorter; a fast song slowed down becomes longer.
+    The remix is limited by whichever source runs out first.
+
+    Takes raw floats (not AudioMetadata) to keep tempo.py free of model dependencies.
+
+    Args:
+        vocal_bpm: BPM of the vocal source song.
+        vocal_duration: Duration in seconds of the vocal source song.
+        instrumental_bpm: BPM of the instrumental source song.
+        instrumental_duration: Duration in seconds of the instrumental source song.
+        target_bpm: The target BPM for the remix.
+        region_start_pct: Fraction into each song where the usable region begins (default 25%).
+        max_duration: Maximum remix duration cap in seconds (default 210s).
+
+    Returns:
+        The shorter of the two songs' post-stretch usable regions, in seconds.
+    """
+    # Usable region: region_start_pct into each song through to end (or max_duration cap)
+    v_start = vocal_duration * region_start_pct
+    v_available = min(max_duration, vocal_duration - v_start)
+    i_start = instrumental_duration * region_start_pct
+    i_available = min(max_duration, instrumental_duration - i_start)
+
+    # Post-stretch durations
+    v_stretched = v_available * (vocal_bpm / target_bpm) if vocal_bpm > 0 else v_available
+    i_stretched = i_available * (instrumental_bpm / target_bpm) if instrumental_bpm > 0 else i_available
+
+    # Remix is limited by whichever source runs out first
+    return min(v_stretched, i_stretched)
