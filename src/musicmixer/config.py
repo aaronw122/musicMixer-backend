@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     section_detection_backend: str = "auto"  # "auto" (try ML, fall back to heuristic) | "ml" | "heuristic"
 
     # Stem cache
-    stem_cache_enabled: bool = True
+    stem_cache_enabled: bool = False
     stem_cache_max_gb: float = 10.0
     stem_cache_dir: Path = Path("data/stem_cache")
 
