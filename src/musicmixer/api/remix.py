@@ -905,12 +905,9 @@ async def _event_stream(
                 yield 'data: {"step":"keepalive","detail":"","progress":-1}\n\n'
             continue
         except asyncio.CancelledError:
-            # Client disconnected — cancel the session
-            if session.status == "queued":
-                session.status = "abandoned"
-            elif session.status == "processing":
-                session.cancelled.set()
-                logger.info("Session %s: SSE client disconnected, cancelling pipeline", session_id)
+            # Client disconnected — let the pipeline continue running.
+            # Client can reconnect via /progress endpoint to resume updates.
+            logger.info("Session %s: SSE client disconnected (pipeline continues)", session_id)
             break
 
         session.last_event = event
