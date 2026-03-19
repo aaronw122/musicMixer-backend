@@ -61,8 +61,9 @@ def _analyze_local(audio_path: Path) -> list[dict]:
     t0 = time.monotonic()
 
     model = AutoModel.from_pretrained(
-        "songformer/songformer",
+        "ASLP-lab/SongFormer",
         trust_remote_code=True,
+        local_files_only=True,
         # Pin to a known-good commit to avoid silent model changes.
         revision="PINNED_COMMIT_SHA",  # TODO: fill after validation
     )
