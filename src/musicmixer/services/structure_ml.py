@@ -12,6 +12,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_PINNED_REVISION = "5ac5227fccf286519464fdf211e15b606898408e"
+_HF_REPO = "ASLP-lab/SongFormer"
+
 # Maps SongFormer labels to musicMixer vocabulary.
 LABEL_MAP: dict[str, str] = {
     "intro": "intro",
@@ -21,8 +24,10 @@ LABEL_MAP: dict[str, str] = {
     "pre-chorus": "build",
     "outro": "outro",
     "instrumental": "instrumental",
+    "inst": "instrumental",
     "solo": "instrumental",
     "interlude": "breakdown",
+    "silence": "intro",
 }
 
 _DEFAULT_LABEL = "verse"
@@ -54,21 +59,43 @@ def _map_labels(segments: list[dict]) -> list[dict]:
 
 
 def _analyze_local(audio_path: Path) -> list[dict]:
-    """Run SongFormer inference on local CPU."""
+    """Run SongFormer inference on local CPU.
+
+    Requires transformers, torch, and SongFormer's dependencies to be
+    installed locally. This is a dev/validation fallback — production
+    uses Modal GPU.
+    """
+    import os
+    import sys
+
+    from huggingface_hub import snapshot_download
     from transformers import AutoModel
 
     logger.info("Running SongFormer locally on CPU for %s", audio_path.name)
     t0 = time.monotonic()
 
-    model = AutoModel.from_pretrained(
-        "ASLP-lab/SongFormer",
-        trust_remote_code=True,
-        local_files_only=True,
-        # Pin to a known-good commit to avoid silent model changes.
-        revision="PINNED_COMMIT_SHA",  # TODO: fill after validation
+    # Download (or locate cached) model repo with all sibling modules.
+    local_dir = snapshot_download(
+        repo_id=_HF_REPO,
+        revision=_PINNED_REVISION,
+        repo_type="model",
+        local_dir_use_symlinks=False,
+        ignore_patterns=["SongFormer.pt", "SongFormer.safetensors"],
     )
 
-    raw_segments: list[dict] = model.predict(str(audio_path))
+    # SongFormer's custom code imports sibling modules from the repo dir.
+    if local_dir not in sys.path:
+        sys.path.insert(0, local_dir)
+    os.environ["SONGFORMER_LOCAL_DIR"] = local_dir
+
+    model = AutoModel.from_pretrained(
+        local_dir,
+        trust_remote_code=True,
+        low_cpu_mem_usage=False,
+    )
+    model.eval()
+
+    raw_segments: list[dict] = model(str(audio_path))
 
     elapsed = time.monotonic() - t0
     logger.info(
@@ -80,13 +107,21 @@ def _analyze_local(audio_path: Path) -> list[dict]:
 
 
 def _analyze_modal(audio_path: Path) -> list[dict]:
-    """Run SongFormer inference on Modal GPU with a 120s timeout."""
-    from musicmixer.services.structure_modal import analyze_structure_remote
+    """Run SongFormer inference on Modal GPU.
+
+    Sends audio bytes to the remote container (Modal can't access
+    local files).
+    """
+    import modal
 
     logger.info("Running SongFormer on Modal GPU for %s", audio_path.name)
     t0 = time.monotonic()
 
-    raw_segments: list[dict] = analyze_structure_remote(str(audio_path))
+    audio_bytes = audio_path.read_bytes()
+    analyze_fn = modal.Function.from_name(
+        "musicmixer-songformer", "analyze_structure_remote"
+    )
+    raw_segments: list[dict] = analyze_fn.remote(audio_bytes, audio_path.name)
 
     elapsed = time.monotonic() - t0
     logger.info(
