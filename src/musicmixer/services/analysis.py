@@ -1486,6 +1486,155 @@ def _classify_energy_profile(combined_energy: np.ndarray) -> str:
 
 
 # ---------------------------------------------------------------------------
+# ML section conversion and enrichment
+# ---------------------------------------------------------------------------
+
+def _segments_to_sections(
+    ml_segments: list[dict],
+    bar_boundaries: np.ndarray,
+    sr: int,
+    audio_length: int,
+) -> list[SectionInfo]:
+    """Convert raw ML segment dicts into SectionInfo objects.
+
+    Maps start/end times (seconds) to bar indices using searchsorted on
+    bar boundary times. Uses librosa.frames_to_time for frame-to-time
+    conversion (bar_boundaries are in hop-length frames, not samples).
+
+    Args:
+        ml_segments: List of {"label": str, "start": float, "end": float}.
+        bar_boundaries: Frame indices of bar boundaries (n_bars + 1 entries).
+        sr: Sample rate.
+        audio_length: Total audio length in samples.
+
+    Returns:
+        List of SectionInfo with section_source="ml".
+    """
+    if len(bar_boundaries) < 2:
+        return []
+
+    # Convert bar boundaries (hop-length frames) to times via librosa
+    # The last entry may be audio_length in samples -- convert it separately
+    frame_boundaries = bar_boundaries[:-1]
+    bar_times = librosa.frames_to_time(frame_boundaries, sr=sr)
+    # Append the final boundary as audio_length / sr
+    final_time = audio_length / sr
+    bar_times = np.append(bar_times, final_time)
+
+    sections: list[SectionInfo] = []
+    for seg in ml_segments:
+        label = seg.get("label", "unknown")
+        start_sec = float(seg.get("start", 0.0))
+        end_sec = float(seg.get("end", 0.0))
+
+        # Map times to bar indices
+        start_bar = int(np.searchsorted(bar_times, start_sec, side="right") - 1)
+        end_bar = int(np.searchsorted(bar_times, end_sec, side="right") - 1)
+
+        # Clamp to valid range
+        n_bars = len(bar_boundaries) - 1
+        start_bar = max(0, min(start_bar, n_bars - 1))
+        end_bar = max(start_bar + 1, min(end_bar, n_bars))
+
+        bar_count = end_bar - start_bar
+        if bar_count <= 0:
+            continue
+
+        sections.append(replace(
+            SectionInfo(
+                start_bar=start_bar,
+                end_bar=end_bar,
+                bar_count=bar_count,
+                start_time=round(start_sec, 2),
+                end_time=round(end_sec, 2),
+                label=label,
+                energy_level="medium",
+                energy_trajectory="medium",
+                density="mid",
+                vocal_status="vox:no",
+            ),
+            section_source="ml",
+        ))
+
+    return sections
+
+
+def _enrich_sections(
+    sections: list[SectionInfo],
+    audio: np.ndarray,
+    sr: int,
+    bar_boundaries: np.ndarray,
+    bar_rms_per_stem: dict[str, np.ndarray],
+    combined_energy: np.ndarray,
+    vocal_active: np.ndarray,
+    buckets: EnergyBuckets,
+) -> list[SectionInfo]:
+    """Enrich ML-detected sections with audio features.
+
+    Computes RMS energy, energy level classification, vocal prominence,
+    vocal status, density, and energy trajectory for each section using
+    the same helpers the heuristic path uses.
+
+    Args:
+        sections: ML-detected SectionInfo objects (section_source="ml").
+        audio: Reference audio signal (1D, for RMS if needed).
+        sr: Sample rate.
+        bar_boundaries: Frame indices of bar boundaries.
+        bar_rms_per_stem: Per-stem bar RMS arrays.
+        combined_energy: Normalized combined energy per bar.
+        vocal_active: Per-bar boolean vocal activity.
+        buckets: Adaptive energy bucket thresholds.
+
+    Returns:
+        Enriched SectionInfo list with section_source="enriched".
+    """
+    total_bars = len(bar_boundaries) - 1
+    enriched: list[SectionInfo] = []
+
+    for sec in sections:
+        start_bar = sec.start_bar
+        end_bar = sec.end_bar
+
+        # Energy level from combined energy
+        seg_energy = combined_energy[start_bar:end_bar]
+        seg_mean_energy = float(np.mean(seg_energy)) if len(seg_energy) > 0 else 0.0
+        energy_level = classify_energy(seg_mean_energy, buckets)
+
+        # Energy trajectory
+        trajectory = _energy_trajectory(combined_energy, start_bar, end_bar, buckets)
+
+        # Vocal status
+        vocal_status = _segment_vocal_status(vocal_active, start_bar, end_bar)
+
+        # Density
+        density = _compute_density(bar_rms_per_stem, start_bar, end_bar)
+
+        # Vocal prominence
+        seg_bar_rms = {k: v[start_bar:end_bar] for k, v in bar_rms_per_stem.items()}
+        seg_vocal_active = vocal_active[start_bar:end_bar]
+        min_len = min(len(seg_vocal_active), *(len(v) for v in seg_bar_rms.values())) if seg_bar_rms else 0
+        if min_len > 0:
+            seg_bar_rms = {k: v[:min_len] for k, v in seg_bar_rms.items()}
+            seg_vocal_active = seg_vocal_active[:min_len]
+        active_count = int(np.sum(seg_vocal_active.astype(bool))) if min_len > 0 else 0
+        vocal_prominence = None
+        if active_count >= 3:
+            vocal_prominence = compute_vocal_prominence(seg_bar_rms, seg_vocal_active)
+
+        enriched.append(replace(
+            sec,
+            energy_level=energy_level,
+            energy_trajectory=trajectory,
+            density=density,
+            vocal_status=vocal_status,
+            vocal_prominence_db=round(vocal_prominence, 1) if vocal_prominence is not None else None,
+            section_source="enriched",
+        ))
+
+    return enriched
+
+
+# ---------------------------------------------------------------------------
 # Main entry points: analyze_stems() and compute_relationships()
 # ---------------------------------------------------------------------------
 
@@ -1494,6 +1643,7 @@ def analyze_stems(
     beat_frames: np.ndarray,
     bpm: float,
     audio_path: Optional[Path] = None,
+    ml_segments: list[dict] | None = None,
 ) -> tuple[StemAnalysis, SongStructure]:
     """Orchestrate the full song structure analysis pipeline.
 
@@ -1503,13 +1653,16 @@ def analyze_stems(
     4. Run normalization pipeline (combined energy, adaptive buckets).
     5. Detect vocal activity.
     6. Detect vocal gaps.
-    7. Run 3-stage section detection.
+    7. Run section detection (ML-based if ml_segments provided, else heuristic).
 
     Args:
         stem_paths: Dict mapping stem name to WAV file path.
         beat_frames: Reconciled beat frame positions.
         bpm: Reconciled BPM.
         audio_path: Path to original mix audio (for BPM re-detection if needed).
+        ml_segments: Optional ML-detected segments from structure_ml. If provided
+            and non-empty, these are converted to SectionInfo and enriched with
+            audio features, skipping the heuristic detection path.
 
     Returns:
         (StemAnalysis, SongStructure)
@@ -1582,17 +1735,43 @@ def analyze_stems(
     # Vocal gap detection
     vocal_gaps = detect_vocal_gaps(vocal_active)
 
-    # Section detection
-    sections = detect_sections(
-        bar_rms_per_stem=bar_rms,
-        combined_energy=combined_energy,
-        vocal_active=vocal_active,
-        buckets=buckets,
-        total_bars=total_bars,
-        bpm=bpm,
-        bar_boundaries_frames=bar_boundaries,
-        sr=ANALYSIS_SR,
-    )
+    # Section detection: ML path or heuristic path
+    if ml_segments:
+        logger.info("Using ML sections (%d segments provided)", len(ml_segments))
+        sections = _segments_to_sections(
+            ml_segments=ml_segments,
+            bar_boundaries=bar_boundaries,
+            sr=ANALYSIS_SR,
+            audio_length=audio_length,
+        )
+        # Find a reference audio array for enrichment (use first non-empty stem)
+        ref_audio = np.zeros(1, dtype=np.float32)
+        for name in STEM_NAMES:
+            if len(stems[name]) > 0:
+                ref_audio = stems[name]
+                break
+        sections = _enrich_sections(
+            sections=sections,
+            audio=ref_audio,
+            sr=ANALYSIS_SR,
+            bar_boundaries=bar_boundaries,
+            bar_rms_per_stem=bar_rms,
+            combined_energy=combined_energy,
+            vocal_active=vocal_active,
+            buckets=buckets,
+        )
+    else:
+        logger.info("Using heuristic sections")
+        sections = detect_sections(
+            bar_rms_per_stem=bar_rms,
+            combined_energy=combined_energy,
+            vocal_active=vocal_active,
+            buckets=buckets,
+            total_bars=total_bars,
+            bpm=bpm,
+            bar_boundaries_frames=bar_boundaries,
+            sr=ANALYSIS_SR,
+        )
 
     stem_analysis = StemAnalysis(
         bar_rms=bar_rms,
