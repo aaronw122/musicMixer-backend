@@ -431,3 +431,41 @@ class TestCustomTargetCounts:
         meta_b = _make_metadata()
         candidates = generate_candidates(meta_a, meta_b, max_count=10)
         assert len(candidates) <= 10
+
+
+# ---------------------------------------------------------------------------
+# Material budget capping tests (beat grid mismatch fix)
+# ---------------------------------------------------------------------------
+
+class TestMaterialBudgetCapping:
+    """Test that _compute_total_beats caps when source material is limited."""
+
+    def test_caps_by_material_budget(self):
+        """When a slow song stretched fast would shrink below 210s, total_beats is capped."""
+        meta_a = _make_metadata(bpm=129.2, duration=220.0)  # vocals
+        meta_b = _make_metadata(bpm=78.3, duration=182.0)   # instrumentals (slow)
+        target_bpm, total_beats = _compute_total_beats(meta_a, meta_b)
+        # Naive calculation: ~519 beats for 210s at ~148 BPM
+        # Material budget should cap well below that
+        naive_beats = int(target_bpm * 210 / 60)
+        assert total_beats < naive_beats, (
+            f"Expected material-capped beats < naive {naive_beats}, got {total_beats}"
+        )
+        assert total_beats % 4 == 0, "Total beats should be grid-aligned"
+
+    def test_no_cap_when_material_sufficient(self):
+        """When both songs are long enough and tempos match, no capping occurs."""
+        meta_a = _make_metadata(bpm=120.0, duration=400.0)
+        meta_b = _make_metadata(bpm=120.0, duration=400.0)
+        target_bpm, total_beats = _compute_total_beats(meta_a, meta_b)
+        # target_bpm = 120 (identical, DJ-transparent), material = 210s (no stretch)
+        expected = int(target_bpm * 210 / 60)
+        expected = (expected // 4) * 4  # grid-snap
+        assert total_beats == expected
+
+    def test_minimum_32_beats_even_when_capped(self):
+        """Even with extreme material limitation, minimum 32 beats is enforced."""
+        meta_a = _make_metadata(bpm=120.0, duration=40.0)  # very short
+        meta_b = _make_metadata(bpm=120.0, duration=40.0)
+        _, total_beats = _compute_total_beats(meta_a, meta_b)
+        assert total_beats >= 32

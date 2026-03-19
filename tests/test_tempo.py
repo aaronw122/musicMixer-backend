@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from musicmixer.services.tempo import compute_stretch_pct, estimate_target_bpm
+from musicmixer.services.tempo import compute_stretch_pct, estimate_material_budget, estimate_target_bpm
 
 
 # ---------------------------------------------------------------------------
@@ -347,3 +347,77 @@ class TestConsistencyWithProcessor:
             f"Mismatch for ({vocal_bpm}, {instrumental_bpm}, {tempo_source}): "
             f"old={old_result}, new={new_result}"
         )
+
+
+# ---------------------------------------------------------------------------
+# estimate_material_budget
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateMaterialBudget:
+    """Tests for the material budget estimator (beat grid mismatch fix)."""
+
+    def test_slow_instrumental_shrinks_budget(self):
+        """A slow instrumental (78.3 BPM) stretched to 148.4 BPM shrinks to ~96s."""
+        budget = estimate_material_budget(
+            vocal_bpm=129.2,
+            vocal_duration=220.0,
+            instrumental_bpm=78.3,
+            instrumental_duration=182.0,
+            target_bpm=148.4,
+        )
+        # Instrumental: usable = min(210, 182 - 45.5) = 136.5s
+        # Post-stretch: 136.5 * (78.3 / 148.4) = ~72s
+        # Vocals: usable = min(210, 220 - 55) = 165s
+        # Post-stretch: 165 * (129.2 / 148.4) = ~143.7s
+        # Budget = min(~72, ~143.7) = ~72s
+        assert 60 < budget < 100
+
+    def test_similar_tempos_no_cap(self):
+        """When both songs have similar tempos and long durations, budget >= 210s."""
+        budget = estimate_material_budget(
+            vocal_bpm=120.0,
+            vocal_duration=400.0,
+            instrumental_bpm=120.0,
+            instrumental_duration=400.0,
+            target_bpm=120.0,
+        )
+        # Both songs have plenty of material, no stretch -> budget = 210s (max_duration cap)
+        assert budget >= 210.0
+
+    def test_fast_source_slow_target_stretches_longer(self):
+        """A fast song slowed down becomes longer, not shorter."""
+        budget = estimate_material_budget(
+            vocal_bpm=160.0,
+            vocal_duration=200.0,
+            instrumental_bpm=160.0,
+            instrumental_duration=200.0,
+            target_bpm=120.0,
+        )
+        # Stretching from 160 to 120 makes audio longer: 150s * (160/120) = 200s
+        assert budget >= 200.0
+
+    def test_zero_bpm_uses_raw_duration(self):
+        """Zero BPM (invalid) should use raw duration without stretching."""
+        budget = estimate_material_budget(
+            vocal_bpm=0.0,
+            vocal_duration=200.0,
+            instrumental_bpm=120.0,
+            instrumental_duration=200.0,
+            target_bpm=120.0,
+        )
+        # Vocals: 0 BPM -> use raw: min(210, 200 - 50) = 150s
+        # Instrumentals: min(210, 200 - 50) = 150s * (120/120) = 150s
+        assert budget == pytest.approx(150.0)
+
+    def test_short_songs_cap_aggressively(self):
+        """Very short songs (<90s) should have very limited budgets."""
+        budget = estimate_material_budget(
+            vocal_bpm=120.0,
+            vocal_duration=80.0,
+            instrumental_bpm=120.0,
+            instrumental_duration=80.0,
+            target_bpm=120.0,
+        )
+        # Usable region: 80 - 20 = 60s (no stretch since BPMs match)
+        assert budget == pytest.approx(60.0)

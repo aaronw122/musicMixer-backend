@@ -23,7 +23,7 @@ import anthropic
 
 from musicmixer.config import settings
 from musicmixer.models import VOCAL_SOURCE, AudioMetadata, IntentPlan, IntentSection, LyricsData, RemixPlan, Section
-from musicmixer.services.tempo import compute_stretch_pct, estimate_target_bpm
+from musicmixer.services.tempo import compute_stretch_pct, estimate_material_budget, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,10 @@ ALL_STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
 
 # Target remix duration in seconds. Controls beat budget, LLM guidance, and fallback plans.
 TARGET_REMIX_DURATION_SECONDS = 210  # 3.5 minutes
+
+# Max output tokens for LLM remix plan generation.
+# 3072 gives comfortable headroom for 9-12 section plans (~1450 tokens typical).
+LLM_MAX_TOKENS = 3072
 
 
 class _DurationTooShortError(Exception):
@@ -328,6 +332,8 @@ def _build_dynamic_context(
     stretch_pct: float | None = None,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
+    material_duration: float | None = None,
+    ideal_beats: int | None = None,
 ) -> str:
     """Build dynamic context string for injection into the user message.
 
@@ -367,8 +373,16 @@ Arrangement guidance to minimize degradation:
 These are quality-driven defaults. Override with musical judgment if the prompt demands a vocal-focused arrangement."""
 
     # Dynamic: Duration target (varies per song pair)
+    min_ref = min(TARGET_REMIX_DURATION_SECONDS, material_duration) if material_duration is not None else TARGET_REMIX_DURATION_SECONDS
     duration_section = f"""DURATION: Target = {TARGET_REMIX_DURATION_SECONDS}s = ~{total_available_beats} beats at {target_bpm:.0f} BPM (1 beat = {60 / target_bpm:.2f}s, 1 bar = 4 beats).
-Arrangements shorter than {int(TARGET_REMIX_DURATION_SECONDS * 0.7)}s will be REJECTED."""
+Arrangements shorter than {int(min_ref * 0.7)}s will be REJECTED."""
+
+    if ideal_beats is not None and total_available_beats < ideal_beats and material_duration is not None:
+        duration_section += (
+            f"\nNOTE: Source material limits this remix to ~{total_available_beats} beats "
+            f"(~{material_duration:.0f}s) after tempo matching. "
+            f"Do NOT plan beyond {total_available_beats} beats."
+        )
 
     # Dynamic: Song Data (5 layers)
     song_a_info = _build_song_info("Song A", song_a_meta, total_beats_a)
@@ -888,6 +902,7 @@ def _validate_intent_plan(
     plan: IntentPlan,
     song_a_meta: AudioMetadata,
     song_b_meta: AudioMetadata,
+    material_duration: float | None = None,
 ) -> IntentPlan:
     """Validate and fix the LLM's intent plan. Fixes structural issues in-place where possible.
 
@@ -999,7 +1014,7 @@ def _validate_intent_plan(
         target_bpm, TARGET_REMIX_DURATION_SECONDS,
     )
 
-    plan, duration_ok = _validate_intent_duration(plan, target_bpm)
+    plan, duration_ok = _validate_intent_duration(plan, target_bpm, material_duration=material_duration)
     if not duration_ok:
         raise _DurationTooShortError(plan, target_bpm)
 
@@ -1008,11 +1023,15 @@ def _validate_intent_plan(
 
 def _validate_intent_duration(
     plan: IntentPlan, target_bpm: float,
+    material_duration: float | None = None,
 ) -> tuple[IntentPlan, bool]:
     """Validate arrangement duration against target range.
 
     Returns (plan, is_acceptable). If is_acceptable is False, the caller
     should retry the LLM with duration feedback rather than blindly extending.
+
+    When material_duration is provided and is shorter than the default target,
+    the minimum duration threshold is based on the material budget instead.
     """
     if not plan.sections:
         return plan, False
@@ -1020,7 +1039,11 @@ def _validate_intent_duration(
     total_beats = plan.sections[-1].end_beat
     total_seconds = total_beats * 60 / target_bpm
 
-    min_duration = TARGET_REMIX_DURATION_SECONDS * 0.7   # 147s
+    # When material budget is much shorter than target, adjust reference
+    reference_duration = TARGET_REMIX_DURATION_SECONDS
+    if material_duration is not None:
+        reference_duration = min(TARGET_REMIX_DURATION_SECONDS, material_duration)
+    min_duration = reference_duration * 0.7
     max_duration = TARGET_REMIX_DURATION_SECONDS * 1.5   # 315s
 
     if total_seconds < min_duration:
@@ -1145,7 +1168,15 @@ def interpret_prompt(
         vocal_bpm=song_a_meta.bpm,
         instrumental_bpm=song_b_meta.bpm,
     )
-    total_available_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+    ideal_beats = int(target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+    material_duration = estimate_material_budget(
+        vocal_bpm=song_a_meta.bpm,
+        vocal_duration=song_a_meta.duration_seconds,
+        instrumental_bpm=song_b_meta.bpm,
+        instrumental_duration=song_b_meta.duration_seconds,
+        target_bpm=target_bpm,
+    )
+    total_available_beats = min(ideal_beats, int(target_bpm * material_duration / 60))
 
     # Compute stretch percentage for advisory context
     stretch_pct = compute_stretch_pct(song_a_meta.bpm, song_b_meta.bpm)
@@ -1159,6 +1190,8 @@ def interpret_prompt(
         stretch_pct=stretch_pct,
         lyrics_a=lyrics_a,
         lyrics_b=lyrics_b,
+        material_duration=material_duration,
+        ideal_beats=ideal_beats,
     )
 
     # Build messages: few-shot examples + user prompt with dynamic context
@@ -1183,7 +1216,7 @@ def interpret_prompt(
         try:
             response = client.messages.create(
                 model=settings.llm_model,
-                max_tokens=1536,
+                max_tokens=LLM_MAX_TOKENS,
                 system=system_blocks,
                 messages=messages,
                 tools=[tool_schema],
@@ -1196,7 +1229,7 @@ def interpret_prompt(
                 try:
                     response = client.messages.create(
                         model=settings.llm_model,
-                        max_tokens=1536,
+                        max_tokens=LLM_MAX_TOKENS,
                         system=system_blocks,
                         messages=messages,
                         tools=[tool_schema],
@@ -1242,7 +1275,29 @@ def interpret_prompt(
 
         # Check stop reason
         if response.stop_reason == "max_tokens":
-            logger.warning("LLM hit max_tokens, using fallback")
+            logger.warning(
+                "LLM hit max_tokens (attempt %d/%d, output=%d tokens)",
+                attempt + 1, max_duration_attempts, output_tokens,
+            )
+            partial_block = next(
+                (b for b in response.content if b.type == "tool_use"), None
+            )
+            if partial_block is not None:
+                try:
+                    partial_plan = _parse_intent_plan(partial_block.input)
+                    partial_plan = _validate_intent_plan(partial_plan, song_a_meta, song_b_meta)
+                    logger.info(
+                        "Salvaged partial plan from truncated response: %d sections",
+                        len(partial_plan.sections),
+                    )
+                    partial_plan.warnings.append("Plan recovered from truncated LLM response.")
+                    return partial_plan
+                except _DurationTooShortError:
+                    if attempt < max_duration_attempts - 1:
+                        continue  # retry with duration feedback
+                    logger.warning("Partial plan also too short, using fallback")
+                except Exception:
+                    logger.warning("Could not parse partial plan", exc_info=True)
             return generate_fallback_plan(song_a_meta, song_b_meta)
 
         # Extract tool_use result
@@ -1273,7 +1328,7 @@ def interpret_prompt(
             return generate_fallback_plan(song_a_meta, song_b_meta)
 
         try:
-            plan = _validate_intent_plan(plan, song_a_meta, song_b_meta)
+            plan = _validate_intent_plan(plan, song_a_meta, song_b_meta, material_duration=material_duration)
         except _DurationTooShortError as e:
             if attempt < max_duration_attempts - 1:
                 needed_beats = int(
@@ -1287,37 +1342,20 @@ def interpret_prompt(
                     attempt + 1, max_duration_attempts,
                     actual_beats, needed_beats, beat_delta,
                 )
-                # Append the tool result + correction message for the retry
-                messages.append({
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": tool_use_block.id,
-                            "name": "create_remix_plan",
-                            "input": raw_plan,
-                        }
-                    ],
-                })
-                messages.append({
+                # Replace original user message with condensed retry guidance
+                # (avoids duplicating the full plan JSON in input tokens and
+                # prevents the LLM from anchoring on its failed output)
+                retry_guidance = (
+                    f"IMPORTANT: Your previous arrangement was REJECTED — "
+                    f"only {actual_beats} beats ({actual_beats * 60 / e.target_bpm:.0f}s), "
+                    f"need ~{needed_beats} beats ({TARGET_REMIX_DURATION_SECONDS}s). "
+                    f"Create at least {suggested_sections} sections."
+                )
+                original_content = messages[-1]["content"]
+                messages[-1] = {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_block.id,
-                            "content": (
-                                f"REJECTED: Your arrangement is too short. "
-                                f"You produced {actual_beats} beats = "
-                                f"{actual_beats * 60 / e.target_bpm:.0f}s at {e.target_bpm:.0f} BPM. "
-                                f"Target: {TARGET_REMIX_DURATION_SECONDS}s = ~{needed_beats} beats. "
-                                f"You need {beat_delta} more beats. "
-                                f"Create at least {suggested_sections} sections of 16-64 beats each. "
-                                f"Use the Extended Mix pattern (intro -> verse -> chorus -> "
-                                f"breakdown -> verse -> chorus -> bridge -> drop -> outro)."
-                            ),
-                        }
-                    ],
-                })
+                    "content": f"{retry_guidance}\n\n{original_content}",
+                }
                 continue  # retry
             else:
                 logger.warning(
@@ -1366,7 +1404,15 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
         instrumental_bpm=inst_meta.bpm,
         tempo_source=tempo_src,
     )
-    total_beats = int(fallback_target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+    ideal_beats = int(fallback_target_bpm * TARGET_REMIX_DURATION_SECONDS / 60)
+    material_duration = estimate_material_budget(
+        vocal_bpm=vocal_meta.bpm,
+        vocal_duration=vocal_meta.duration_seconds,
+        instrumental_bpm=inst_meta.bpm,
+        instrumental_duration=inst_meta.duration_seconds,
+        target_bpm=fallback_target_bpm,
+    )
+    total_beats = min(ideal_beats, int(fallback_target_bpm * material_duration / 60))
 
     logger.info(
         "Generated fallback plan: vocals=%s, tempo=%s, total_beats=%d",
