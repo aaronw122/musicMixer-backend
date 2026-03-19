@@ -178,9 +178,31 @@ def run_pipeline(
     lyrics_future_a = None
     lyrics_future_b = None
 
+    # --- ML structure detection (SongFormer) ---
+    # Runs on the original mix audio (no stems needed), so it can overlap with
+    # separation.  Config-aware: "heuristic" skips ML entirely, "auto" falls
+    # back on failure, "ml" raises on failure.
+    ml_segments_a: list[dict] | None = None
+    ml_segments_b: list[dict] | None = None
+    structure_ml_enabled = settings.section_detection_backend in ("auto", "ml")
+
+    if structure_ml_enabled:
+        from musicmixer.services.structure_ml import analyze_structure_ml
+        logger.info(
+            "Session %s: ML structure detection enabled (backend=%s)",
+            session_id, settings.section_detection_backend,
+        )
+    else:
+        logger.info("Session %s: ML structure detection skipped (backend=heuristic)", session_id)
+
     pool_workers = 4  # 2 separation + 2 analysis
     if settings.lyrics_lookup_enabled:
-        pool_workers = 6
+        pool_workers += 2
+    if structure_ml_enabled:
+        pool_workers += 2
+
+    structure_future_a = None
+    structure_future_b = None
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         # Separation futures
@@ -190,6 +212,11 @@ def run_pipeline(
         # Analysis futures (overlapped with separation -- no stem dependency)
         analysis_future_a = pool.submit(analyze_audio_full, song_a_path)
         analysis_future_b = pool.submit(analyze_audio_full, song_b_path)
+
+        # ML structure futures (overlapped -- operates on original mix, no stems needed)
+        if structure_ml_enabled:
+            structure_future_a = pool.submit(analyze_structure_ml, song_a_path)
+            structure_future_b = pool.submit(analyze_structure_ml, song_b_path)
 
         # Lyrics futures (optional, also overlapped)
         if settings.lyrics_lookup_enabled:
@@ -232,6 +259,36 @@ def run_pipeline(
                 lyrics_future_b.cancel()
             except Exception:
                 logger.warning("Session %s: Lyrics lookup failed for Song B", session_id, exc_info=True)
+
+        # --- Collect ML structure results (120s timeout for Modal cold starts) ---
+        _STRUCTURE_ML_TIMEOUT_S = 120
+        for label, future, target in [
+            ("A", structure_future_a, "ml_segments_a"),
+            ("B", structure_future_b, "ml_segments_b"),
+        ]:
+            if future is None:
+                continue
+            try:
+                segments = future.result(timeout=_STRUCTURE_ML_TIMEOUT_S)
+                if target == "ml_segments_a":
+                    ml_segments_a = segments
+                else:
+                    ml_segments_b = segments
+                logger.info(
+                    "Session %s: ML structure for Song %s: %d segments",
+                    session_id, label, len(segments),
+                )
+            except FuturesTimeoutError:
+                msg = f"ML structure detection timed out for Song {label} (>{_STRUCTURE_ML_TIMEOUT_S}s)"
+                logger.warning("Session %s: %s", session_id, msg)
+                future.cancel()
+                if settings.section_detection_backend == "ml":
+                    raise RuntimeError(msg)
+            except Exception:
+                msg = f"ML structure detection failed for Song {label}"
+                logger.warning("Session %s: %s", session_id, msg, exc_info=True)
+                if settings.section_detection_backend == "ml":
+                    raise
 
     # Log lyrics results
     for label, data in [("A", lyrics_a_data), ("B", lyrics_b_data)]:
@@ -310,9 +367,9 @@ def run_pipeline(
             )
 
     # Stem-level structure analysis for both songs (depends on stem output)
-    for label, meta, s_dir in [
-        ("A", meta_a, song_a_stems_dir),
-        ("B", meta_b, song_b_stems_dir),
+    for label, meta, s_dir, ml_segs in [
+        ("A", meta_a, song_a_stems_dir, ml_segments_a),
+        ("B", meta_b, song_b_stems_dir, ml_segments_b),
     ]:
         try:
             stem_paths = {name: s_dir / f"{name}.wav" for name in ["vocals", "drums", "bass", "guitar", "piano", "other"]}
@@ -323,6 +380,7 @@ def run_pipeline(
                     stem_paths=stem_paths,
                     beat_frames=meta.beat_frames,
                     bpm=meta.bpm,
+                    ml_segments=ml_segs,
                 )
                 meta.stem_analysis = stem_analysis
                 meta.song_structure = song_structure
