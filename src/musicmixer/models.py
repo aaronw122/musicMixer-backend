@@ -101,7 +101,7 @@ class SectionInfo:
     vocal_status: str               # vox:yes|vox:no|vox:fading
     vocal_prominence_db: Optional[float] = None  # dB above accompaniment, None if no vocals
     annotations: list[str] = field(default_factory=list)  # ["DROP","BUILD","GOOD INSTRUMENTAL SOURCE"]
-    section_source: str = "heuristic"  # "ml" | "heuristic" | "enriched" (enriched = ML boundary + heuristic classification)
+    section_source: str = "heuristic"  # "ml" | "heuristic" | "enriched"
 
 
 @dataclass
