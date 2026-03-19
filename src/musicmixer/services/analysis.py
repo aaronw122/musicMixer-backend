@@ -1213,19 +1213,18 @@ def merge_sections(sections: list[SectionInfo]) -> list[SectionInfo]:
         prev = merged[-1]
         if sec.label == prev.label:
             # Merge: combine bars, times, recalculate stats
-            merged[-1] = SectionInfo(
-                start_bar=prev.start_bar,
+            merged[-1] = replace(
+                prev,
                 end_bar=sec.end_bar,
                 bar_count=sec.end_bar - prev.start_bar,
-                start_time=prev.start_time,
                 end_time=sec.end_time,
-                label=prev.label,
                 energy_level=_merge_energy_level(prev.energy_level, sec.energy_level),
                 energy_trajectory=prev.energy_trajectory + "->" + sec.energy_trajectory
                     if prev.energy_trajectory != sec.energy_trajectory
                     else prev.energy_trajectory,
                 density=_merge_density(prev.density, sec.density),
                 vocal_status=_merge_vocal_status(prev.vocal_status, sec.vocal_status),
+                vocal_prominence_db=None,
                 annotations=list(set(prev.annotations + sec.annotations)),
             )
         else:
@@ -1247,34 +1246,30 @@ def merge_sections(sections: list[SectionInfo]) -> list[SectionInfo]:
                 if left_energy >= right_energy and i > 0:
                     # Absorb into left
                     prev = new_merged[-1]
-                    new_merged[-1] = SectionInfo(
-                        start_bar=prev.start_bar,
+                    new_merged[-1] = replace(
+                        prev,
                         end_bar=sec.end_bar,
                         bar_count=sec.end_bar - prev.start_bar,
-                        start_time=prev.start_time,
                         end_time=sec.end_time,
-                        label=prev.label,
                         energy_level=_merge_energy_level(prev.energy_level, sec.energy_level),
-                        energy_trajectory=prev.energy_trajectory,
                         density=_merge_density(prev.density, sec.density),
                         vocal_status=_merge_vocal_status(prev.vocal_status, sec.vocal_status),
+                        vocal_prominence_db=None,
                         annotations=list(set(prev.annotations + sec.annotations)),
                     )
                     changed = True
                 elif right_energy >= 0 and i < len(merged) - 1:
                     # Absorb into right
                     next_sec = merged[i + 1]
-                    new_sec = SectionInfo(
+                    new_sec = replace(
+                        next_sec,
                         start_bar=sec.start_bar,
-                        end_bar=next_sec.end_bar,
                         bar_count=next_sec.end_bar - sec.start_bar,
                         start_time=sec.start_time,
-                        end_time=next_sec.end_time,
-                        label=next_sec.label,
                         energy_level=_merge_energy_level(sec.energy_level, next_sec.energy_level),
-                        energy_trajectory=next_sec.energy_trajectory,
                         density=_merge_density(sec.density, next_sec.density),
                         vocal_status=_merge_vocal_status(sec.vocal_status, next_sec.vocal_status),
+                        vocal_prominence_db=None,
                         annotations=list(set(sec.annotations + next_sec.annotations)),
                     )
                     new_merged.append(new_sec)
@@ -1383,19 +1378,9 @@ def detect_sections(
             active_count = int(np.sum(seg_vocal_active.astype(bool))) if min_len > 0 else 0
             if active_count >= 3:
                 prom = compute_vocal_prominence(seg_bar_rms, seg_vocal_active)
-                sections[i] = SectionInfo(
-                    start_bar=sec.start_bar,
-                    end_bar=sec.end_bar,
-                    bar_count=sec.bar_count,
-                    start_time=sec.start_time,
-                    end_time=sec.end_time,
-                    label=sec.label,
-                    energy_level=sec.energy_level,
-                    energy_trajectory=sec.energy_trajectory,
-                    density=sec.density,
-                    vocal_status=sec.vocal_status,
+                sections[i] = replace(
+                    sec,
                     vocal_prominence_db=round(prom, 1) if prom is not None else None,
-                    annotations=sec.annotations,
                 )
 
     logger.info("Section detection complete: %d sections", len(sections))
