@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # Stem separation
     stem_backend: str = "modal"  # "modal" or "local"
 
+    # Section detection
+    section_detection_backend: str = "auto"  # "auto" (try ML, fall back to heuristic) | "ml" | "heuristic"
+
     # Stem cache
     stem_cache_enabled: bool = True
     stem_cache_max_gb: float = 10.0
