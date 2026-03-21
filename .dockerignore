@@ -11,3 +11,5 @@ notes/
 .claude/
 scripts/
 architecture.excalidraw
+# Dev-only static files (production frontend is in static-build/)
+static/
