@@ -87,7 +87,12 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }} \
-            "cd ~/musicmixer && docker compose pull && docker compose up -d --remove-orphans"
+            'cd ~/musicmixer && \
+            docker compose down --remove-orphans 2>/dev/null || true && \
+            ROGUE=$(docker ps -q --filter "publish=8880"); \
+            if [ -n "$ROGUE" ]; then echo "Killing rogue container on port 8880: $ROGUE"; docker rm -f $ROGUE; fi && \
+            docker compose pull && \
+            docker compose up -d --remove-orphans'
 
       - name: Post-deploy health check
         run: |
