@@ -179,18 +179,20 @@ class TestFlagGating:
             mock_settings.lyrics_lookup_enabled = False
             mock_settings.ab_taste_model_v1 = False  # Flag OFF
 
-            from musicmixer.services.pipeline import run_pipeline
-            run_pipeline(
-                session_id="test",
-                song_a_path=str(song_a),
-                song_b_path=str(song_b),
-                prompt="test",
-                event_queue=event_queue,
-                session=session,
-            )
+            # Patch interpreter's module-level settings reference
+            with patch("musicmixer.services.interpreter.settings", mock_settings):
+                from musicmixer.services.pipeline import run_pipeline
+                run_pipeline(
+                    session_id="test",
+                    song_a_path=str(song_a),
+                    song_b_path=str(song_b),
+                    prompt="test",
+                    event_queue=event_queue,
+                    session=session,
+                )
 
-            # taste_stage should never have been called
-            mock_taste.assert_not_called()
+                # taste_stage should never have been called
+                mock_taste.assert_not_called()
 
 
 class TestTimeoutFallback:

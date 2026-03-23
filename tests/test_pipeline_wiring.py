@@ -129,15 +129,19 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
             for key, value in settings_overrides.items():
                 setattr(mock_settings, key, value)
 
-        run_pipeline(
-            session_id="test-session",
-            song_a_path=str(pipeline_tmp["song_a_path"]),
-            song_b_path=str(pipeline_tmp["song_b_path"]),
-            prompt="test remix",
-            event_queue=event_queue,
-            session=session,
-            **pipeline_kwargs,
-        )
+        # Patch interpreter's module-level settings reference to the same mock
+        # (it imports settings at module level, so musicmixer.config.settings
+        # patch alone doesn't reach it)
+        with patch("musicmixer.services.interpreter.settings", mock_settings):
+            run_pipeline(
+                session_id="test-session",
+                song_a_path=str(pipeline_tmp["song_a_path"]),
+                song_b_path=str(pipeline_tmp["song_b_path"]),
+                prompt="test remix",
+                event_queue=event_queue,
+                session=session,
+                **pipeline_kwargs,
+            )
 
     return event_queue, session
 
