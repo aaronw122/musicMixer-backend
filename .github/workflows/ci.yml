@@ -34,10 +34,13 @@ jobs:
       - name: Check lockfile is up to date
         run: uv lock --check
 
-      - name: Install dependencies
+      - name: Install dependencies (CPU-only torch to skip CUDA bloat)
         # local extra: audio-separator (needed when STEM_BACKEND=local)
         # analysis extra: essentia (needed by analysis module imports)
-        run: uv sync --frozen --extra local --extra analysis
+        # Override torch index to CPU-only — tests don't need GPU
+        run: uv sync --frozen --extra local --extra analysis --index-strategy unsafe-best-match
+        env:
+          UV_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
 
       - name: Run tests
         run: uv run pytest tests/ -m "not slow" -v --timeout=120
