@@ -88,7 +88,7 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }} \
-            "cd ~/musicmixer && docker compose down && docker compose pull && docker compose up -d --remove-orphans"
+            'cd ~/musicmixer && docker compose down --remove-orphans 2>/dev/null; docker ps -q --filter "publish=8880" | xargs -r docker rm -f; docker compose pull && docker compose up -d'
 
       - name: Post-deploy health check
         run: |
