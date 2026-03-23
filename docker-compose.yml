@@ -1,3 +1,5 @@
+name: backend
+
 services:
   musicmixer:
     image: ghcr.io/aaronw122/musicmixer:latest
