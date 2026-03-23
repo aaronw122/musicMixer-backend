@@ -11,13 +11,16 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # Required: Settings init fails without this in CI (no .env file,
+      # and the default "modal" triggers Modal imports)
       STEM_BACKEND: local
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
-        # Keep in sync with Dockerfile system deps
+        # Source of truth for system deps: Dockerfile
+        # Both install ffmpeg, libsndfile1, rubberband-cli — keep in sync.
         run: sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1 rubberband-cli
 
       - name: Set up Python
@@ -32,6 +35,8 @@ jobs:
         run: uv lock --check
 
       - name: Install dependencies
+        # local extra: audio-separator (needed when STEM_BACKEND=local)
+        # analysis extra: essentia (needed by analysis module imports)
         run: uv sync --frozen --extra local --extra analysis
 
       - name: Run tests
