@@ -87,10 +87,10 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }} \
-            "cd ~/musicmixer && docker compose pull && docker compose up -d --remove-orphans"
+            "cd ~/musicMixer && docker compose pull && docker compose up -d --remove-orphans"
 
       - name: Post-deploy health check
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }} \
-            "sleep 15 && curl -f http://localhost:8880/health || exit 1"
+            "sleep 15 && curl -f http://localhost:8880/health"
