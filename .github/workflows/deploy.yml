@@ -5,6 +5,7 @@ on:
     branches: [main]
   repository_dispatch:
     types: [frontend-deploy]
+  workflow_dispatch:
 
 concurrency:
   group: deploy-production
@@ -87,7 +88,7 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }} \
-            "cd ~/musicmixer && docker compose pull && docker compose up -d --remove-orphans"
+            "cd ~/musicmixer && docker compose down && docker compose pull && docker compose up -d --remove-orphans"
 
       - name: Post-deploy health check
         run: |
