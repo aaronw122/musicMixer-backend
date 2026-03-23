@@ -72,6 +72,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-and-push
     steps:
+      - name: Checkout (for docker-compose.yml)
+        uses: actions/checkout@v4
+
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -83,6 +86,12 @@ jobs:
           echo "${{ secrets.HOMESERVER_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.HOMESERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync docker-compose.yml to homeserver
+        run: |
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            docker-compose.yml \
+            ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }}:~/musicmixer/docker-compose.yml
 
       - name: Deploy to homeserver
         run: |
