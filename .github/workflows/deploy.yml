@@ -24,6 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: aaronw122/musicMixer-frontend
+          token: ${{ secrets.DEPLOY_PAT }}
           path: frontend
 
       - name: Setup Bun
