@@ -76,18 +76,21 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HOMESERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.HOMESERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
       - name: Deploy to homeserver
-        uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: ${{ secrets.HOMESERVER_HOST }}
-          username: ${{ secrets.HOMESERVER_USER }}
-          key: ${{ secrets.HOMESERVER_SSH_KEY }}
-          script: cd ~/musicmixer && docker compose pull && docker compose up -d --remove-orphans
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }} \
+            "cd ~/musicmixer && docker compose pull && docker compose up -d --remove-orphans"
 
       - name: Post-deploy health check
-        uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: ${{ secrets.HOMESERVER_HOST }}
-          username: ${{ secrets.HOMESERVER_USER }}
-          key: ${{ secrets.HOMESERVER_SSH_KEY }}
-          script: sleep 15 && curl -f http://localhost:8880/health || exit 1
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }} \
+            "sleep 15 && curl -f http://localhost:8880/health || exit 1"
