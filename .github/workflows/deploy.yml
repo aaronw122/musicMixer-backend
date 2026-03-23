@@ -93,4 +93,4 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             ${{ secrets.HOMESERVER_USER }}@${{ secrets.HOMESERVER_HOST }} \
-            "sleep 15 && curl -f http://localhost:8880/health || exit 1"
+            "sleep 15 && curl -f http://localhost:8880/health"
