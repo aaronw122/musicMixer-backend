@@ -2,6 +2,7 @@ name: backend
 
 services:
   musicmixer:
+    build: .
     image: ghcr.io/aaronw122/musicmixer:latest
     ports:
       - "8880:8880"
