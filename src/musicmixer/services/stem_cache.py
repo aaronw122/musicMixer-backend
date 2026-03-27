@@ -59,36 +59,45 @@ def get_cached_stems(cache_key: str, stems_dir: Path) -> bool:
         logger.debug("Stem cache miss for %s (no directory)", cache_key[:12])
         return False
 
-    # Validate: at least one .wav, all .wav files non-zero
-    wav_files = list(cache_entry.glob("*.wav"))
-    if not wav_files:
-        logger.warning("Stem cache entry %s has no WAV files, treating as miss", cache_key[:12])
-        return False
+    # Validate: at least one .wav, all .wav files non-zero.
+    # Wrap in try/except for FileNotFoundError — a concurrent write or
+    # eviction can remove files between our glob and stat/copy calls.
+    try:
+        wav_files = list(cache_entry.glob("*.wav"))
+        if not wav_files:
+            logger.warning("Stem cache entry %s has no WAV files, treating as miss", cache_key[:12])
+            return False
 
-    for wav in wav_files:
-        if wav.stat().st_size == 0:
+        for wav in wav_files:
+            if wav.stat().st_size == 0:
+                logger.warning(
+                    "Stem cache entry %s has zero-length %s, treating as miss",
+                    cache_key[:12],
+                    wav.name,
+                )
+                return False
+
+        # Validate we have a recognized stem set
+        stem_names = {wav.stem for wav in wav_files}
+        if not (stem_names >= EXPECTED_4_STEMS or stem_names >= EXPECTED_6_STEMS):
             logger.warning(
-                "Stem cache entry %s has zero-length %s, treating as miss",
+                "Stem cache entry %s has unrecognized stems %s, treating as miss",
                 cache_key[:12],
-                wav.name,
+                stem_names,
             )
             return False
 
-    # Validate we have a recognized stem set
-    stem_names = {wav.stem for wav in wav_files}
-    if not (stem_names >= EXPECTED_4_STEMS or stem_names >= EXPECTED_6_STEMS):
-        logger.warning(
-            "Stem cache entry %s has unrecognized stems %s, treating as miss",
+        # Copy stems to output directory
+        stems_dir.mkdir(parents=True, exist_ok=True)
+        for wav in wav_files:
+            dest = stems_dir / wav.name
+            shutil.copy2(wav, dest)
+    except FileNotFoundError:
+        logger.debug(
+            "Stem cache entry %s disappeared during read (concurrent write/eviction), treating as miss",
             cache_key[:12],
-            stem_names,
         )
         return False
-
-    # Copy stems to output directory
-    stems_dir.mkdir(parents=True, exist_ok=True)
-    for wav in wav_files:
-        dest = stems_dir / wav.name
-        shutil.copy2(wav, dest)
 
     logger.info(
         "Stem cache hit for %s (%d stems copied to %s)",
