@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from musicmixer.api import health, remix
@@ -129,7 +130,23 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(remix.router, prefix="/api")
 
-# Serve static HTML page -- must come LAST (after all API routes)
+
+@app.get("/about")
+async def about_page() -> FileResponse:
+    return FileResponse("static/about.html")
+
+
+@app.get("/terms")
+async def terms_page() -> FileResponse:
+    return FileResponse("static/terms.html")
+
+
+@app.get("/privacy")
+async def privacy_page() -> FileResponse:
+    return FileResponse("static/privacy.html")
+
+
+# Serve static files -- must come LAST (after all API routes)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 
