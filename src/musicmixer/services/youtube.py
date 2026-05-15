@@ -266,11 +266,12 @@ async def download_youtube_audio(
                 "preferredcodec": "wav",
             }
         ],
-        "username": "oauth2",
-        "password": "",
     }
     if cookies_path.exists():
         ydl_opts["cookiefile"] = str(cookies_path)
+    proxy = settings.youtube_proxy
+    if proxy:
+        ydl_opts["proxy"] = proxy
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
