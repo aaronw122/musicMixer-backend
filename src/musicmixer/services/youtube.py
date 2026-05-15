@@ -266,6 +266,8 @@ async def download_youtube_audio(
                 "preferredcodec": "wav",
             }
         ],
+        "username": "oauth2",
+        "password": "",
     }
     if cookies_path.exists():
         ydl_opts["cookiefile"] = str(cookies_path)
