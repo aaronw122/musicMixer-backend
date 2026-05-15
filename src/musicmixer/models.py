@@ -162,6 +162,8 @@ class AudioMetadata:
     beat_frames: np.ndarray        # Beat frame positions from librosa.beat.beat_track
     duration_seconds: float
     total_beats: int               # Total beats (rounded to nearest bar boundary)
+    beat_times: Optional[np.ndarray] = None       # Beat timestamps in seconds
+    downbeat_times: Optional[np.ndarray] = None   # Downbeat timestamps in seconds
     # Key detection (Day 3)
     key: Optional[str] = None
     scale: Optional[str] = None

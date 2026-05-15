@@ -6,15 +6,18 @@ Step 2 of Day 2: analysis.py
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 import soundfile as sf
 
 from musicmixer.models import AudioMetadata
+from musicmixer.services import analysis as analysis_module
 from musicmixer.services.analysis import (
     analyze_audio,
     reconcile_bpm,
+    _detect_beats_neural,
     _transform_beat_frames,
     _transform_total_beats,
 )
@@ -188,3 +191,75 @@ class TestReconcileBpm:
         frames = np.array([0, 100, 200], dtype=np.intp)
         np.testing.assert_array_equal(_transform_beat_frames(frames, "3/2"), frames)
         np.testing.assert_array_equal(_transform_beat_frames(frames, "2/3"), frames)
+
+
+# ---------------------------------------------------------------------------
+# beat_this neural beat detection tests
+# ---------------------------------------------------------------------------
+
+class TestNeuralBeatDetection:
+    def test_detect_beats_neural_returns_none_when_unavailable(self, tmp_path: Path) -> None:
+        """_detect_beats_neural returns None when beat_this raises."""
+        wav = _make_click_track(tmp_path / "click.wav", bpm=120.0, duration=10.0)
+        with patch.object(analysis_module, "_get_file2beats", side_effect=ImportError):
+            result = _detect_beats_neural(wav)
+        assert result is None
+
+    def test_detect_beats_neural_returns_tuple_on_success(self, tmp_path: Path) -> None:
+        """_detect_beats_neural returns (beat_frames, beat_times, downbeat_times, bpm, confidence)."""
+        wav = _make_click_track(tmp_path / "click.wav", bpm=120.0, duration=10.0)
+        beat_times = np.arange(0, 10.0, 0.5)
+        downbeat_times = np.arange(0, 10.0, 2.0)
+
+        mock_f2b = lambda path: (beat_times, downbeat_times)
+        with patch.object(analysis_module, "_get_file2beats", return_value=mock_f2b):
+            result = _detect_beats_neural(wav)
+
+        assert result is not None
+        frames, bt, dbt, bpm, conf = result
+        assert isinstance(frames, np.ndarray)
+        assert len(frames) == len(beat_times)
+        np.testing.assert_array_equal(bt, beat_times)
+        np.testing.assert_array_equal(dbt, downbeat_times)
+        assert bpm == pytest.approx(120.0, abs=1.0)
+        assert 0.0 <= conf <= 1.0
+
+    def test_detect_beats_neural_returns_none_on_too_few_beats(self, tmp_path: Path) -> None:
+        """_detect_beats_neural returns None when fewer than 2 beats are found."""
+        wav = _make_click_track(tmp_path / "click.wav", bpm=120.0, duration=10.0)
+        mock_f2b = lambda path: (np.array([1.0]), np.array([1.0]))
+        with patch.object(analysis_module, "_get_file2beats", return_value=mock_f2b):
+            result = _detect_beats_neural(wav)
+        assert result is None
+
+    def test_analyze_audio_librosa_fallback(self, tmp_path: Path) -> None:
+        """analyze_audio falls back to librosa when _HAS_BEAT_THIS is False."""
+        wav = _make_click_track(tmp_path / "click.wav", bpm=120.0, duration=10.0)
+        with patch.object(analysis_module, "_HAS_BEAT_THIS", False):
+            meta = analyze_audio(wav)
+
+        assert isinstance(meta, AudioMetadata)
+        assert meta.bpm > 0
+        assert meta.beat_times is None
+        assert meta.downbeat_times is None
+
+    def test_analyze_audio_populates_beat_times_with_neural(self, tmp_path: Path) -> None:
+        """analyze_audio populates beat_times and downbeat_times when beat_this succeeds."""
+        wav = _make_click_track(tmp_path / "click.wav", bpm=120.0, duration=10.0)
+        beat_times = np.arange(0, 10.0, 0.5)
+        downbeat_times = np.arange(0, 10.0, 2.0)
+        hop_length = 512
+        sr = 22050
+        expected_frames = np.round(beat_times * sr / hop_length).astype(int)
+
+        mock_f2b = lambda path: (beat_times, downbeat_times)
+        with patch.object(analysis_module, "_HAS_BEAT_THIS", True), \
+             patch.object(analysis_module, "_get_file2beats", return_value=mock_f2b):
+            meta = analyze_audio(wav)
+
+        assert meta.beat_times is not None
+        assert meta.downbeat_times is not None
+        np.testing.assert_array_equal(meta.beat_times, beat_times)
+        np.testing.assert_array_equal(meta.downbeat_times, downbeat_times)
+        np.testing.assert_array_equal(meta.beat_frames, expected_frames)
+        assert meta.bpm == pytest.approx(120.0, abs=1.0)

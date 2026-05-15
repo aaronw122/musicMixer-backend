@@ -42,6 +42,22 @@ try:
 except ImportError:
     _HAS_ESSENTIA = False
 
+try:
+    from beat_this.inference import File2Beats
+    _HAS_BEAT_THIS = True
+except ImportError:
+    _HAS_BEAT_THIS = False
+
+_file2beats_instance = None
+
+
+def _get_file2beats():
+    global _file2beats_instance
+    if _file2beats_instance is None:
+        from beat_this.inference import File2Beats
+        _file2beats_instance = File2Beats(device="cpu", dbn=False)
+    return _file2beats_instance
+
 # ---------------------------------------------------------------------------
 # Constants (spec section 3)
 # ---------------------------------------------------------------------------
@@ -63,6 +79,30 @@ KEY_DETECTION_SR: int = 44100             # sample rate for essentia key detecti
 STEM_NAMES: list[str] = ["drums", "bass", "guitar", "piano", "vocals", "other"]
 
 
+def _detect_beats_neural(audio_path: Path):
+    try:
+        file2beats = _get_file2beats()
+        beat_times, downbeat_times = file2beats(str(audio_path))
+
+        if len(beat_times) < 2:
+            return None
+
+        all_intervals = np.diff(beat_times)
+        median_interval = float(np.median(all_intervals))
+        bpm = 60.0 / median_interval
+
+        iqr = float(np.percentile(all_intervals, 75) - np.percentile(all_intervals, 25))
+        bpm_confidence = max(0.0, min(1.0, 1.0 - (iqr / median_interval)))
+
+        hop_length = 512
+        beat_frames = np.round(beat_times * ANALYSIS_SR / hop_length).astype(int)
+
+        return beat_frames, beat_times, downbeat_times, bpm, bpm_confidence
+    except Exception:
+        logger.warning("beat_this detection failed for %s, falling back to librosa", audio_path.name, exc_info=True)
+        return None
+
+
 def analyze_audio(audio_path: Path) -> AudioMetadata:
     """Analyze audio file for BPM, beat positions, duration, and mean RMS.
 
@@ -71,27 +111,28 @@ def analyze_audio(audio_path: Path) -> AudioMetadata:
     mean_rms is computed from the original mix audio (NOT summed stems).
     """
     y, sr = librosa.load(str(audio_path), sr=22050)
-
-    # BPM detection
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
-    # librosa may return tempo as array in newer versions
-    bpm = float(np.atleast_1d(tempo)[0])
-
     duration = float(librosa.get_duration(y=y, sr=sr))
-    total_beats = round(bpm * duration / 60 / 4) * 4  # Round to nearest bar
-
-    # BPM confidence via tempogram peak sharpness
-    tempogram = librosa.feature.tempogram(y=y, sr=sr)
-    # Peak sharpness: ratio of max to mean in the tempo range
-    tempo_profile = np.mean(tempogram, axis=1)
-    if np.max(tempo_profile) > 0:
-        bpm_confidence = float(np.max(tempo_profile) / np.mean(tempo_profile))
-        bpm_confidence = min(bpm_confidence / 10.0, 1.0)  # Normalize to 0-1 range
-    else:
-        bpm_confidence = 0.0
-
-    # Mean RMS from original mix audio (spec section 8)
     mean_rms = float(np.sqrt(np.mean(y ** 2)))
+
+    beat_times_arr = None
+    downbeat_times_arr = None
+
+    neural_result = _detect_beats_neural(audio_path) if _HAS_BEAT_THIS else None
+
+    if neural_result is not None:
+        beat_frames, beat_times_arr, downbeat_times_arr, bpm, bpm_confidence = neural_result
+    else:
+        tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
+        bpm = float(np.atleast_1d(tempo)[0])
+        tempogram = librosa.feature.tempogram(y=y, sr=sr)
+        tempo_profile = np.mean(tempogram, axis=1)
+        if np.max(tempo_profile) > 0:
+            bpm_confidence = float(np.max(tempo_profile) / np.mean(tempo_profile))
+            bpm_confidence = min(bpm_confidence / 10.0, 1.0)
+        else:
+            bpm_confidence = 0.0
+
+    total_beats = round(bpm * duration / 60 / 4) * 4
 
     logger.info(
         "Audio analysis complete: path=%s bpm=%.1f confidence=%.2f duration=%.1fs beats=%d rms=%.4f",
@@ -108,8 +149,10 @@ def analyze_audio(audio_path: Path) -> AudioMetadata:
         bpm_confidence=bpm_confidence,
         beat_frames=beat_frames,
         duration_seconds=duration,
-        total_beats=max(total_beats, 4),  # At least 1 bar
+        total_beats=max(total_beats, 4),
         mean_rms=mean_rms,
+        beat_times=beat_times_arr,
+        downbeat_times=downbeat_times_arr,
     )
 
 
@@ -143,28 +186,33 @@ def analyze_audio_full(audio_path: Path) -> AudioMetadata:
     # --- 3. Modulation detection (uses 44100 Hz data) ---
     has_modulation = detect_modulation(audio_path, audio_44k=y_44k)
 
-    # --- 4. Downsample to 22050 Hz in-memory for BPM detection ---
+    # --- 4. Downsample to 22050 Hz in-memory for RMS ---
     y_22k = librosa.resample(y_44k, orig_sr=KEY_DETECTION_SR, target_sr=ANALYSIS_SR)
-
-    # --- 5. BPM / beat detection (identical logic to analyze_audio) ---
     sr = ANALYSIS_SR
-    tempo, beat_frames = librosa.beat.beat_track(y=y_22k, sr=sr, units="frames")
-    bpm = float(np.atleast_1d(tempo)[0])
 
     duration = float(librosa.get_duration(y=y_22k, sr=sr))
-    total_beats = round(bpm * duration / 60 / 4) * 4  # Round to nearest bar
-
-    # BPM confidence via tempogram peak sharpness
-    tempogram = librosa.feature.tempogram(y=y_22k, sr=sr)
-    tempo_profile = np.mean(tempogram, axis=1)
-    if np.max(tempo_profile) > 0:
-        bpm_confidence = float(np.max(tempo_profile) / np.mean(tempo_profile))
-        bpm_confidence = min(bpm_confidence / 10.0, 1.0)
-    else:
-        bpm_confidence = 0.0
-
-    # Mean RMS from original mix audio (spec section 8)
     mean_rms = float(np.sqrt(np.mean(y_22k ** 2)))
+
+    beat_times_arr = None
+    downbeat_times_arr = None
+
+    # --- 5. BPM / beat detection ---
+    neural_result = _detect_beats_neural(audio_path) if _HAS_BEAT_THIS else None
+
+    if neural_result is not None:
+        beat_frames, beat_times_arr, downbeat_times_arr, bpm, bpm_confidence = neural_result
+    else:
+        tempo, beat_frames = librosa.beat.beat_track(y=y_22k, sr=sr, units="frames")
+        bpm = float(np.atleast_1d(tempo)[0])
+        tempogram = librosa.feature.tempogram(y=y_22k, sr=sr)
+        tempo_profile = np.mean(tempogram, axis=1)
+        if np.max(tempo_profile) > 0:
+            bpm_confidence = float(np.max(tempo_profile) / np.mean(tempo_profile))
+            bpm_confidence = min(bpm_confidence / 10.0, 1.0)
+        else:
+            bpm_confidence = 0.0
+
+    total_beats = round(bpm * duration / 60 / 4) * 4
 
     logger.info(
         "Full audio analysis complete: path=%s bpm=%.1f confidence=%.2f "
@@ -188,6 +236,8 @@ def analyze_audio_full(audio_path: Path) -> AudioMetadata:
         duration_seconds=duration,
         total_beats=max(total_beats, 4),
         mean_rms=mean_rms,
+        beat_times=beat_times_arr,
+        downbeat_times=downbeat_times_arr,
         key=key,
         scale=scale,
         key_confidence=key_confidence,
