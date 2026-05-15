@@ -157,6 +157,48 @@ def run_pipeline(
 
     logger.info("Session %s: pipeline started (prompt=%r)", session_id, prompt[:80])
 
+    # === REMIX CACHE CHECK ===
+    # Before any expensive processing, check if an identical request has
+    # been cached. Cache key is order-aware: (song_a, song_b, prompt).
+    remix_cache_key: str | None = None
+    if settings.remix_cache_enabled:
+        try:
+            from musicmixer.services.remix_cache import (
+                compute_remix_cache_key,
+                get_cached_remix,
+            )
+            import shutil as _shutil
+
+            remix_cache_key = compute_remix_cache_key(song_a_path, song_b_path, prompt)
+            cached_path = get_cached_remix(remix_cache_key, settings.remix_cache_dir)
+
+            if cached_path is not None:
+                logger.info(
+                    "Session %s: Remix cache hit (key=%s), skipping pipeline",
+                    session_id, remix_cache_key[:12],
+                )
+                _shutil.copy2(cached_path, output_path)
+
+                session.remix_path = str(output_path)
+                session.status = "complete"
+
+                emit_progress(event_queue, {
+                    "step": "complete",
+                    "detail": "Remix loaded from cache",
+                    "progress": 1.0,
+                    "explanation": "Loaded from cache -- identical request was processed before.",
+                    "warnings": [],
+                    "usedFallback": False,
+                }, session=session)
+
+                logger.info("Session %s: Pipeline complete (cached). Output: %s", session_id, output_path)
+                return
+        except Exception:
+            logger.warning(
+                "Session %s: Remix cache check failed, proceeding with full pipeline",
+                session_id, exc_info=True,
+            )
+
     # === STEPS 1+2: Separation + analysis (overlapped) ===
     # Separation and audio analysis run concurrently.  Analysis operates on the
     # original uploaded files (not stems), so it can start immediately alongside
@@ -1269,6 +1311,18 @@ def run_pipeline(
     }, session=session)
 
     export_mp3(mixed, sr, output_path, use_s16_dither=False)
+
+    # === REMIX CACHE WRITE ===
+    if settings.remix_cache_enabled and remix_cache_key is not None:
+        try:
+            from musicmixer.services.remix_cache import cache_remix
+
+            cache_remix(remix_cache_key, output_path, settings.remix_cache_dir)
+        except Exception:
+            logger.warning(
+                "Session %s: Remix cache write failed (non-fatal)",
+                session_id, exc_info=True,
+            )
 
     # === DONE ===
     session.remix_path = str(output_path)

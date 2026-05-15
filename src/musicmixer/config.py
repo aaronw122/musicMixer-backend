@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     stem_cache_max_gb: float = 10.0
     stem_cache_dir: Path = Path("data/stem_cache")
 
+    # Remix output cache
+    remix_cache_enabled: bool = True
+    remix_cache_max_gb: float = 5.0
+    remix_cache_dir: Path = Path("data/remix_cache")
+
     # Output
     output_format: str = "mp3"
     output_bitrate: str = "320k"
