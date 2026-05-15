@@ -45,17 +45,22 @@ except ImportError:
 try:
     from beat_this.inference import File2Beats
     _HAS_BEAT_THIS = True
-except ImportError:
+except (ImportError, OSError):
     _HAS_BEAT_THIS = False
 
 _file2beats_instance = None
 
 
 def _get_file2beats():
-    global _file2beats_instance
+    global _file2beats_instance, _HAS_BEAT_THIS
     if _file2beats_instance is None:
-        from beat_this.inference import File2Beats
-        _file2beats_instance = File2Beats(device="cpu", dbn=False)
+        try:
+            from beat_this.inference import File2Beats
+            _file2beats_instance = File2Beats(device="cpu", dbn=False)
+        except (ImportError, OSError) as exc:
+            logger.warning("beat_this unavailable: %s", exc)
+            _HAS_BEAT_THIS = False
+            return None
     return _file2beats_instance
 
 # ---------------------------------------------------------------------------
