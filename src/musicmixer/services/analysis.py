@@ -2,7 +2,7 @@
 
 Step 2 of Day 2 pipeline + Step 3.5 of Day 3 pipeline. Provides:
 - analyze_audio(): BPM, beat positions, duration, confidence for a single track
-- reconcile_bpm(): Cross-song BPM reconciliation using expanded interpretation matrix
+- reconcile_bpm(): Cross-song BPM passthrough (beat_this is accurate enough)
 - analyze_stems(): Full song structure analysis (energy, vocals, sections)
 - detect_key(): Key detection with essentia primary / librosa fallback
 - detect_sections(): 3-stage section boundary detection, labeling, and merging
@@ -248,114 +248,24 @@ def analyze_audio_full(audio_path: Path) -> AudioMetadata:
 def reconcile_bpm(
     meta_a: AudioMetadata, meta_b: AudioMetadata
 ) -> tuple[AudioMetadata, AudioMetadata]:
-    """Cross-song BPM reconciliation using expanded interpretation matrix.
+    """Cross-song BPM passthrough.
 
-    For each song, generates plausible BPM interpretations (original, halved,
-    doubled, 3/2, 2/3), filters to 70-180 BPM range, and selects the pair
-    with the smallest combined score (percentage gap + transformation penalties).
+    With beat_this neural beat detection, BPM values are accurate enough
+    that the old interpretation matrix (halved/doubled/3:2/2:3 with penalty
+    scoring) is no longer needed. This function now simply logs the BPMs
+    and returns copies of the metadata unchanged.
 
-    Returns COPIES of metadata with reconciled BPMs -- originals are not mutated.
+    Returns COPIES of metadata -- originals are not mutated.
     """
-
-    def interpretations(bpm: float) -> dict[str, tuple[float, float]]:
-        candidates = {
-            "original": bpm,
-            "halved": bpm / 2,
-            "doubled": bpm * 2,
-            "3/2": bpm * 3 / 2,
-            "2/3": bpm * 2 / 3,
-        }
-        penalties = {
-            "original": 0.0,
-            "halved": 0.05,
-            "doubled": 0.05,
-            "3/2": 0.15,
-            "2/3": 0.15,
-        }
-        return {
-            k: (v, penalties[k]) for k, v in candidates.items() if 70 <= v <= 180
-        }
-
-    interps_a = interpretations(meta_a.bpm)
-    interps_b = interpretations(meta_b.bpm)
-
-    best_score = float("inf")
-    best_pair = (meta_a.bpm, meta_b.bpm)
-    best_labels = ("original", "original")
-
-    for label_a, (bpm_a, pen_a) in interps_a.items():
-        for label_b, (bpm_b, pen_b) in interps_b.items():
-            gap = abs(bpm_a - bpm_b) / max(bpm_a, bpm_b)
-            score = gap + pen_a + pen_b
-            if score < best_score:
-                best_score = score
-                best_pair = (bpm_a, bpm_b)
-                best_labels = (label_a, label_b)
-
     logger.info(
-        "BPM reconciliation: A=%.1f->%.1f (%s), B=%.1f->%.1f (%s), score=%.4f",
+        "BPM reconciliation (passthrough): A=%.1f, B=%.1f",
         meta_a.bpm,
-        best_pair[0],
-        best_labels[0],
         meta_b.bpm,
-        best_pair[1],
-        best_labels[1],
-        best_score,
     )
 
-    new_a = replace(
-        meta_a,
-        bpm=best_pair[0],
-        beat_frames=_transform_beat_frames(meta_a.beat_frames, best_labels[0]),
-        total_beats=_transform_total_beats(meta_a.total_beats, best_labels[0]),
-    )
-    new_b = replace(
-        meta_b,
-        bpm=best_pair[1],
-        beat_frames=_transform_beat_frames(meta_b.beat_frames, best_labels[1]),
-        total_beats=_transform_total_beats(meta_b.total_beats, best_labels[1]),
-    )
+    new_a = replace(meta_a)
+    new_b = replace(meta_b)
     return new_a, new_b
-
-
-def _transform_beat_frames(
-    beat_frames: np.ndarray, interpretation: str
-) -> np.ndarray:
-    """Transform beat_frames to match a reconciled BPM interpretation.
-
-    When BPM is halved, the beat grid has twice as many entries as the
-    reconciled BPM implies -- take every other beat.
-    When BPM is doubled, interpolate midpoints between consecutive beats.
-    For 3/2 and 2/3 multipliers, leave as-is (re-detected post-stretch).
-    """
-    if interpretation == "original" or len(beat_frames) < 2:
-        return beat_frames
-
-    if interpretation == "halved":
-        # BPM halved -> half as many beats -> take every other frame
-        return beat_frames[::2]
-
-    if interpretation == "doubled":
-        # BPM doubled -> twice as many beats -> interpolate midpoints
-        midpoints = (beat_frames[:-1] + beat_frames[1:]) // 2
-        # Interleave: original[0], mid[0], original[1], mid[1], ...
-        interleaved = np.empty(len(beat_frames) + len(midpoints), dtype=beat_frames.dtype)
-        interleaved[0::2] = beat_frames
-        interleaved[1::2] = midpoints
-        return interleaved
-
-    # "3/2" or "2/3": leave beat_frames as-is (re-detected post-stretch)
-    return beat_frames
-
-
-def _transform_total_beats(total_beats: int, interpretation: str) -> int:
-    """Adjust total_beats count to match the reconciled BPM interpretation."""
-    if interpretation == "halved":
-        return max(total_beats // 2, 4)  # At least 1 bar
-    if interpretation == "doubled":
-        return total_beats * 2
-    # "original", "3/2", "2/3": unchanged
-    return total_beats
 
 
 # ===================================================================
