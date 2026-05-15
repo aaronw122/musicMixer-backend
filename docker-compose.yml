@@ -18,6 +18,7 @@ services:
     volumes:
       - musicmixer-data:/app/data
       - ${MODAL_TOML_PATH:-/root/.modal.toml}:/root/.modal.toml:ro
+      - ${YT_COOKIES_PATH:-/root/musicmixer/yt-cookies.txt}:/app/yt-cookies.txt:ro
 
 volumes:
   musicmixer-data:

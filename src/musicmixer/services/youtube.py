@@ -251,6 +251,7 @@ async def download_youtube_audio(
 
     # yt-dlp options
     outtmpl = str(output_dir / f"{file_id}.%(ext)s")
+    cookies_path = Path("/app/yt-cookies.txt")
     ydl_opts = {
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
@@ -266,6 +267,8 @@ async def download_youtube_audio(
             }
         ],
     }
+    if cookies_path.exists():
+        ydl_opts["cookiefile"] = str(cookies_path)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
