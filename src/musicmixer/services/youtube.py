@@ -198,17 +198,17 @@ async def _download_via_proxy(
     duration = float(resp.headers.get("X-Duration", "0"))
 
     file_id = uuid.uuid4().hex
-    wav_path = output_dir / f"{file_id}.wav"
+    audio_path = output_dir / f"{file_id}.mp3"
     output_dir.mkdir(parents=True, exist_ok=True)
-    wav_path.write_bytes(resp.content)
+    audio_path.write_bytes(resp.content)
 
     if progress_callback:
         progress_callback(1.0, "Download complete")
 
-    logger.info("Downloaded via proxy: title=%s, duration=%.1fs, path=%s", title, duration, wav_path)
+    logger.info("Downloaded via proxy: title=%s, duration=%.1fs, size=%.1fMB, path=%s", title, duration, len(resp.content) / 1e6, audio_path)
 
     return YouTubeAudioResult(
-        wav_path=wav_path,
+        wav_path=audio_path,
         title=title,
         duration_seconds=duration,
         source_codec="unknown",
