@@ -147,6 +147,12 @@ async def privacy_page() -> FileResponse:
     return FileResponse("static/privacy.html")
 
 
+@app.get("/remix/{session_id}")
+async def remix_spa_fallback(session_id: str) -> FileResponse:
+    """SPA catch-all: serve index.html for /remix/* so React Router handles routing."""
+    return FileResponse("static/index.html")
+
+
 # Serve static files -- must come LAST (after all API routes)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
