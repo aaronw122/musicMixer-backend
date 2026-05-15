@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     # YouTube
     youtube_enabled: bool = True
     youtube_max_duration_seconds: int = 900  # 15 minutes
+    youtube_proxy: str = ""  # SOCKS5 proxy for YouTube downloads (bypasses datacenter IP blocks)
 
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
