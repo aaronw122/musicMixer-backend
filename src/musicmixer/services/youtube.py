@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+import httpx
 import yt_dlp
 
 from musicmixer.config import settings
@@ -170,6 +171,51 @@ def _map_ytdlp_error(error: Exception) -> str:
     return "Failed to download from YouTube. Check the URL and try again"
 
 
+async def _download_via_proxy(
+    url: str,
+    output_dir: Path,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> YouTubeAudioResult:
+    """Download audio via the yt-proxy service (residential IP)."""
+    proxy_url = settings.youtube_proxy_service_url
+    api_key = settings.youtube_proxy_api_key
+
+    if progress_callback:
+        progress_callback(0.1, "Sending to download service...")
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        resp = await client.post(
+            f"{proxy_url}/download",
+            json={"url": url, "max_duration_seconds": settings.youtube_max_duration_seconds},
+            headers={"X-API-Key": api_key} if api_key else {},
+        )
+
+    if resp.status_code != 200:
+        detail = resp.json().get("detail", "Download failed") if resp.headers.get("content-type", "").startswith("application/json") else "Download failed"
+        raise YouTubeDownloadError(detail)
+
+    title = resp.headers.get("X-Title", "Unknown")
+    duration = float(resp.headers.get("X-Duration", "0"))
+
+    file_id = uuid.uuid4().hex
+    wav_path = output_dir / f"{file_id}.wav"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    wav_path.write_bytes(resp.content)
+
+    if progress_callback:
+        progress_callback(1.0, "Download complete")
+
+    logger.info("Downloaded via proxy: title=%s, duration=%.1fs, path=%s", title, duration, wav_path)
+
+    return YouTubeAudioResult(
+        wav_path=wav_path,
+        title=title,
+        duration_seconds=duration,
+        source_codec="unknown",
+        source_bitrate=0,
+    )
+
+
 async def download_youtube_audio(
     url: str,
     output_dir: Path,
@@ -192,6 +238,10 @@ async def download_youtube_audio(
     """
     # --- SSRF validation (must happen before yt-dlp touches the URL) ---
     validate_youtube_url(url)
+
+    # Use remote proxy service if configured (bypasses datacenter IP blocks)
+    if settings.youtube_proxy_service_url:
+        return await _download_via_proxy(url, output_dir, progress_callback)
 
     max_duration = settings.youtube_max_duration_seconds
 
