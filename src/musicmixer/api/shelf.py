@@ -177,19 +177,14 @@ def _starter_records() -> list[dict[str, Any]]:
             "https://i.ytimg.com/vi/QNAVrQ96mpA/hqdefault.jpg",
         ),
         (
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            "Rick Astley - Never Gonna Give You Up",
-            "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
-        ),
-        (
-            "https://www.youtube.com/watch?v=9bZkp7q19f0",
-            "PSY - GANGNAM STYLE",
-            "https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg",
-        ),
-        (
             "https://www.youtube.com/watch?v=OPf0YbXqDm0",
             "Mark Ronson - Uptown Funk ft. Bruno Mars",
             "https://i.ytimg.com/vi/OPf0YbXqDm0/hqdefault.jpg",
+        ),
+        (
+            "https://www.youtube.com/watch?v=QDYfEBY9NM4",
+            "The Beatles - Let It Be",
+            "https://i.ytimg.com/vi/QDYfEBY9NM4/hqdefault.jpg",
         ),
     ]
 
@@ -219,11 +214,18 @@ def _read_shelf_unlocked(path: Path) -> list[dict[str, Any]]:
     if not isinstance(records, list):
         raise HTTPException(500, "Shelf data is malformed")
 
-    # Merge in any missing seed records
+    # Sync with seed list: add missing seeds, remove stale curated records
+    seed_urls = {s["youtube_url"] for s in _starter_records()}
     existing_urls = {r["youtube_url"] for r in records}
     missing = [s for s in _starter_records() if s["youtube_url"] not in existing_urls]
+    stale = [r for r in records if r.get("is_curated") and r["youtube_url"] not in seed_urls]
+    changed = bool(missing) or bool(stale)
+    if stale:
+        stale_urls = {r["youtube_url"] for r in stale}
+        records = [r for r in records if r["youtube_url"] not in stale_urls]
     if missing:
         records.extend(missing)
+    if changed:
         _write_shelf_unlocked(path, records)
 
     return records
