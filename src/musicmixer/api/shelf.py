@@ -162,11 +162,6 @@ def _starter_records() -> list[dict[str, Any]]:
             "https://i.ytimg.com/vi/DUZ7-C0wPF4/hqdefault.jpg",
         ),
         (
-            "https://www.youtube.com/watch?v=CdXesX6mYUE",
-            "Pitbull ft. Chris Brown - International Love",
-            "https://i.ytimg.com/vi/CdXesX6mYUE/hqdefault.jpg",
-        ),
-        (
             "https://www.youtube.com/watch?v=k9Yz0MC4bkQ",
             "Grateful Dead - Althea",
             "https://i.ytimg.com/vi/k9Yz0MC4bkQ/hqdefault.jpg",
