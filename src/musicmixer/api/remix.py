@@ -161,6 +161,25 @@ _YOUTUBE_ALLOWED_HOSTS = {
 }
 
 
+def _thumbnail_from_youtube_url(url: str) -> str | None:
+    """Derive a YouTube thumbnail URL from a video URL. Returns None on failure."""
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname or ""
+    path_parts = [p for p in parsed.path.split("/") if p]
+
+    video_id = None
+    if hostname == "youtu.be" and path_parts:
+        video_id = path_parts[0]
+    else:
+        qs = urllib.parse.parse_qs(parsed.query)
+        if qs.get("v"):
+            video_id = qs["v"][0]
+        elif path_parts and path_parts[0] in {"shorts", "embed"} and len(path_parts) > 1:
+            video_id = path_parts[1]
+
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+
+
 def _validate_youtube_url(url: str) -> str:
     """Validate a YouTube URL for SSRF safety. Returns the validated URL.
 
@@ -206,6 +225,32 @@ def _validate_youtube_url(url: str) -> str:
 # YouTube remix request model
 # ---------------------------------------------------------------------------
 
+def _resolve_shelf_song_id(url: str) -> str | None:
+    """Resolve a YouTube URL to a shelf song ID if it matches a shelf record.
+
+    Uses _extract_video_id for matching — does NOT raise on invalid URLs.
+    Returns the shelf record's ID if matched, else None.
+    """
+    from musicmixer.api.shelf import _extract_video_id, _shelf_path, _read_shelf_unlocked, _shelf_lock
+
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return None
+
+    try:
+        with _shelf_lock:
+            records = _read_shelf_unlocked(_shelf_path())
+    except Exception:
+        return None
+
+    for record in records:
+        record_video_id = _extract_video_id(record["youtube_url"])
+        if record_video_id == video_id:
+            return record["id"]
+
+    return None
+
+
 class YouTubeRemixRequest(BaseModel):
     url_a: str  # YouTube URL for song A
     url_b: str  # YouTube URL for song B
@@ -224,6 +269,8 @@ def _youtube_pipeline_wrapper(
     session: SessionState,
     processing_lock,
     app_state,
+    shelf_song_id_a: str | None = None,
+    shelf_song_id_b: str | None = None,
 ) -> None:
     """Downloads YouTube audio in parallel, then runs the pipeline.
 
@@ -350,6 +397,8 @@ def _youtube_pipeline_wrapper(
             song_b_original_filename=result_b.title,
             source_quality_a=source_quality_a,
             source_quality_b=source_quality_b,
+            shelf_song_id_a=shelf_song_id_a,
+            shelf_song_id_b=shelf_song_id_b,
         )
         _update_avg_remix_duration(time.monotonic() - pipeline_start)
 
@@ -594,6 +643,14 @@ def create_youtube_remix(
     _validate_youtube_url(body.url_a)
     _validate_youtube_url(body.url_b)
 
+    # Resolve shelf song IDs BEFORE starting the pipeline (server-side reverse lookup)
+    shelf_song_id_a = _resolve_shelf_song_id(body.url_a)
+    shelf_song_id_b = _resolve_shelf_song_id(body.url_b)
+    if shelf_song_id_a:
+        logger.info("Resolved shelf song ID for URL A: %s", shelf_song_id_a[:12])
+    if shelf_song_id_b:
+        logger.info("Resolved shelf song ID for URL B: %s", shelf_song_id_b[:12])
+
     # Auto-save both songs to the shelf (idempotent — skips duplicates)
     try:
         ensure_on_shelf(body.url_a)
@@ -607,8 +664,10 @@ def create_youtube_remix(
     # Generate session ID
     session_id = str(uuid.uuid4())
 
-    # Create session state
+    # Create session state with thumbnail URLs derived from YouTube video IDs
     session = SessionState()
+    session.thumbnail_url_a = _thumbnail_from_youtube_url(body.url_a)
+    session.thumbnail_url_b = _thumbnail_from_youtube_url(body.url_b)
     with request.app.state.sessions_lock:
         request.app.state.sessions[session_id] = session
 
@@ -625,6 +684,8 @@ def create_youtube_remix(
             session,
             processing_lock,
             app_state,
+            shelf_song_id_a=shelf_song_id_a,
+            shelf_song_id_b=shelf_song_id_b,
         )
 
     _enqueue_or_start(app_state, session_id, session, run_fn)
@@ -1060,6 +1121,8 @@ async def get_public_remix(session_id: str, request: Request):
                 "warnings": warnings,
                 "usedFallback": used_fallback,
                 "expires_at": expires_at,
+                "thumbnail_url_a": getattr(session, "thumbnail_url_a", None),
+                "thumbnail_url_b": getattr(session, "thumbnail_url_b", None),
             }
 
     # 4. Processing or queued -> 202

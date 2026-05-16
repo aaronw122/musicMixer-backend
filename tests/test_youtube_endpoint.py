@@ -218,7 +218,7 @@ class TestYouTubeRemixEndpoint:
         """Successful request should return a valid session_id immediately."""
         with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
             # Simulate the wrapper releasing the lock
-            def fake_wrapper(session_id, url_a, url_b, prompt, session, lock, app_state=None):
+            def fake_wrapper(session_id, url_a, url_b, prompt, session, lock, app_state=None, **kwargs):
                 lock.release()
                 if app_state:
                     from musicmixer.api.remix import _process_next_queued
@@ -575,7 +575,7 @@ class TestYouTubeProgressFlow:
         """After wrapper runs, last_event should reflect download progress."""
         completed = threading.Event()
 
-        def fake_wrapper(session_id, url_a, url_b, prompt, session, lock, app_state=None):
+        def fake_wrapper(session_id, url_a, url_b, prompt, session, lock, app_state=None, **kwargs):
             from musicmixer.services.pipeline import emit_progress
             emit_progress(session.events, {
                 "step": "downloading",

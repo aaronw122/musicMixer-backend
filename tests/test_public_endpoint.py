@@ -114,7 +114,8 @@ class TestPublicEndpointComplete:
 
         # All required keys present
         required_keys = {"session_id", "status", "audio_url", "explanation",
-                         "warnings", "usedFallback", "expires_at"}
+                         "warnings", "usedFallback", "expires_at",
+                         "thumbnail_url_a", "thumbnail_url_b"}
         assert set(data.keys()) == required_keys
 
     def test_expires_at_is_valid_iso8601(self, client, tmp_path):

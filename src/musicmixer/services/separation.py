@@ -13,20 +13,38 @@ def separate_stems(
     audio_path: Path,
     output_dir: Path,
     progress_callback: Callable | None = None,
+    shelf_song_id: str | None = None,
 ) -> dict[str, Path]:
     """Separate audio into stems. Returns mapping of stem name to WAV file path.
 
-    Checks the stem cache first (keyed by SHA-256 of input file). On cache
-    hit, copies cached stems to *output_dir* and returns immediately. On
-    cache miss, dispatches to Modal or local backend, then caches the result.
+    Cache check order:
+      1. Shelf cache (by song ID, always enabled for shelf songs)
+      2. Content-hash cache (by SHA-256, controlled by stem_cache_enabled)
+      3. Run separation (Modal or local)
+
+    After separation, caches to shelf dir if shelf_song_id provided,
+    and to content-hash dir if stem_cache_enabled.
     """
     from musicmixer.services.stem_cache import (
+        cache_shelf_stems,
         cache_stems,
         get_cache_key,
         get_cached_stems,
+        get_shelf_cached_stems,
     )
 
-    # Check stem cache
+    # 1. Check shelf cache first (instant lookup by ID, no hashing)
+    if shelf_song_id is not None:
+        if get_shelf_cached_stems(shelf_song_id, output_dir):
+            if progress_callback:
+                progress_callback("Stems loaded from shelf cache")
+            stem_paths = {}
+            for wav in output_dir.glob("*.wav"):
+                stem_paths[wav.stem] = wav
+            logger.info("Using shelf-cached stems for %s (song_id=%s)", audio_path.name, shelf_song_id[:12])
+            return stem_paths
+
+    # 2. Check content-hash cache
     if settings.stem_cache_enabled:
         cache_key = get_cache_key(audio_path)
         if get_cached_stems(cache_key, output_dir):
@@ -41,13 +59,20 @@ def separate_stems(
     else:
         cache_key = None
 
-    # Cache miss -- run separation
+    # 3. Cache miss -- run separation
     if settings.stem_backend == "modal":
         result = _separate_modal(audio_path, output_dir, progress_callback)
     else:
         result = _separate_local(audio_path, output_dir, progress_callback)
 
-    # Cache the result for future use
+    # Cache the result to shelf dir if shelf_song_id provided
+    if shelf_song_id is not None:
+        try:
+            cache_shelf_stems(shelf_song_id, output_dir)
+        except Exception:
+            logger.warning("Failed to cache shelf stems for %s", audio_path.name, exc_info=True)
+
+    # Cache the result to content-hash dir
     if cache_key is not None:
         try:
             cache_stems(cache_key, output_dir)

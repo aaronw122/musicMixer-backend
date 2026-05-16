@@ -40,6 +40,8 @@ class SessionState:
     notify_phone: str | None = None             # Deleted after SMS send
     used_fallback: bool = False                  # Set at pipeline completion if fallback stems were used
     warnings: list[str] = field(default_factory=list)  # Accumulated pipeline warnings
+    thumbnail_url_a: str | None = None           # YouTube thumbnail for song A (for shared link record art)
+    thumbnail_url_b: str | None = None           # YouTube thumbnail for song B
 
 
 @dataclass
