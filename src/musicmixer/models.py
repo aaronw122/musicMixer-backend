@@ -42,6 +42,7 @@ class SessionState:
     warnings: list[str] = field(default_factory=list)  # Accumulated pipeline warnings
     thumbnail_url_a: str | None = None           # YouTube thumbnail for song A (for shared link record art)
     thumbnail_url_b: str | None = None           # YouTube thumbnail for song B
+    url_cache_key: str | None = None             # URL-based remix cache key (for pre-queue cache hits)
 
 
 @dataclass

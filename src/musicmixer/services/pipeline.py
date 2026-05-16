@@ -1514,7 +1514,7 @@ def _step_export_and_finalize(
     # === REMIX CACHE WRITE ===
     if settings.remix_cache_enabled and remix_cache_key is not None:
         try:
-            from musicmixer.services.remix_cache import cache_remix
+            from musicmixer.services.remix_cache import cache_remix, write_url_alias
 
             cache_remix(remix_cache_key, output_path, settings.remix_cache_dir, metadata={
                 "explanation": plan.explanation,
@@ -1522,6 +1522,11 @@ def _step_export_and_finalize(
                 "used_fallback": plan.used_fallback,
                 "key_warning": session.key_warning,
             })
+
+            # Write URL-based alias so future requests with the same URLs skip the queue
+            url_key = getattr(session, "url_cache_key", None)
+            if url_key:
+                write_url_alias(url_key, remix_cache_key, settings.remix_cache_dir)
         except Exception:
             logger.warning(
                 "Session %s: Remix cache write failed (non-fatal)",
