@@ -165,6 +165,7 @@ def run_pipeline(
         try:
             from musicmixer.services.remix_cache import (
                 compute_remix_cache_key,
+                get_cached_metadata,
                 get_cached_remix,
             )
             import shutil as _shutil
@@ -179,17 +180,27 @@ def run_pipeline(
                 )
                 _shutil.copy2(cached_path, output_path)
 
+                meta = get_cached_metadata(remix_cache_key, settings.remix_cache_dir) or {}
+
                 session.remix_path = str(output_path)
+                session.explanation = meta.get("explanation", "")
+                session.used_fallback = meta.get("used_fallback", False)
+                session.warnings = meta.get("warnings", [])
+                session.key_warning = meta.get("key_warning")
                 session.status = "complete"
 
-                emit_progress(event_queue, {
+                complete_event = {
                     "step": "complete",
-                    "detail": "Remix loaded from cache",
+                    "detail": "Your remix is ready! 🎧",
                     "progress": 1.0,
-                    "explanation": "Loaded from cache -- identical request was processed before.",
-                    "warnings": [],
-                    "usedFallback": False,
-                }, session=session)
+                    "explanation": session.explanation,
+                    "warnings": session.warnings,
+                    "usedFallback": session.used_fallback,
+                }
+                if session.key_warning:
+                    complete_event["keyWarning"] = session.key_warning
+
+                emit_progress(event_queue, complete_event, session=session)
 
                 logger.info("Session %s: Pipeline complete (cached). Output: %s", session_id, output_path)
                 return
@@ -1317,7 +1328,12 @@ def run_pipeline(
         try:
             from musicmixer.services.remix_cache import cache_remix
 
-            cache_remix(remix_cache_key, output_path, settings.remix_cache_dir)
+            cache_remix(remix_cache_key, output_path, settings.remix_cache_dir, metadata={
+                "explanation": plan.explanation,
+                "warnings": plan.warnings,
+                "used_fallback": plan.used_fallback,
+                "key_warning": session.key_warning,
+            })
         except Exception:
             logger.warning(
                 "Session %s: Remix cache write failed (non-fatal)",

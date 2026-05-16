@@ -103,7 +103,7 @@ def _load_songformer_model():
     return model
 
 
-@app.function(image=image, gpu="T4", timeout=300)
+@app.function(image=image, gpu="L4", timeout=300)
 def analyze_structure_remote(audio_bytes: bytes, filename: str = "input.wav") -> list[dict]:
     """Run SongFormer inference on GPU.
 
