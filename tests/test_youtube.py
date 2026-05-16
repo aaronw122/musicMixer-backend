@@ -669,6 +669,7 @@ class TestConfigIntegration:
             patch("musicmixer.services.youtube.settings") as mock_settings,
         ):
             mock_settings.youtube_max_duration_seconds = 300  # 5 minutes
+            mock_settings.youtube_proxy_service_url = ""  # disable proxy in test
             mock_ydl = MagicMock()
             mock_ydl_cls.return_value.__enter__ = MagicMock(return_value=mock_ydl)
             mock_ydl_cls.return_value.__exit__ = MagicMock(return_value=False)

@@ -7,7 +7,9 @@ services:
     ports:
       - "8880:8880"
     restart: unless-stopped
-    mem_limit: 6g
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    mem_limit: 3g
     env_file: .env
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8880/health')"]
@@ -17,7 +19,10 @@ services:
       start_period: 15s
     volumes:
       - musicmixer-data:/app/data
-      - /home/lobo/.modal.toml:/root/.modal.toml:ro
+      - ${MODAL_TOML_PATH:-/root/.modal.toml}:/root/.modal.toml:ro
+      - ${YT_COOKIES_PATH:-/root/musicmixer/yt-cookies.txt}:/app/yt-cookies.txt
+      - yt-dlp-cache:/root/.cache/yt-dlp
 
 volumes:
   musicmixer-data:
+  yt-dlp-cache:
