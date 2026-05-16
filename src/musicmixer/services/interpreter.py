@@ -155,7 +155,7 @@ REMIX_PLAN_TOOL: dict = {
             "vocal_type": {
                 "type": "string",
                 "enum": ["sung", "rap"],
-                "description": "Whether Song A's vocals are melodic/sung or rap/spoken word. Only flag 'rap' if the vocals are ENTIRELY rapped or spoken with NO melodic singing. If the artist sings at all (hooks, choruses, melodic sections), use 'sung' — the sung portions need key matching and the rapped portions tolerate the shift fine.",
+                "description": "Whether Song A's vocals are melodic/sung or rap/spoken word. Flag 'rap' if the vocals are predominantly rapped or spoken word, even if there are brief melodic hooks or ad-libs. Only use 'sung' if the vocals are primarily melodic singing throughout. When in doubt, lean toward 'rap' — pitch-shifting rap vocals sounds worse than skipping key matching on a slightly melodic track.",
             },
             "explanation": {
                 "type": "string",
@@ -301,7 +301,7 @@ You do NOT choose tempo_source — it is not in your tool schema. Focus on arran
 If the BPM gap is large (>20%), mention in your explanation that some tempo stretching was applied.
 
 VOCAL TYPE:
-Classify Song A's vocal_type as 'rap' only if the vocals are ENTIRELY rapped or spoken with NO melodic singing. If the artist sings at all (hooks, choruses, melodic sections), use 'sung' — the sung portions need key matching and the rapped portions tolerate the shift fine."""
+Classify Song A's vocal_type as 'rap' if the vocals are predominantly rapped or spoken word, even with brief melodic hooks or ad-libs. Only use 'sung' if the vocals are primarily melodic singing throughout. When in doubt, lean toward 'rap' — a 7-semitone pitch shift on rap vocals sounds far worse than skipping key matching on a slightly melodic track."""
 
     # Section 10: Explanation and Warnings
     section_10 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
