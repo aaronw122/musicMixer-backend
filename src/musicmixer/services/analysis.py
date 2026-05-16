@@ -295,19 +295,8 @@ def _compute_bar_boundaries(beat_frames: np.ndarray, audio_length: int) -> np.nd
     # Take every 4th beat as a bar boundary
     bar_starts = beat_frames[::4]
 
-    # Handle partial final bar
-    remaining_beats = len(beat_frames) - (len(bar_starts) - 1) * 4
-    # Remaining beats after last bar start (those past last included bar start)
-    beats_after_last = len(beat_frames) % 4
-    if beats_after_last == 0:
-        # Perfect alignment: extend last bar to audio end
-        bar_boundaries = np.append(bar_starts, audio_length)
-    elif beats_after_last >= 4:
-        # Shouldn't happen with mod 4, but safety net
-        bar_boundaries = np.append(bar_starts, audio_length)
-    else:
-        # Partial final bar (<4 beats): discard it, last bar extends to audio end
-        bar_boundaries = np.append(bar_starts, audio_length)
+    # Extend the last bar to the audio end regardless of partial-bar alignment
+    bar_boundaries = np.append(bar_starts, audio_length)
 
     return bar_boundaries
 
@@ -973,6 +962,166 @@ def _energy_trajectory(
     return "->".join(deduped)
 
 
+def _section_vocal_prominence(
+    bar_rms_per_stem: dict[str, np.ndarray],
+    vocal_active: np.ndarray,
+    start_bar: int,
+    end_bar: int,
+) -> Optional[float]:
+    """Compute vocal prominence (dB) for a single section span.
+
+    Slices per-stem RMS and vocal_active to [start_bar:end_bar], guards
+    against length mismatches, and requires at least 3 vocal-active bars
+    for a stable result.  Returns rounded dB value or None.
+    """
+    seg_bar_rms = {k: v[start_bar:end_bar] for k, v in bar_rms_per_stem.items()}
+    seg_vocal_active = vocal_active[start_bar:end_bar]
+
+    # Guard: clip arrays to same length to prevent IndexError
+    min_len = min(len(seg_vocal_active), *(len(v) for v in seg_bar_rms.values())) if seg_bar_rms else 0
+    if min_len > 0:
+        seg_bar_rms = {k: v[:min_len] for k, v in seg_bar_rms.items()}
+        seg_vocal_active = seg_vocal_active[:min_len]
+
+    # Require minimum 3 vocal-active bars for stable prominence
+    active_count = int(np.sum(seg_vocal_active.astype(bool))) if min_len > 0 else 0
+    if active_count >= 3:
+        prom = compute_vocal_prominence(seg_bar_rms, seg_vocal_active)
+        return round(prom, 1) if prom is not None else None
+    return None
+
+
+def _classify_segment(
+    seg_idx: int,
+    n_segments: int,
+    start_bar: int,
+    end_bar: int,
+    total_bars: int,
+    combined_energy: np.ndarray,
+    vocal_active: np.ndarray,
+    bar_rms_per_stem: dict[str, np.ndarray],
+    buckets: EnergyBuckets,
+    vocal_rms: np.ndarray,
+    vocal_peak: float,
+    sustain_thresh: float,
+    seconds_per_bar: float,
+    bar_boundaries_frames: np.ndarray,
+    sr: int,
+) -> SectionInfo:
+    """Classify a single segment and return its SectionInfo.
+
+    Computes energy classification, vocal analysis, drum analysis, position
+    analysis, build detection, label decision tree, density, trajectory,
+    vocal prominence, and annotations for one segment.
+    """
+    bar_count = end_bar - start_bar
+
+    # Time computation from bar boundaries
+    if start_bar < len(bar_boundaries_frames):
+        start_time = float(bar_boundaries_frames[start_bar]) / sr
+    else:
+        start_time = start_bar * seconds_per_bar
+
+    if end_bar < len(bar_boundaries_frames):
+        end_time = float(bar_boundaries_frames[end_bar]) / sr
+    else:
+        end_time = end_bar * seconds_per_bar
+
+    # Segment energy stats
+    seg_energy = combined_energy[start_bar:end_bar]
+    seg_mean_energy = float(np.mean(seg_energy)) if len(seg_energy) > 0 else 0.0
+    energy_level = classify_energy(seg_mean_energy, buckets)
+
+    # Vocal info
+    seg_vocal = vocal_active[start_bar:end_bar]
+    has_vocals = bool(np.any(seg_vocal)) if len(seg_vocal) > 0 else False
+    vocal_status = _segment_vocal_status(vocal_active, start_bar, end_bar)
+
+    # Drums energy for breakdown detection
+    drums_rms = bar_rms_per_stem.get("drums", np.zeros(total_bars))
+    seg_drums = drums_rms[start_bar:end_bar]
+    if len(seg_drums) > 0 and len(drums_rms[drums_rms > 0]) > 0:
+        drums_p25 = float(np.percentile(drums_rms[drums_rms > 0], 25))
+        drums_low = float(np.mean(seg_drums)) < drums_p25
+    else:
+        drums_low = True
+
+    # Position info
+    is_first = seg_idx == 0
+    is_last = seg_idx == n_segments - 1
+    position_ratio = start_bar / total_bars if total_bars > 0 else 0.0
+
+    # Build detection: steady rise from first to last quarter
+    is_build = False
+    if bar_count >= 4:
+        quarter = max(1, bar_count // 4)
+        first_q = float(np.mean(seg_energy[:quarter]))
+        last_q = float(np.mean(seg_energy[-quarter:]))
+        first_q_level = classify_energy(first_q, buckets)
+        if first_q_level not in ("high", "peak") and first_q > BUILD_EPSILON:
+            if last_q > first_q * BUILD_RATIO:
+                is_build = True
+
+    # Decision tree (spec 2.4 Stage 2)
+    if is_first and (energy_level in ("low", "silent") or (energy_level == "medium" and not has_vocals)):
+        label = "intro"
+    elif is_last and (energy_level in ("low", "silent") or position_ratio > 0.85):
+        label = "outro"
+    elif is_build:
+        label = "build"
+    elif energy_level in ("high", "peak") and has_vocals:
+        label = "chorus"
+    elif energy_level in ("high", "peak") and not has_vocals:
+        label = "instrumental"
+    elif drums_low and has_vocals:
+        label = "breakdown"
+    elif energy_level == "medium" and has_vocals:
+        label = "verse"
+    elif energy_level in ("low", "silent") and not has_vocals:
+        label = "instrumental"
+    elif energy_level == "medium" and not has_vocals:
+        label = "instrumental"
+    else:
+        label = "verse"
+
+    # Density
+    density = _compute_density(bar_rms_per_stem, start_bar, end_bar)
+
+    # Energy trajectory
+    trajectory = _energy_trajectory(combined_energy, start_bar, end_bar, buckets)
+
+    # Per-section vocal prominence
+    sec_prominence = _section_vocal_prominence(bar_rms_per_stem, vocal_active, start_bar, end_bar)
+
+    # Annotations
+    annotations: list[str] = []
+
+    # GOOD INSTRUMENTAL SOURCE: vocal stem below sustain threshold for entire section
+    seg_vocal_rms = vocal_rms[start_bar:end_bar]
+    if len(seg_vocal_rms) > 0 and vocal_peak > 0:
+        if np.all(seg_vocal_rms < sustain_thresh):
+            annotations.append("GOOD INSTRUMENTAL SOURCE")
+
+    # Build annotation
+    if is_build:
+        annotations.append("BUILD")
+
+    return SectionInfo(
+        start_bar=start_bar,
+        end_bar=end_bar,
+        bar_count=bar_count,
+        start_time=round(start_time, 2),
+        end_time=round(end_time, 2),
+        label=label,
+        energy_level=energy_level,
+        energy_trajectory=trajectory,
+        density=density,
+        vocal_status=vocal_status,
+        vocal_prominence_db=round(sec_prominence, 1) if sec_prominence is not None else None,
+        annotations=annotations,
+    )
+
+
 def label_sections(
     boundaries: np.ndarray,
     total_bars: int,
@@ -1023,130 +1172,28 @@ def label_sections(
     for seg_idx in range(n_segments):
         start_bar = int(all_points[seg_idx])
         end_bar = int(all_points[seg_idx + 1])
-        bar_count = end_bar - start_bar
 
-        if bar_count <= 0:
+        if end_bar - start_bar <= 0:
             continue
 
-        # Time computation from bar boundaries
-        if start_bar < len(bar_boundaries_frames):
-            start_time = float(bar_boundaries_frames[start_bar]) / sr
-        else:
-            start_time = start_bar * seconds_per_bar
-
-        if end_bar < len(bar_boundaries_frames):
-            end_time = float(bar_boundaries_frames[end_bar]) / sr
-        else:
-            end_time = end_bar * seconds_per_bar
-
-        # Segment energy stats
-        seg_energy = combined_energy[start_bar:end_bar]
-        seg_mean_energy = float(np.mean(seg_energy)) if len(seg_energy) > 0 else 0.0
-        energy_level = classify_energy(seg_mean_energy, buckets)
-
-        # Vocal info
-        seg_vocal = vocal_active[start_bar:end_bar]
-        has_vocals = bool(np.any(seg_vocal)) if len(seg_vocal) > 0 else False
-        vocal_ratio = float(np.mean(seg_vocal)) if len(seg_vocal) > 0 else 0.0
-        vocal_status = _segment_vocal_status(vocal_active, start_bar, end_bar)
-
-        # Drums energy for breakdown detection
-        drums_rms = bar_rms_per_stem.get("drums", np.zeros(total_bars))
-        seg_drums = drums_rms[start_bar:end_bar]
-        if len(seg_drums) > 0 and len(drums_rms[drums_rms > 0]) > 0:
-            drums_p25 = float(np.percentile(drums_rms[drums_rms > 0], 25))
-            drums_low = float(np.mean(seg_drums)) < drums_p25
-        else:
-            drums_low = True
-
-        # Position info
-        is_first = seg_idx == 0
-        is_last = seg_idx == n_segments - 1
-        position_ratio = start_bar / total_bars if total_bars > 0 else 0.0
-
-        # Build detection: steady rise from first to last quarter
-        is_build = False
-        if bar_count >= 4:
-            quarter = max(1, bar_count // 4)
-            first_q = float(np.mean(seg_energy[:quarter]))
-            last_q = float(np.mean(seg_energy[-quarter:]))
-            first_q_level = classify_energy(first_q, buckets)
-            if first_q_level not in ("high", "peak") and first_q > BUILD_EPSILON:
-                if last_q > first_q * BUILD_RATIO:
-                    is_build = True
-
-        # Decision tree (spec 2.4 Stage 2)
-        if is_first and (energy_level in ("low", "silent") or (energy_level == "medium" and not has_vocals)):
-            label = "intro"
-        elif is_last and (energy_level in ("low", "silent") or position_ratio > 0.85):
-            label = "outro"
-        elif is_build:
-            label = "build"
-        elif energy_level in ("high", "peak") and has_vocals:
-            label = "chorus"
-        elif energy_level in ("high", "peak") and not has_vocals:
-            label = "instrumental"
-        elif drums_low and has_vocals:
-            label = "breakdown"
-        elif energy_level == "medium" and has_vocals:
-            label = "verse"
-        elif energy_level in ("low", "silent") and not has_vocals:
-            label = "instrumental"
-        elif energy_level == "medium" and not has_vocals:
-            label = "instrumental"
-        else:
-            label = "verse"
-
-        # Density
-        density = _compute_density(bar_rms_per_stem, start_bar, end_bar)
-
-        # Energy trajectory
-        trajectory = _energy_trajectory(combined_energy, start_bar, end_bar, buckets)
-
-        # Per-section vocal prominence
-        seg_bar_rms = {k: v[start_bar:end_bar] for k, v in bar_rms_per_stem.items()}
-        seg_vocal_active = vocal_active[start_bar:end_bar]
-
-        # Guard: clip arrays to same length to prevent IndexError
-        min_len = min(len(seg_vocal_active), *(len(v) for v in seg_bar_rms.values())) if seg_bar_rms else 0
-        if min_len > 0:
-            seg_bar_rms = {k: v[:min_len] for k, v in seg_bar_rms.items()}
-            seg_vocal_active = seg_vocal_active[:min_len]
-
-        # Require minimum 3 vocal-active bars for stable prominence
-        active_count = int(np.sum(seg_vocal_active.astype(bool))) if min_len > 0 else 0
-        if active_count >= 3:
-            sec_prominence = compute_vocal_prominence(seg_bar_rms, seg_vocal_active)
-        else:
-            sec_prominence = None
-
-        # Annotations
-        annotations: list[str] = []
-
-        # GOOD INSTRUMENTAL SOURCE: vocal stem below sustain threshold for entire section
-        seg_vocal_rms = vocal_rms[start_bar:end_bar]
-        if len(seg_vocal_rms) > 0 and vocal_peak > 0:
-            if np.all(seg_vocal_rms < sustain_thresh):
-                annotations.append("GOOD INSTRUMENTAL SOURCE")
-
-        # Build annotation
-        if is_build:
-            annotations.append("BUILD")
-
-        sections.append(SectionInfo(
+        section = _classify_segment(
+            seg_idx=seg_idx,
+            n_segments=n_segments,
             start_bar=start_bar,
             end_bar=end_bar,
-            bar_count=bar_count,
-            start_time=round(start_time, 2),
-            end_time=round(end_time, 2),
-            label=label,
-            energy_level=energy_level,
-            energy_trajectory=trajectory,
-            density=density,
-            vocal_status=vocal_status,
-            vocal_prominence_db=round(sec_prominence, 1) if sec_prominence is not None else None,
-            annotations=annotations,
-        ))
+            total_bars=total_bars,
+            combined_energy=combined_energy,
+            vocal_active=vocal_active,
+            bar_rms_per_stem=bar_rms_per_stem,
+            buckets=buckets,
+            vocal_rms=vocal_rms,
+            vocal_peak=vocal_peak,
+            sustain_thresh=sustain_thresh,
+            seconds_per_bar=seconds_per_bar,
+            bar_boundaries_frames=bar_boundaries_frames,
+            sr=sr,
+        )
+        sections.append(section)
 
     # Drop detection (compare adjacent sections)
     for i in range(1, len(sections)):
@@ -1334,19 +1381,9 @@ def detect_sections(
     # Post-merge: recompute vocal_prominence_db for merged sections that lost it
     for i, sec in enumerate(sections):
         if sec.vocal_prominence_db is None and sec.vocal_status != "vox:no":
-            seg_bar_rms = {k: v[sec.start_bar:sec.end_bar] for k, v in bar_rms_per_stem.items()}
-            seg_vocal_active = vocal_active[sec.start_bar:sec.end_bar]
-            min_len = min(len(seg_vocal_active), *(len(v) for v in seg_bar_rms.values())) if seg_bar_rms else 0
-            if min_len > 0:
-                seg_bar_rms = {k: v[:min_len] for k, v in seg_bar_rms.items()}
-                seg_vocal_active = seg_vocal_active[:min_len]
-            active_count = int(np.sum(seg_vocal_active.astype(bool))) if min_len > 0 else 0
-            if active_count >= 3:
-                prom = compute_vocal_prominence(seg_bar_rms, seg_vocal_active)
-                sections[i] = replace(
-                    sec,
-                    vocal_prominence_db=round(prom, 1) if prom is not None else None,
-                )
+            prom = _section_vocal_prominence(bar_rms_per_stem, vocal_active, sec.start_bar, sec.end_bar)
+            if prom is not None:
+                sections[i] = replace(sec, vocal_prominence_db=prom)
 
     logger.info("Section detection complete: %d sections", len(sections))
     return sections
@@ -1560,16 +1597,7 @@ def _enrich_sections(
         density = _compute_density(bar_rms_per_stem, start_bar, end_bar)
 
         # Vocal prominence
-        seg_bar_rms = {k: v[start_bar:end_bar] for k, v in bar_rms_per_stem.items()}
-        seg_vocal_active = vocal_active[start_bar:end_bar]
-        min_len = min(len(seg_vocal_active), *(len(v) for v in seg_bar_rms.values())) if seg_bar_rms else 0
-        if min_len > 0:
-            seg_bar_rms = {k: v[:min_len] for k, v in seg_bar_rms.items()}
-            seg_vocal_active = seg_vocal_active[:min_len]
-        active_count = int(np.sum(seg_vocal_active.astype(bool))) if min_len > 0 else 0
-        vocal_prominence = None
-        if active_count >= 3:
-            vocal_prominence = compute_vocal_prominence(seg_bar_rms, seg_vocal_active)
+        vocal_prominence = _section_vocal_prominence(bar_rms_per_stem, vocal_active, start_bar, end_bar)
 
         enriched.append(replace(
             sec,
@@ -1577,7 +1605,7 @@ def _enrich_sections(
             energy_trajectory=trajectory,
             density=density,
             vocal_status=vocal_status,
-            vocal_prominence_db=round(vocal_prominence, 1) if vocal_prominence is not None else None,
+            vocal_prominence_db=vocal_prominence,
             section_source="enriched",
         ))
 
@@ -1587,6 +1615,22 @@ def _enrich_sections(
 # ---------------------------------------------------------------------------
 # Main entry points: analyze_stems() and compute_relationships()
 # ---------------------------------------------------------------------------
+
+def _empty_analysis_result() -> tuple[StemAnalysis, SongStructure]:
+    """Return a minimal empty result when there are no bars or audio to analyze."""
+    empty_rms: dict[str, np.ndarray] = {n: np.array([]) for n in STEM_NAMES}
+    stem_analysis = StemAnalysis(
+        bar_rms=empty_rms,
+        combined_energy=np.array([]),
+        vocal_active=np.array([], dtype=bool),
+        vocal_gaps=[],
+        bucket_thresholds=EnergyBuckets(
+            noise_floor=BUCKET_NOISE_FLOOR, p10=0.0, p50=0.0, p85=0.0,
+        ),
+    )
+    song_structure = SongStructure(sections=[], vocal_gaps=[], total_bars=0)
+    return stem_analysis, song_structure
+
 
 def analyze_stems(
     stem_paths: dict[str, Path],
@@ -1639,36 +1683,14 @@ def analyze_stems(
 
     if audio_length == 0:
         # Empty stems: return minimal result
-        empty_rms: dict[str, np.ndarray] = {n: np.array([]) for n in STEM_NAMES}
-        stem_analysis = StemAnalysis(
-            bar_rms=empty_rms,
-            combined_energy=np.array([]),
-            vocal_active=np.array([], dtype=bool),
-            vocal_gaps=[],
-            bucket_thresholds=EnergyBuckets(
-                noise_floor=BUCKET_NOISE_FLOOR, p10=0.0, p50=0.0, p85=0.0,
-            ),
-        )
-        song_structure = SongStructure(sections=[], vocal_gaps=[], total_bars=0)
-        return stem_analysis, song_structure
+        return _empty_analysis_result()
 
     # Compute bar boundaries from beat frames
     bar_boundaries = _compute_bar_boundaries(beat_frames, audio_length)
     total_bars = len(bar_boundaries) - 1
 
     if total_bars <= 0:
-        empty_rms = {n: np.array([]) for n in STEM_NAMES}
-        stem_analysis = StemAnalysis(
-            bar_rms=empty_rms,
-            combined_energy=np.array([]),
-            vocal_active=np.array([], dtype=bool),
-            vocal_gaps=[],
-            bucket_thresholds=EnergyBuckets(
-                noise_floor=BUCKET_NOISE_FLOOR, p10=0.0, p50=0.0, p85=0.0,
-            ),
-        )
-        song_structure = SongStructure(sections=[], vocal_gaps=[], total_bars=0)
-        return stem_analysis, song_structure
+        return _empty_analysis_result()
 
     # Compute per-bar RMS for each stem (raw values)
     bar_rms: dict[str, np.ndarray] = {}

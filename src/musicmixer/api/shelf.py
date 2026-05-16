@@ -147,6 +147,36 @@ def _starter_records() -> list[dict[str, Any]]:
     base_time = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
     seeds = [
         (
+            "https://www.youtube.com/watch?v=XhzpxjuwZy0",
+            "House of Pain - Jump Around",
+            "https://i.ytimg.com/vi/XhzpxjuwZy0/hqdefault.jpg",
+        ),
+        (
+            "https://www.youtube.com/watch?v=qchPLaiKocI",
+            "Kool & The Gang - Get Down On It",
+            "https://i.ytimg.com/vi/qchPLaiKocI/hqdefault.jpg",
+        ),
+        (
+            "https://www.youtube.com/watch?v=DUZ7-C0wPF4",
+            "MF DOOM - Gazzillion Ear",
+            "https://i.ytimg.com/vi/DUZ7-C0wPF4/hqdefault.jpg",
+        ),
+        (
+            "https://www.youtube.com/watch?v=CdXesX6mYUE",
+            "Pitbull ft. Chris Brown - International Love",
+            "https://i.ytimg.com/vi/CdXesX6mYUE/hqdefault.jpg",
+        ),
+        (
+            "https://www.youtube.com/watch?v=k9Yz0MC4bkQ",
+            "Grateful Dead - Althea",
+            "https://i.ytimg.com/vi/k9Yz0MC4bkQ/hqdefault.jpg",
+        ),
+        (
+            "https://www.youtube.com/watch?v=QNAVrQ96mpA",
+            "Roy Orbison - You Got It",
+            "https://i.ytimg.com/vi/QNAVrQ96mpA/hqdefault.jpg",
+        ),
+        (
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             "Rick Astley - Never Gonna Give You Up",
             "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
@@ -157,9 +187,9 @@ def _starter_records() -> list[dict[str, Any]]:
             "https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg",
         ),
         (
-            "https://www.youtube.com/watch?v=3JZ_D3ELwOQ",
+            "https://www.youtube.com/watch?v=OPf0YbXqDm0",
             "Mark Ronson - Uptown Funk ft. Bruno Mars",
-            "https://i.ytimg.com/vi/3JZ_D3ELwOQ/hqdefault.jpg",
+            "https://i.ytimg.com/vi/OPf0YbXqDm0/hqdefault.jpg",
         ),
     ]
 
@@ -188,6 +218,14 @@ def _read_shelf_unlocked(path: Path) -> list[dict[str, Any]]:
     records = payload.get("records")
     if not isinstance(records, list):
         raise HTTPException(500, "Shelf data is malformed")
+
+    # Merge in any missing seed records
+    existing_urls = {r["youtube_url"] for r in records}
+    missing = [s for s in _starter_records() if s["youtube_url"] not in existing_urls]
+    if missing:
+        records.extend(missing)
+        _write_shelf_unlocked(path, records)
+
     return records
 
 
@@ -228,22 +266,30 @@ def list_shelf() -> ShelfResponse:
     )
 
 
-@router.post("/shelf", response_model=ShelfRecord)
-def add_shelf_record(body: AddShelfRecordRequest) -> ShelfRecord:
-    normalized_url = _normalize_youtube_url(body.youtube_url)
+def ensure_on_shelf(youtube_url: str) -> ShelfRecord:
+    """Add a YouTube URL to the shelf if it isn't already there.
 
+    Returns the ShelfRecord (existing or newly created). Safe to call
+    from any context — silently returns the existing record on duplicates.
+    """
+    normalized_url = _normalize_youtube_url(youtube_url)
+
+    # Fast path: already on the shelf
     with _shelf_lock:
         records = _read_shelf_unlocked(_shelf_path())
-        if any(record["youtube_url"] == normalized_url for record in records):
-            raise HTTPException(409, "Record already exists on the shelf")
+        for record in records:
+            if record["youtube_url"] == normalized_url:
+                return ShelfRecord(**record)
 
     metadata = _fetch_noembed_metadata(normalized_url)
 
     with _shelf_lock:
         path = _shelf_path()
         records = _read_shelf_unlocked(path)
-        if any(record["youtube_url"] == normalized_url for record in records):
-            raise HTTPException(409, "Record already exists on the shelf")
+        # Re-check after fetching metadata (another request may have added it)
+        for record in records:
+            if record["youtube_url"] == normalized_url:
+                return ShelfRecord(**record)
 
         record_id = str(uuid.uuid4())
         record = {
@@ -260,6 +306,11 @@ def add_shelf_record(body: AddShelfRecordRequest) -> ShelfRecord:
         _write_shelf_unlocked(path, records)
 
     return ShelfRecord(**record)
+
+
+@router.post("/shelf", response_model=ShelfRecord)
+def add_shelf_record(body: AddShelfRecordRequest) -> ShelfRecord:
+    return ensure_on_shelf(body.youtube_url)
 
 
 def _sleeve_svg(record: dict[str, Any]) -> str:

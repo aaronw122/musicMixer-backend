@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from musicmixer.config import settings
 from musicmixer.models import SessionState
 from musicmixer.services.cleanup import cleanup_expired_sessions
+from musicmixer.api.shelf import ensure_on_shelf
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -592,6 +593,13 @@ def create_youtube_remix(
     # Validate both URLs (SSRF prevention) before doing any work
     _validate_youtube_url(body.url_a)
     _validate_youtube_url(body.url_b)
+
+    # Auto-save both songs to the shelf (idempotent — skips duplicates)
+    try:
+        ensure_on_shelf(body.url_a)
+        ensure_on_shelf(body.url_b)
+    except Exception:
+        pass  # Shelf save is best-effort; don't block the remix
 
     # Clean up expired sessions before processing
     cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
