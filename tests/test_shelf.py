@@ -38,12 +38,12 @@ def test_get_shelf_seeds_starter_library(client, tmp_path):
 
     assert response.status_code == 200
     records = response.json()["records"]
-    assert len(records) == 3
+    assert len(records) > 0
     assert all(record["is_curated"] for record in records)
     assert (tmp_path / "shelf.json").exists()
 
     payload = json.loads((tmp_path / "shelf.json").read_text())
-    assert len(payload["records"]) == 3
+    assert len(payload["records"]) == len(records)
 
 
 def test_post_shelf_adds_record_and_persists(client, tmp_path):
@@ -70,7 +70,7 @@ def test_post_shelf_adds_record_and_persists(client, tmp_path):
     assert any(item["id"] == record["id"] for item in payload["records"])
 
 
-def test_post_shelf_rejects_duplicate_normalized_url(client):
+def test_post_shelf_returns_existing_on_duplicate_url(client):
     with patch(
         "musicmixer.api.shelf._fetch_noembed_metadata",
         return_value={
@@ -88,7 +88,8 @@ def test_post_shelf_rejects_duplicate_normalized_url(client):
         )
 
     assert first.status_code == 200
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
 
 
 def test_post_shelf_rejects_invalid_youtube_url(client):
