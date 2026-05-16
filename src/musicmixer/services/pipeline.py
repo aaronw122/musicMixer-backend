@@ -145,6 +145,8 @@ def _step_separate_and_analyze(
     song_b_original_filename: str,
     event_queue: queue.Queue,
     session: SessionState,
+    shelf_song_id_a: str | None = None,
+    shelf_song_id_b: str | None = None,
 ) -> tuple:
     """Steps 1+2: Separation + analysis (overlapped).
 
@@ -203,9 +205,9 @@ def _step_separate_and_analyze(
     structure_future_b = None
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
-        # Separation futures
-        sep_future_a = pool.submit(separate_stems, song_a_path, song_a_stems_dir)
-        sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir)
+        # Separation futures (pass shelf_song_id for pre-cached shelf stems)
+        sep_future_a = pool.submit(separate_stems, song_a_path, song_a_stems_dir, None, shelf_song_id_a)
+        sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir, None, shelf_song_id_b)
 
         # Analysis futures (overlapped with separation -- no stem dependency)
         analysis_future_a = pool.submit(analyze_audio_full, song_a_path)
@@ -1582,6 +1584,8 @@ def run_pipeline(
     source_quality_a: str | None = None,
     source_quality_b: str | None = None,
     force_vocal_source: str | None = None,
+    shelf_song_id_a: str | None = None,
+    shelf_song_id_b: str | None = None,
 ) -> None:
     """Complete remix pipeline: separation, analysis, tempo matching, arrangement, export.
 
@@ -1640,6 +1644,8 @@ def run_pipeline(
         session_id, song_a_path, song_b_path, stems_dir,
         song_a_original_filename, song_b_original_filename,
         event_queue, session,
+        shelf_song_id_a=shelf_song_id_a,
+        shelf_song_id_b=shelf_song_id_b,
     )
 
     check_cancelled(session)
