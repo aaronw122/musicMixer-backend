@@ -161,6 +161,25 @@ _YOUTUBE_ALLOWED_HOSTS = {
 }
 
 
+def _thumbnail_from_youtube_url(url: str) -> str | None:
+    """Derive a YouTube thumbnail URL from a video URL. Returns None on failure."""
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname or ""
+    path_parts = [p for p in parsed.path.split("/") if p]
+
+    video_id = None
+    if hostname == "youtu.be" and path_parts:
+        video_id = path_parts[0]
+    else:
+        qs = urllib.parse.parse_qs(parsed.query)
+        if qs.get("v"):
+            video_id = qs["v"][0]
+        elif path_parts and path_parts[0] in {"shorts", "embed"} and len(path_parts) > 1:
+            video_id = path_parts[1]
+
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+
+
 def _validate_youtube_url(url: str) -> str:
     """Validate a YouTube URL for SSRF safety. Returns the validated URL.
 
@@ -607,8 +626,10 @@ def create_youtube_remix(
     # Generate session ID
     session_id = str(uuid.uuid4())
 
-    # Create session state
+    # Create session state with thumbnail URLs derived from YouTube video IDs
     session = SessionState()
+    session.thumbnail_url_a = _thumbnail_from_youtube_url(body.url_a)
+    session.thumbnail_url_b = _thumbnail_from_youtube_url(body.url_b)
     with request.app.state.sessions_lock:
         request.app.state.sessions[session_id] = session
 
@@ -1060,6 +1081,8 @@ async def get_public_remix(session_id: str, request: Request):
                 "warnings": warnings,
                 "usedFallback": used_fallback,
                 "expires_at": expires_at,
+                "thumbnail_url_a": getattr(session, "thumbnail_url_a", None),
+                "thumbnail_url_b": getattr(session, "thumbnail_url_b", None),
             }
 
     # 4. Processing or queued -> 202
