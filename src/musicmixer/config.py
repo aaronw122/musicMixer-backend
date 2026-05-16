@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     shelf_stems_dir: Path = Path("data/shelf_stems")
 
     # Remix output cache
-    remix_cache_enabled: bool = True
+    remix_cache_enabled: bool = False
     remix_cache_max_gb: float = 5.0
     remix_cache_dir: Path = Path("data/remix_cache")
 
