@@ -103,7 +103,7 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
     if session is None:
         session = SessionState()
 
-    def mock_separate(audio_path, output_dir, progress_callback=None):
+    def mock_separate(audio_path, output_dir, progress_callback=None, shelf_song_id=None):
         """Return the pre-made stems for the matching song."""
         if "song_a" in str(audio_path):
             return pipeline_tmp["song_a_stems"]
@@ -265,7 +265,7 @@ class TestPipelineHandlesSeparationError:
         event_queue = queue.Queue(maxsize=100)
         session = SessionState()
 
-        def mock_separate_raises(audio_path, output_dir, progress_callback=None):
+        def mock_separate_raises(audio_path, output_dir, progress_callback=None, shelf_song_id=None):
             raise RuntimeError("GPU unavailable: Modal service down")
 
         with (

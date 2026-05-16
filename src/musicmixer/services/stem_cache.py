@@ -173,6 +173,114 @@ def cache_stems(cache_key: str, stems_dir: Path) -> None:
     _evict_lru(cache_dir)
 
 
+def get_shelf_cached_stems(song_id: str, output_dir: Path) -> bool:
+    """Check shelf stems cache for pre-computed stems by song ID.
+
+    If cached stems exist and validate (WAV count, non-zero, recognized set),
+    copies them into *output_dir* and returns ``True``.
+
+    Returns ``False`` on miss or validation failure.
+    Always enabled (independent of stem_cache_enabled flag).
+    """
+    cache_entry = settings.shelf_stems_dir / song_id
+    if not cache_entry.is_dir():
+        logger.debug("Shelf stem cache miss for %s (no directory)", song_id[:12])
+        return False
+
+    try:
+        wav_files = list(cache_entry.glob("*.wav"))
+        if not wav_files:
+            logger.warning("Shelf stem cache entry %s has no WAV files, treating as miss", song_id[:12])
+            return False
+
+        for wav in wav_files:
+            if wav.stat().st_size == 0:
+                logger.warning(
+                    "Shelf stem cache entry %s has zero-length %s, treating as miss",
+                    song_id[:12],
+                    wav.name,
+                )
+                return False
+
+        # Validate we have a recognized stem set
+        stem_names = {wav.stem for wav in wav_files}
+        if not (stem_names >= EXPECTED_4_STEMS or stem_names >= EXPECTED_6_STEMS):
+            logger.warning(
+                "Shelf stem cache entry %s has unrecognized stems %s, treating as miss",
+                song_id[:12],
+                stem_names,
+            )
+            return False
+
+        # Copy stems to output directory
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for wav in wav_files:
+            dest = output_dir / wav.name
+            shutil.copy2(wav, dest)
+    except FileNotFoundError:
+        logger.debug(
+            "Shelf stem cache entry %s disappeared during read, treating as miss",
+            song_id[:12],
+        )
+        return False
+
+    logger.info(
+        "Shelf stem cache hit for %s (%d stems copied to %s)",
+        song_id[:12],
+        len(wav_files),
+        output_dir,
+    )
+    return True
+
+
+def cache_shelf_stems(song_id: str, stems_dir: Path) -> None:
+    """Copy stems from *stems_dir* into the shelf stems cache under *song_id*.
+
+    Uses atomic rename: writes to a temp directory first, then renames
+    into place. If the target already exists (concurrent writer), the
+    rename overwrites it.
+
+    No LRU eviction -- shelf stems are permanent until manually cleared.
+    """
+    wav_files = list(stems_dir.glob("*.wav"))
+    if not wav_files:
+        logger.warning("No WAV files in %s, skipping shelf cache write", stems_dir)
+        return
+
+    cache_dir = settings.shelf_stems_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write to temp directory for atomic rename
+    tmp_dir = cache_dir / f".tmp-{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for wav in wav_files:
+            shutil.copy2(wav, tmp_dir / wav.name)
+
+        target = cache_dir / song_id
+        try:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            os.rename(tmp_dir, target)
+        except OSError:
+            if target.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            else:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise
+
+        logger.info(
+            "Cached %d shelf stems for %s (%s)",
+            len(wav_files),
+            song_id[:12],
+            target,
+        )
+    except Exception:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+
 def _evict_lru(cache_dir: Path) -> None:
     """Delete oldest cache entries (by mtime) until total size is within limit.
 

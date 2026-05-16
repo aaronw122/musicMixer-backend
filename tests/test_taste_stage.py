@@ -161,7 +161,7 @@ class TestFlagGating:
             sf.write(str(p), audio, sr, subtype="FLOAT")
             stems_b[name] = p
 
-        def mock_separate(audio_path, output_dir, progress_callback=None):
+        def mock_separate(audio_path, output_dir, progress_callback=None, shelf_song_id=None):
             if "song_a" in str(audio_path):
                 return stems_a
             return stems_b
