@@ -661,6 +661,48 @@ def create_youtube_remix(
     # Clean up expired sessions before processing
     cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
 
+    # === PRE-QUEUE CACHE CHECK (URL-based, no file I/O) ===
+    # Same URLs + prompt always produce the same remix. Check before queueing
+    # so cached remixes are served instantly without consuming a processing slot.
+    if settings.remix_cache_enabled:
+        try:
+            from musicmixer.services.remix_cache import (
+                compute_url_cache_key,
+                get_cached_remix,
+                get_cached_metadata,
+            )
+
+            url_key = compute_url_cache_key(body.url_a, body.url_b, body.prompt)
+            cached_path = get_cached_remix(url_key, settings.remix_cache_dir)
+            if cached_path is not None:
+                logger.info("Pre-queue URL cache hit (key=%s), serving instantly", url_key[:12])
+                meta = get_cached_metadata(url_key, settings.remix_cache_dir) or {}
+
+                session_id = str(uuid.uuid4())
+                session = SessionState()
+                session.status = "complete"
+                session.thumbnail_url_a = _thumbnail_from_youtube_url(body.url_a)
+                session.thumbnail_url_b = _thumbnail_from_youtube_url(body.url_b)
+                session.explanation = meta.get("explanation", "")
+                session.used_fallback = meta.get("used_fallback", False)
+                session.warnings = meta.get("warnings", [])
+                session.key_warning = meta.get("key_warning")
+
+                # Copy cached remix to session output dir
+                import shutil as _shutil
+                remix_dir = settings.data_dir / "remixes" / session_id
+                remix_dir.mkdir(parents=True, exist_ok=True)
+                output_path = remix_dir / "remix.mp3"
+                _shutil.copy2(cached_path, output_path)
+                session.remix_path = str(output_path)
+
+                with request.app.state.sessions_lock:
+                    request.app.state.sessions[session_id] = session
+
+                return {"session_id": session_id}
+        except Exception:
+            logger.debug("Pre-queue URL cache check failed, proceeding normally", exc_info=True)
+
     # Generate session ID
     session_id = str(uuid.uuid4())
 
@@ -668,6 +710,13 @@ def create_youtube_remix(
     session = SessionState()
     session.thumbnail_url_a = _thumbnail_from_youtube_url(body.url_a)
     session.thumbnail_url_b = _thumbnail_from_youtube_url(body.url_b)
+    # Store URL cache key so the pipeline can write an alias after the content-based cache
+    if settings.remix_cache_enabled:
+        try:
+            from musicmixer.services.remix_cache import compute_url_cache_key
+            session.url_cache_key = compute_url_cache_key(body.url_a, body.url_b, body.prompt)
+        except Exception:
+            pass
     with request.app.state.sessions_lock:
         request.app.state.sessions[session_id] = session
 

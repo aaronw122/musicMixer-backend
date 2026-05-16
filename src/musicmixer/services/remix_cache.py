@@ -27,6 +27,18 @@ from musicmixer.services.stem_cache import get_cache_key
 logger = logging.getLogger(__name__)
 
 
+def compute_url_cache_key(url_a: str, url_b: str, prompt: str) -> str:
+    """Compute a cache key from YouTube URLs + prompt (no file I/O needed).
+
+    Uses the same SHA-256 scheme as the file-based key but substitutes
+    URL strings for content hashes. This allows a fast pre-queue cache
+    lookup before songs are downloaded.
+    """
+    normalized_prompt = prompt.strip().lower()
+    composite = f"url:{url_a}:{url_b}:{normalized_prompt}"
+    return hashlib.sha256(composite.encode("utf-8")).hexdigest()
+
+
 def compute_remix_cache_key(song_a_path: Path, song_b_path: Path, prompt: str) -> str:
     """Compute an order-aware cache key for a remix request.
 
@@ -144,6 +156,26 @@ def cache_remix(
         _evict_lru(cache_dir, settings.remix_cache_max_gb)
     except Exception:
         logger.warning("Remix cache eviction failed", exc_info=True)
+
+
+def write_url_alias(url_cache_key: str, content_cache_key: str, cache_dir: Path) -> None:
+    """Create a symlink from the URL-based key to the content-based cache entry.
+
+    This allows fast pre-queue lookups by URL without duplicating the MP3.
+    Failures are logged but never raised — alias writes are best-effort.
+    """
+    alias_path = cache_dir / url_cache_key
+    target_path = cache_dir / content_cache_key
+
+    try:
+        if alias_path.exists() or alias_path.is_symlink():
+            return  # Already exists
+        if not target_path.exists():
+            return  # Nothing to alias to
+        os.symlink(content_cache_key, alias_path)
+        logger.debug("Created URL cache alias %s -> %s", url_cache_key[:12], content_cache_key[:12])
+    except Exception:
+        logger.debug("Failed to create URL cache alias", exc_info=True)
 
 
 def _evict_lru(cache_dir: Path, max_gb: float) -> None:
