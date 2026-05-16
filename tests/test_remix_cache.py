@@ -1,5 +1,6 @@
 """Tests for musicmixer.services.remix_cache -- remix output caching."""
 
+import json
 import os
 import shutil
 import time
@@ -101,6 +102,48 @@ class TestComputeRemixCacheKey:
 # ---------------------------------------------------------------------------
 # Tests: get_cached_remix
 # ---------------------------------------------------------------------------
+
+class TestGetCachedMetadata:
+    """Metadata read logic."""
+
+    def test_returns_metadata_when_present(self, tmp_path):
+        """Returns stored metadata dict on cache hit."""
+        from musicmixer.services.remix_cache import get_cached_metadata
+
+        cache_dir = tmp_path / "cache"
+        cache_key = "a" * 64
+        entry = cache_dir / cache_key
+        entry.mkdir(parents=True)
+        meta = {"explanation": "Vocals from song A over instrumentals from song B", "warnings": []}
+        (entry / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        result = get_cached_metadata(cache_key, cache_dir)
+        assert result == meta
+
+    def test_returns_none_when_missing(self, tmp_path):
+        """Returns None when no metadata.json exists (backwards compat)."""
+        from musicmixer.services.remix_cache import get_cached_metadata
+
+        cache_dir = tmp_path / "cache"
+        cache_key = "b" * 64
+        (cache_dir / cache_key).mkdir(parents=True)
+
+        result = get_cached_metadata(cache_key, cache_dir)
+        assert result is None
+
+    def test_returns_none_on_corrupt_json(self, tmp_path):
+        """Returns None instead of crashing on corrupt metadata."""
+        from musicmixer.services.remix_cache import get_cached_metadata
+
+        cache_dir = tmp_path / "cache"
+        cache_key = "c" * 64
+        entry = cache_dir / cache_key
+        entry.mkdir(parents=True)
+        (entry / "metadata.json").write_text("not json {{{", encoding="utf-8")
+
+        result = get_cached_metadata(cache_key, cache_dir)
+        assert result is None
+
 
 class TestGetCachedRemix:
     """Cache read logic."""
@@ -246,6 +289,43 @@ class TestCacheRemix:
         cached = cache_dir / cache_key / "remix.mp3"
         assert cached.is_file()
         assert cached.stat().st_size > 0
+
+    def test_writes_metadata_alongside_mp3(self, tmp_path):
+        """Metadata JSON should be stored next to remix.mp3 in the cache entry."""
+        from musicmixer.services.remix_cache import cache_remix, get_cached_metadata
+
+        cache_dir = tmp_path / "cache"
+        remix_path = tmp_path / "remix.mp3"
+        _make_dummy_mp3(remix_path)
+        cache_key = "f" * 64
+        meta = {
+            "explanation": "test explanation",
+            "warnings": ["tempo mismatch"],
+            "used_fallback": True,
+            "key_warning": None,
+        }
+
+        with patch("musicmixer.services.remix_cache.settings") as mock_settings:
+            mock_settings.remix_cache_max_gb = 5.0
+            cache_remix(cache_key, remix_path, cache_dir, metadata=meta)
+
+        result = get_cached_metadata(cache_key, cache_dir)
+        assert result == meta
+
+    def test_no_metadata_file_when_none(self, tmp_path):
+        """No metadata.json written when metadata is not provided."""
+        from musicmixer.services.remix_cache import cache_remix
+
+        cache_dir = tmp_path / "cache"
+        remix_path = tmp_path / "remix.mp3"
+        _make_dummy_mp3(remix_path)
+        cache_key = "e" * 64
+
+        with patch("musicmixer.services.remix_cache.settings") as mock_settings:
+            mock_settings.remix_cache_max_gb = 5.0
+            cache_remix(cache_key, remix_path, cache_dir)
+
+        assert not (cache_dir / cache_key / "metadata.json").exists()
 
     def test_failure_does_not_raise(self, tmp_path):
         """Cache write failure should log but not raise."""

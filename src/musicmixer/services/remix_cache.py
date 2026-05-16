@@ -6,17 +6,20 @@ content hashes and the normalized prompt.
 
 Cache layout:
     data/remix_cache/{sha256_hex}/remix.mp3
+    data/remix_cache/{sha256_hex}/metadata.json
 
 Thread-safety: writes use atomic rename (write to temp dir, then
 ``os.rename`` into place), same pattern as stem_cache.py.
 """
 
 import hashlib
+import json
 import logging
 import os
 import shutil
 import uuid
 from pathlib import Path
+from typing import Any
 
 from musicmixer.config import settings
 from musicmixer.services.stem_cache import get_cache_key
@@ -69,7 +72,24 @@ def get_cached_remix(cache_key: str, cache_dir: Path) -> Path | None:
     return remix_path
 
 
-def cache_remix(cache_key: str, remix_mp3_path: Path, cache_dir: Path) -> None:
+def get_cached_metadata(cache_key: str, cache_dir: Path) -> dict[str, Any] | None:
+    """Return cached metadata dict, or ``None`` if not available."""
+    meta_path = cache_dir / cache_key / "metadata.json"
+    try:
+        if not meta_path.is_file():
+            return None
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Failed to read cached metadata for %s", cache_key[:12], exc_info=True)
+        return None
+
+
+def cache_remix(
+    cache_key: str,
+    remix_mp3_path: Path,
+    cache_dir: Path,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     """Copy the remix MP3 into the cache under *cache_key*.
 
     Uses atomic rename: writes to a temp directory first, then renames
@@ -92,6 +112,10 @@ def cache_remix(cache_key: str, remix_mp3_path: Path, cache_dir: Path) -> None:
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
         shutil.copy2(remix_mp3_path, tmp_dir / "remix.mp3")
+        if metadata:
+            (tmp_dir / "metadata.json").write_text(
+                json.dumps(metadata, ensure_ascii=False), encoding="utf-8",
+            )
 
         target = cache_dir / cache_key
         try:
