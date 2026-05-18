@@ -240,7 +240,7 @@ def detect_chords(audio_path: Path) -> ChordProgression:
 
     from lv_chordia.chord_recognition import chord_recognition
 
-    results = chord_recognition(str(audio_path), chord_dict_name="submission")
+    results = chord_recognition(str(Path(audio_path).resolve()), chord_dict_name="submission")
 
     # Parse chord annotations (list of dicts with start_time, end_time, chord)
     chord_events: list[ChordEvent] = []
