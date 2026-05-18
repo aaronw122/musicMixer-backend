@@ -61,6 +61,7 @@ def client(tmp_path):
         mock_settings.max_queue_depth = 10
         mock_settings.session_ttl_hours = 3
         mock_settings.queue_entry_ttl_minutes = 15
+        mock_settings.processing_max_duration_seconds = 210
         mock_settings.max_upload_duration_seconds = 900
         mock_settings.distributed_limiter_enabled = False
 
@@ -421,6 +422,7 @@ class TestYouTubePipelineWrapper:
         with patch("musicmixer.api.remix.settings") as mock_settings:
             mock_settings.data_dir = tmp_path
             mock_settings.queue_entry_ttl_minutes = 15
+            mock_settings.processing_max_duration_seconds = 210
 
             with patch("musicmixer.services.pipeline.run_pipeline") as mock_pipeline:
                 with patch("musicmixer.services.youtube.download_youtube_audio", new=fake_download):
@@ -483,6 +485,7 @@ class TestYouTubePipelineWrapper:
         with patch("musicmixer.api.remix.settings") as mock_settings:
             mock_settings.data_dir = tmp_path
             mock_settings.queue_entry_ttl_minutes = 15
+            mock_settings.processing_max_duration_seconds = 210
 
             with patch("musicmixer.services.pipeline.run_pipeline"):
                 with patch("musicmixer.services.youtube.download_youtube_audio", new=fake_download):
@@ -541,6 +544,7 @@ class TestYouTubePipelineWrapper:
         with patch("musicmixer.api.remix.settings") as mock_settings:
             mock_settings.data_dir = tmp_path
             mock_settings.queue_entry_ttl_minutes = 15
+            mock_settings.processing_max_duration_seconds = 210
 
             with patch("musicmixer.services.youtube.download_youtube_audio", new=failing_download):
                 _youtube_pipeline_wrapper(

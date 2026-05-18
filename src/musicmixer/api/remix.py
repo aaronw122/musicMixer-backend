@@ -361,6 +361,16 @@ def _youtube_pipeline_wrapper(
 
         _emit_monotonic("Both songs downloaded!", 0.45)
 
+        # --- Pre-trim long songs to avoid GPU OOM and speed up processing ---
+        from musicmixer.services.processor import pre_trim_for_processing
+        max_dur = settings.processing_max_duration_seconds
+        if result_a is not None and result_a.duration_seconds > max_dur:
+            pre_trim_for_processing(result_a.wav_path, max_duration_seconds=max_dur)
+            result_a.duration_seconds = min(result_a.duration_seconds, max_dur)
+        if result_b is not None and result_b.duration_seconds > max_dur:
+            pre_trim_for_processing(result_b.wav_path, max_duration_seconds=max_dur)
+            result_b.duration_seconds = min(result_b.duration_seconds, max_dur)
+
         # Check cancellation before starting heavy pipeline work
         from musicmixer.services.pipeline import check_cancelled
         check_cancelled(session)
