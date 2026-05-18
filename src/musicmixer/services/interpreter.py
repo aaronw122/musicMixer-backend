@@ -311,12 +311,34 @@ WARNINGS: Populate this array ONLY for issues that actually degrade audio qualit
 - Key shift exceeds 3 semitones
 Do NOT warn about normal characteristics like one song having more vocals than the other — that is expected (Song A provides vocals, Song B provides instrumentals). Empty array is fine."""
 
+    # Section 11: PulseMap analysis rules (polyphony, chords, drums, word alignment)
+    section_11 = """PULSEMAP ANALYSIS RULES (when analysis data is available in Layers 1/3/4/5):
+
+POLYPHONY:
+- If Song A has polyphonic vocals (harmony/duet), the vocal stem already fills the mid-frequency space. Reduce concurrent instrumental stems to avoid mud.
+- Solo vocals have more headroom — you can layer denser instrumentals underneath.
+
+CHORD PROGRESSIONS:
+- When chord progressions are available, prefer section boundaries that align with chord changes.
+- Shared chords between Song A and Song B are ideal transition points.
+- Avoid placing vocal sections over instrumental sections with clashing chord progressions.
+
+DRUM PATTERNS:
+- When drum patterns are available, check groove compatibility. Same style = safe to blend. Conflicting styles = use one song's drums at a time.
+- Sparse drum patterns leave room for rhythmically complex vocals. Dense patterns work better under simpler vocal lines.
+
+WORD-LEVEL TIMING:
+- When word-level timing is available, use it for precision: vocal gaps >500ms are safe transition points.
+- Place section transitions during word gaps, not mid-phrase.
+- Instrumental energy should breathe WITH the vocal: pull back during rapid-fire lyrics, push forward during held notes or gaps."""
+
     # Ordering principle: definitions first, rules after.
     # Block 1 (ontology): role → arrangement rules → transitions → arrangement approach → stem roles → genre
     # Block 2 (constraints): guards → artifact awareness → tempo/key rules → explanation/warnings
+    # Block 3 (conditional): PulseMap analysis rules
     static_sections = [
         section_1, section_2, section_3, section_4, section_5, section_6,
-        section_7, section_8, section_9, section_10,
+        section_7, section_8, section_9, section_10, section_11,
     ]
     return {
         "type": "text",
@@ -432,7 +454,11 @@ Arrangements shorter than {int(min_ref * 0.7)}s will be REJECTED."""
         song_data_parts.append("\n=== LAYER 4: CROSS-SONG ===")
         song_data_parts.append(cross_song)
 
-    lyrics_layer = _build_lyrics_layer(lyrics_a, lyrics_b)
+    lyrics_layer = _build_lyrics_layer(
+        lyrics_a, lyrics_b,
+        word_alignment_a=getattr(song_a_meta, "word_alignment", None),
+        word_alignment_b=getattr(song_b_meta, "word_alignment", None),
+    )
     if lyrics_layer:
         song_data_parts.append(lyrics_layer)
 
@@ -544,6 +570,18 @@ def _build_stem_character(
     result = f"{label} stems: " + ". ".join(stem_descs) + "."
     if suppressed:
         result += f" ({' | '.join(suppressed)})"
+
+    # PulseMap: Drum pattern info
+    drum_pattern = getattr(meta, "drum_pattern", None)
+    if drum_pattern and drum_pattern.total_hits > 0:
+        style = drum_pattern.style_hint.replace("_", "-")
+        result += (
+            f" Drum pattern: {style} "
+            f"(kick={drum_pattern.kick_count}, "
+            f"snare={drum_pattern.snare_count}, "
+            f"hihat={drum_pattern.hihat_count})."
+        )
+
     return result
 
 
@@ -586,6 +624,19 @@ def _build_song_info(
         else:
             overview += " Energy: moderate dynamics."
 
+    # PulseMap: Chord progression summary
+    chord_prog = getattr(meta, "chord_progression", None)
+    if chord_prog and chord_prog.progression_summary:
+        overview += f" Chords: {chord_prog.progression_summary}."
+
+    # PulseMap: Vocal polyphony info
+    polyphony = getattr(meta, "polyphony_info", None)
+    if polyphony is not None:
+        if polyphony.polyphonic:
+            overview += " Vocal polyphony: harmony/duet detected."
+        else:
+            overview += " Vocal polyphony: solo voice."
+
     return overview
 
 
@@ -602,10 +653,14 @@ def _build_lyrics_layer(
     lyrics_a: LyricsData | None,
     lyrics_b: LyricsData | None,
     max_lines_per_song: int = 60,
+    word_alignment_a: "WordAlignment | None" = None,
+    word_alignment_b: "WordAlignment | None" = None,
 ) -> str:
     """Build Layer 5: Lyrics text for the system prompt.
 
     Formats synced lyrics with bar numbers, plain lyrics with just text.
+    When word_alignment is available for a song, appends a compact word-level
+    timing sample (additive -- bar-level lyrics remain as the primary view).
     Caps at max_lines_per_song per song; samples evenly if longer.
     Returns empty string if no lyrics exist for either song.
     """
@@ -616,6 +671,8 @@ def _build_lyrics_layer(
         "\n=== LAYER 5: LYRICS ===",
         "Use these lyrics to avoid cutting mid-phrase, identify hooks, and match themes to the prompt.",
     ]
+
+    word_alignments = {"Song A": word_alignment_a, "Song B": word_alignment_b}
 
     for label, lyrics in [("Song A", lyrics_a), ("Song B", lyrics_b)]:
         if not lyrics or not lyrics.lines:
@@ -637,7 +694,37 @@ def _build_lyrics_layer(
             else:
                 parts.append(f"  {line.text}")
 
+        # PulseMap: Word-level timing (additive, shown after bar-level lyrics)
+        wa = word_alignments.get(label)
+        if wa and wa.words:
+            parts.append(f"\n{label} word timing (sample):")
+            parts.append(_format_word_timing_sample(wa.words))
+
     return "\n".join(parts)
+
+
+def _format_word_timing_sample(
+    words: list,
+    max_words: int = 30,
+) -> str:
+    """Format a compact word-timing sample from WordEvent list.
+
+    Shows up to max_words words in "[ms] word" format, sampled evenly
+    if longer. Keeps token count reasonable (~100 tokens for 30 words).
+    """
+    if not words:
+        return "  (no words)"
+
+    sample = words
+    if len(words) > max_words:
+        step = len(words) / max_words
+        sample = [words[int(i * step)] for i in range(max_words)]
+
+    chunks: list[str] = []
+    for w in sample:
+        chunks.append(f"[{w.t}ms] {w.text}")
+
+    return "  " + " ".join(chunks)
 
 
 def _build_cross_song_layer(
@@ -679,6 +766,20 @@ def _build_cross_song_layer(
         ]
         if inst_sections:
             lines.append(f"Instrumental source: Song B clean sections at {', '.join(inst_sections)}.")
+
+    # PulseMap: Chord compatibility between songs
+    chords_a = getattr(meta_a, "chord_progression", None)
+    chords_b = getattr(meta_b, "chord_progression", None)
+    if chords_a and chords_b and chords_a.unique_chords and chords_b.unique_chords:
+        shared = set(chords_a.unique_chords) & set(chords_b.unique_chords)
+        if shared:
+            shared_str = ", ".join(sorted(shared))
+            lines.append(
+                f"Chord compatibility: both songs share {shared_str} "
+                f"-- good harmonic overlap."
+            )
+        else:
+            lines.append("Chord compatibility: no shared chords -- watch for harmonic clashes.")
 
     # Stretch info
     if stretch_pct is not None and stretch_pct > 0:
