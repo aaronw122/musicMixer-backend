@@ -1527,6 +1527,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "beat-this" },
+    { name = "essentia", marker = "python_full_version < '3.12'" },
     { name = "fastapi" },
     { name = "librosa" },
     { name = "modal" },
@@ -1547,10 +1549,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-analysis = [
-    { name = "beat-this" },
-    { name = "essentia", marker = "python_full_version < '3.12'" },
-]
 local = [
     { name = "audio-separator" },
     { name = "onnxruntime" },
@@ -1568,8 +1566,8 @@ dev = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.84.0" },
     { name = "audio-separator", marker = "extra == 'local'", specifier = ">=0.41.1" },
-    { name = "beat-this", marker = "extra == 'analysis'", specifier = ">=1.1.0" },
-    { name = "essentia", marker = "python_full_version < '3.12' and extra == 'analysis'" },
+    { name = "beat-this", specifier = ">=1.1.0" },
+    { name = "essentia", marker = "python_full_version < '3.12'" },
     { name = "fastapi", specifier = ">=0.133.0" },
     { name = "librosa", specifier = ">=0.11.0" },
     { name = "modal", specifier = ">=1.3.4" },
@@ -1589,7 +1587,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.41.0" },
     { name = "yt-dlp", specifier = ">=2025.1.0" },
 ]
-provides-extras = ["local", "analysis"]
+provides-extras = ["local"]
 
 [package.metadata.requires-dev]
 dev = [
