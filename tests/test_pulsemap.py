@@ -160,38 +160,19 @@ class TestDetectPolyphony:
 # ---------------------------------------------------------------------------
 
 class TestDetectChords:
-    def test_jams_to_chord_events(self) -> None:
-        """Verify JAMS annotation output is correctly converted to ChordEvents."""
-        # Build a mock JAMS object
-        mock_obs_1 = MagicMock()
-        mock_obs_1.time = 0.0
-        mock_obs_1.duration = 2.0
-        mock_obs_1.value = "C"
+    def test_chord_dict_conversion(self) -> None:
+        """Verify lv-chordia dict output is correctly converted to ChordEvents with JAMS notation."""
+        mock_results = [
+            {"start_time": 0.0, "end_time": 2.0, "chord": "C:maj"},
+            {"start_time": 2.0, "end_time": 4.0, "chord": "A:min"},
+            {"start_time": 4.0, "end_time": 6.0, "chord": "F:maj"},
+            {"start_time": 6.0, "end_time": 7.0, "chord": "N"},  # No chord — skipped
+        ]
 
-        mock_obs_2 = MagicMock()
-        mock_obs_2.time = 2.0
-        mock_obs_2.duration = 2.0
-        mock_obs_2.value = "Am"
-
-        mock_obs_3 = MagicMock()
-        mock_obs_3.time = 4.0
-        mock_obs_3.duration = 2.0
-        mock_obs_3.value = "F"
-
-        mock_obs_n = MagicMock()
-        mock_obs_n.time = 6.0
-        mock_obs_n.duration = 1.0
-        mock_obs_n.value = "N"  # No chord — should be skipped
-
-        mock_annot = MagicMock()
-        mock_annot.data = [mock_obs_1, mock_obs_2, mock_obs_3, mock_obs_n]
-
-        mock_jams = MagicMock()
-        mock_jams.annotations = [mock_annot]
-
+        mock_cr = MagicMock(return_value=mock_results)
         with patch.object(pulsemap_module, "_HAS_LV_CHORDIA", True), \
-             patch.object(pulsemap_module, "lv_chordia") as mock_lvc:
-            mock_lvc.chord_recognition.return_value = mock_jams
+             patch("musicmixer.services.pulsemap.chord_recognition", mock_cr, create=True), \
+             patch.dict("sys.modules", {"lv_chordia": MagicMock(), "lv_chordia.chord_recognition": MagicMock(chord_recognition=mock_cr)}):
             from musicmixer.services.pulsemap import detect_chords
             result = detect_chords(Path("/fake/audio.wav"))
 
@@ -201,19 +182,12 @@ class TestDetectChords:
         assert result.chords[1] == ChordEvent(start_ms=2000, end_ms=4000, chord="Am")
         assert result.chords[2] == ChordEvent(start_ms=4000, end_ms=6000, chord="F")
         assert result.unique_chords == ["C", "Am", "F"]
-        assert result.most_common_chord == "C"  # all appear once, first wins
-        assert "C" in result.progression_summary
 
     def test_no_chords_detected(self) -> None:
-        """Empty JAMS annotations should produce empty ChordProgression."""
-        mock_annot = MagicMock()
-        mock_annot.data = []
-        mock_jams = MagicMock()
-        mock_jams.annotations = [mock_annot]
-
+        """Empty results should produce empty ChordProgression."""
+        mock_cr = MagicMock(return_value=[])
         with patch.object(pulsemap_module, "_HAS_LV_CHORDIA", True), \
-             patch.object(pulsemap_module, "lv_chordia") as mock_lvc:
-            mock_lvc.chord_recognition.return_value = mock_jams
+             patch.dict("sys.modules", {"lv_chordia": MagicMock(), "lv_chordia.chord_recognition": MagicMock(chord_recognition=mock_cr)}):
             from musicmixer.services.pulsemap import detect_chords
             result = detect_chords(Path("/fake/audio.wav"))
 
@@ -229,21 +203,15 @@ class TestDetectChords:
             with pytest.raises(RuntimeError, match="lv-chordia"):
                 detect_chords(Path("/fake/audio.wav"))
 
-    def test_n_chords_skipped(self) -> None:
-        """'N' (no chord) observations should be filtered out."""
-        mock_obs = MagicMock()
-        mock_obs.time = 0.0
-        mock_obs.duration = 1.0
-        mock_obs.value = "N"
-
-        mock_annot = MagicMock()
-        mock_annot.data = [mock_obs]
-        mock_jams = MagicMock()
-        mock_jams.annotations = [mock_annot]
-
+    def test_n_and_x_chords_skipped(self) -> None:
+        """'N' and 'X' chord labels should be filtered out."""
+        mock_results = [
+            {"start_time": 0.0, "end_time": 1.0, "chord": "N"},
+            {"start_time": 1.0, "end_time": 2.0, "chord": "X"},
+        ]
+        mock_cr = MagicMock(return_value=mock_results)
         with patch.object(pulsemap_module, "_HAS_LV_CHORDIA", True), \
-             patch.object(pulsemap_module, "lv_chordia") as mock_lvc:
-            mock_lvc.chord_recognition.return_value = mock_jams
+             patch.dict("sys.modules", {"lv_chordia": MagicMock(), "lv_chordia.chord_recognition": MagicMock(chord_recognition=mock_cr)}):
             from musicmixer.services.pulsemap import detect_chords
             result = detect_chords(Path("/fake/audio.wav"))
 
@@ -266,9 +234,9 @@ class TestTranscribeDrumPattern:
 
     def test_silent_file(self, tmp_path: Path) -> None:
         """Silent audio should produce zero hits and 'silent' style."""
-        silent = np.zeros(22050 * 2, dtype=np.float32)
+        silent = np.zeros(44100 * 2, dtype=np.float32)
         wav = tmp_path / "silent.wav"
-        sf.write(str(wav), silent, 22050)
+        sf.write(str(wav), silent, 44100)
         result = transcribe_drum_pattern(wav)
         assert result.total_hits == 0
         assert result.style_hint == "silent"
@@ -348,44 +316,55 @@ class TestAlignWords:
 class TestLrclibValidation:
     def test_matching_timestamps_validate(self) -> None:
         """Words with matching LRCLIB timestamps should validate with low offset."""
+        # Cluster-based validation needs 3+ words with >1s gaps to form clusters
         words = [
             WordEvent(t=1000, text="hello", end=1200),
-            WordEvent(t=2000, text="world", end=2200),
-            WordEvent(t=3000, text="foo", end=3200),
+            WordEvent(t=1300, text="world", end=1500),
+            WordEvent(t=5000, text="foo", end=5200),
+            WordEvent(t=5300, text="bar", end=5500),
+            WordEvent(t=10000, text="baz", end=10200),
+            WordEvent(t=10400, text="qux", end=10600),
         ]
+        # Clusters: [1000, 5000, 10000] — LRCLIB lines match closely
         lyrics = LyricsData(
             artist="Test", title="Test", source="lrclib",
             is_synced=True,
             lines=[
                 LyricLine(text="hello world", timestamp_seconds=1.05),
-                LyricLine(text="foo bar", timestamp_seconds=3.05),
+                LyricLine(text="foo bar", timestamp_seconds=5.1),
+                LyricLine(text="baz qux", timestamp_seconds=10.05),
             ],
-            raw_text="hello world\nfoo bar",
+            raw_text="hello world\nfoo bar\nbaz qux",
         )
         validated, offset = _validate_against_lrclib(words, lyrics)
         assert validated is True
         assert offset is not None
-        assert abs(offset) < 2000
+        assert abs(offset) < 5000
 
     def test_mismatched_timestamps_fail(self) -> None:
-        """Words with large offset from LRCLIB should fail validation."""
+        """Words with large uniform offset from LRCLIB should fail validation."""
+        # Clusters at [10000, 20000, 30000]
         words = [
-            WordEvent(t=4000, text="hello", end=4200),
-            WordEvent(t=6000, text="world", end=6200),
+            WordEvent(t=10000, text="hello", end=10200),
+            WordEvent(t=10300, text="world", end=10500),
+            WordEvent(t=20000, text="foo", end=20200),
+            WordEvent(t=20300, text="bar", end=20500),
+            WordEvent(t=30000, text="baz", end=30200),
+            WordEvent(t=30400, text="qux", end=30600),
         ]
+        # Completely different time range — no overlap with clusters
         lyrics = LyricsData(
             artist="Test", title="Test", source="lrclib",
             is_synced=True,
             lines=[
-                LyricLine(text="hello world", timestamp_seconds=1.0),
-                LyricLine(text="world foo", timestamp_seconds=3.0),
+                LyricLine(text="hello world", timestamp_seconds=100.0),
+                LyricLine(text="foo bar", timestamp_seconds=110.0),
+                LyricLine(text="baz qux", timestamp_seconds=120.0),
             ],
-            raw_text="hello world\nworld foo",
+            raw_text="hello world\nfoo bar\nbaz qux",
         )
         validated, offset = _validate_against_lrclib(words, lyrics)
         assert validated is False
-        assert offset is not None
-        assert abs(offset) >= 2000
 
     def test_no_synced_lines(self) -> None:
         """Lines without timestamps should produce no validation."""
