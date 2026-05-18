@@ -154,6 +154,64 @@ class LyricsData:
 
 
 # ---------------------------------------------------------------------------
+# PulseMap analysis (chord, polyphony, drum, word alignment)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ChordEvent:
+    """A single chord event with start/end timing."""
+    start_ms: int
+    end_ms: int
+    chord: str  # e.g. "Cmaj7", "Dm", "G7"
+
+
+@dataclass
+class ChordProgression:
+    """Chord progression analysis for a song."""
+    chords: list[ChordEvent]
+    unique_chords: list[str]
+    most_common_chord: str
+    progression_summary: str  # e.g. "I-V-vi-IV in C major"
+
+
+@dataclass
+class PolyphonyInfo:
+    """Vocal polyphony detection result."""
+    polyphonic: bool
+    method: str  # "mid_side" or "klapuri"
+    gate1_ratio: float | None
+    gate2_percent: float | None
+
+
+@dataclass
+class DrumPattern:
+    """Drum hit classification summary."""
+    kick_count: int
+    snare_count: int
+    hihat_count: int
+    total_hits: int
+    duration_ms: int
+    style_hint: str  # "four_on_floor", "breakbeat", "sparse", etc.
+
+
+@dataclass
+class WordEvent:
+    """A single word with start/end timing."""
+    t: int        # start time ms
+    text: str     # single word
+    end: int      # end time ms
+
+
+@dataclass
+class WordAlignment:
+    """Word-level lyric alignment result."""
+    words: list[WordEvent]
+    source: str   # "whisperx"
+    lrclib_validated: bool      # whether LRCLIB timestamps matched
+    lrclib_offset_ms: int | None  # median offset if validated
+
+
+# ---------------------------------------------------------------------------
 # Audio analysis (Step 2)
 # ---------------------------------------------------------------------------
 
@@ -178,6 +236,11 @@ class AudioMetadata:
     mean_rms: Optional[float] = None       # From original mix audio (NOT summed stems)
     stem_analysis: Optional[StemAnalysis] = None
     song_structure: Optional[SongStructure] = None
+    # PulseMap analysis (chord, polyphony, drum, word alignment)
+    chord_progression: Optional[ChordProgression] = None
+    polyphony_info: Optional[PolyphonyInfo] = None
+    drum_pattern: Optional[DrumPattern] = None
+    word_alignment: Optional[WordAlignment] = None
 
 
 # ---------------------------------------------------------------------------

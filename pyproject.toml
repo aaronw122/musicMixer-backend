@@ -24,9 +24,14 @@ dependencies = [
     "yt-dlp>=2025.1.0",
     "beat-this>=1.1.0",
     "essentia; python_version < '3.12'",
+    "lv-chordia>=0.1.0",
+    "whisperx>=3.0.0",
 ]
 
 [project.optional-dependencies]
+pulsemap-full = [
+    "basic-pitch>=0.3.0",
+]
 local = [
     "audio-separator>=0.41.1",
     "onnxruntime>=1.24.2",

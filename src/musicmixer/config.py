@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     youtube_proxy_service_url: str = ""  # URL of yt-proxy microservice (e.g. https://yt-proxy.awill.co)
     youtube_proxy_api_key: str = ""  # API key for yt-proxy service
 
+    # PulseMap analysis toggles
+    pulsemap_chords_enabled: bool = True
+    pulsemap_polyphony_enabled: bool = True
+    pulsemap_drums_enabled: bool = True
+    pulsemap_word_align_enabled: bool = True
+
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
