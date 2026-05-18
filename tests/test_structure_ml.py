@@ -4,7 +4,7 @@ Covers:
 - _map_labels(): SongFormer label → musicMixer vocabulary mapping
 - _segments_to_sections(): ML segments → SectionInfo with bar indices
 - _enrich_sections(): Adding audio features to ML-detected sections
-- analyze_structure_ml(): Modal-first with local fallback
+- analyze_structure_ml(): Modal GPU, returns [] on failure
 - analyze_stems() ML path: ml_segments triggers ML path, skips heuristic
 """
 
@@ -439,25 +439,17 @@ class TestAnalyzeStructureMl:
         assert result[1]["label"] == "verse"
         assert result[2]["label"] == "chorus"
 
-    def test_modal_failure_falls_back_to_local(self, tmp_path: Path) -> None:
-        """When Modal raises, local CPU fallback is used."""
-        fallback_segments = [
-            {"label": "verse", "start": 0.0, "end": 20.0},
-        ]
+    def test_modal_failure_returns_empty_segments(self, tmp_path: Path) -> None:
+        """When Modal raises, return [] instead of falling back to CPU."""
         audio_path = tmp_path / "test.wav"
 
         with patch(
             "musicmixer.services.structure_ml._analyze_modal",
             side_effect=RuntimeError("Modal down"),
-        ), patch(
-            "musicmixer.services.structure_ml._analyze_local",
-            return_value=fallback_segments,
-        ) as mock_local:
+        ):
             result = analyze_structure_ml(audio_path)
 
-        mock_local.assert_called_once_with(audio_path)
-        assert len(result) == 1
-        assert result[0]["label"] == "verse"
+        assert result == []
 
     def test_returned_segments_have_correct_keys(self, tmp_path: Path) -> None:
         """Each returned segment must have label, start, end."""
@@ -491,19 +483,17 @@ class TestAnalyzeStructureMl:
         assert result[1]["label"] == "build"        # pre-chorus → build
         assert result[2]["label"] == "instrumental"  # solo → instrumental
 
-    def test_both_backends_fail(self, tmp_path: Path) -> None:
-        """If Modal fails and local also fails, the exception propagates."""
+    def test_modal_failure_returns_empty(self, tmp_path: Path) -> None:
+        """When Modal fails, return [] (no RuntimeError, no CPU fallback)."""
         audio_path = tmp_path / "test.wav"
 
         with patch(
             "musicmixer.services.structure_ml._analyze_modal",
             side_effect=RuntimeError("Modal down"),
-        ), patch(
-            "musicmixer.services.structure_ml._analyze_local",
-            side_effect=RuntimeError("Local also failed"),
         ):
-            with pytest.raises(RuntimeError, match="Local also failed"):
-                analyze_structure_ml(audio_path)
+            result = analyze_structure_ml(audio_path)
+
+        assert result == []
 
 
 # ---------------------------------------------------------------------------
