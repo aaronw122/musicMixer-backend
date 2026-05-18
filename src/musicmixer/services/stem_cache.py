@@ -14,6 +14,7 @@ import hashlib
 import logging
 import os
 import shutil
+import threading
 import uuid
 from pathlib import Path
 
@@ -25,6 +26,19 @@ logger = logging.getLogger(__name__)
 # Cache validation checks that at least one stem exists and all present stems are non-zero.
 EXPECTED_6_STEMS = {"vocals", "drums", "bass", "guitar", "piano", "other"}
 EXPECTED_4_STEMS = {"vocals", "drums", "bass", "other"}
+
+_cache_write_locks_guard = threading.Lock()
+_cache_write_locks: dict[str, threading.Lock] = {}
+
+
+def _get_cache_write_lock(cache_key: str) -> threading.Lock:
+    """Return a process-local lock for writes to one cache key."""
+    with _cache_write_locks_guard:
+        lock = _cache_write_locks.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _cache_write_locks[cache_key] = lock
+        return lock
 
 
 def get_cache_key(audio_path: Path) -> str:
@@ -143,19 +157,20 @@ def cache_stems(cache_key: str, stems_dir: Path) -> None:
         # remove the target first. A concurrent writer may race us here;
         # if the rename fails because the other thread placed the target
         # first, that's fine — both wrote identical stems.
-        try:
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-            os.rename(tmp_dir, target)
-        except OSError:
-            if target.exists():
-                # Another thread won the race and placed the target.
-                # Clean up our temp dir — the cached result is valid.
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            else:
-                # Genuine failure (cross-device, permissions, etc.)
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                raise
+        with _get_cache_write_lock(cache_key):
+            try:
+                if target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+                os.rename(tmp_dir, target)
+            except OSError:
+                if target.exists():
+                    # Another process won the race and placed the target.
+                    # Clean up our temp dir — the cached result is valid.
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                else:
+                    # Genuine failure (cross-device, permissions, etc.)
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    raise
 
         logger.info(
             "Cached %d stems for %s (%s)",
