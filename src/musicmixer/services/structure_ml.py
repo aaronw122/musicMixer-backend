@@ -1,7 +1,7 @@
 """ML-based song structure detection using SongFormer.
 
-Wraps SongFormer inference for section boundary detection. Tries Modal
-GPU first, falls back to local CPU inference.
+Wraps SongFormer inference for section boundary detection. Uses Modal
+GPU; returns empty on failure so the pipeline falls back to heuristics.
 """
 
 from __future__ import annotations
@@ -136,23 +136,18 @@ def analyze_structure_ml(audio_path: Path) -> list[dict]:
     """Detect song sections using SongFormer.
 
     Returns a list of segment dicts with keys ``label``, ``start``, and
-    ``end`` (seconds, float). Tries Modal GPU first; falls back to local
-    CPU inference on any failure.
+    ``end`` (seconds, float). Uses Modal GPU; returns ``[]`` on failure
+    so the caller can fall back to heuristic detection.
     """
-    raw_segments: list[dict] | None = None
-
-    # Try Modal first
     try:
         raw_segments = _analyze_modal(audio_path)
     except Exception:
         logger.warning(
-            "Modal SongFormer inference failed, falling back to local CPU",
+            "Modal SongFormer inference failed — skipping ML structure "
+            "detection (pipeline will use heuristic fallback)",
             exc_info=True,
         )
-
-    # Fallback to local CPU
-    if raw_segments is None:
-        raw_segments = _analyze_local(audio_path)
+        return []
 
     logger.info(
         "Raw SongFormer segments: %s",
