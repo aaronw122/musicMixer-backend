@@ -84,6 +84,168 @@ def trim_audio(audio: np.ndarray, sr: int, start_sec: float, end_sec: float) -> 
     return audio[start_sample:end_sample]
 
 
+def pre_trim_for_processing(
+    audio_path: Path,
+    max_duration_seconds: float = 210.0,
+    silence_threshold_db: float = -40.0,
+) -> Path:
+    """Trim an audio file to *max_duration_seconds* using ffmpeg, skipping leading silence.
+
+    Operates at the file level with ffmpeg/ffprobe subprocess calls -- no numpy
+    loading, no soundfile.  Safe: never crashes the pipeline; on any error it
+    logs a warning and returns the original path unchanged.
+
+    Steps:
+        1. Probe duration with ffprobe (cheap, no decode).
+        2. If already short enough, return early.
+        3. Detect leading silence with ffmpeg silencedetect and parse the first
+           ``silence_end`` value to derive a start offset (capped at 10 s).
+        4. Trim with ``ffmpeg -y -ss <offset> -i <path> -t <max_duration> -c copy``.
+           Write to a temp file, then replace the original.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: probe duration
+    # ------------------------------------------------------------------
+    try:
+        probe_result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if probe_result.returncode != 0:
+            logger.warning(
+                "ffprobe failed for %s (rc=%d), skipping pre-trim",
+                audio_path.name,
+                probe_result.returncode,
+            )
+            return audio_path
+
+        duration = float(probe_result.stdout.strip())
+    except (ValueError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning("ffprobe error for %s: %s -- skipping pre-trim", audio_path.name, exc)
+        return audio_path
+
+    # ------------------------------------------------------------------
+    # Step 2: check whether trimming is needed
+    # ------------------------------------------------------------------
+    if duration <= max_duration_seconds:
+        logger.info(
+            "pre_trim: %s is %.1fs (<= %.1fs), no trim needed",
+            audio_path.name,
+            duration,
+            max_duration_seconds,
+        )
+        return audio_path
+
+    logger.info(
+        "pre_trim: %s is %.1fs (> %.1fs), will trim",
+        audio_path.name,
+        duration,
+        max_duration_seconds,
+    )
+
+    # ------------------------------------------------------------------
+    # Step 3: detect leading silence to find a good start offset
+    # ------------------------------------------------------------------
+    start_offset: float = 0.0
+    try:
+        silence_result = subprocess.run(
+            [
+                "ffmpeg",
+                "-i", str(audio_path),
+                "-af", f"silencedetect=noise={silence_threshold_db}dB:d=0.5",
+                "-f", "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        # silencedetect writes to stderr; look for the first silence_end
+        for line in silence_result.stderr.splitlines():
+            if "silence_end" in line:
+                # Format: "[silencedetect @ ...] silence_end: 1.234 | silence_duration: ..."
+                for part in line.split():
+                    try:
+                        val = float(part)
+                        # The first float after "silence_end:" is the end timestamp
+                        if val > 0:
+                            start_offset = min(val, 10.0)
+                            break
+                    except ValueError:
+                        continue
+                break  # only need the first silence_end
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning(
+            "Silence detection failed for %s: %s -- trimming from start",
+            audio_path.name,
+            exc,
+        )
+
+    logger.info(
+        "pre_trim: start_offset=%.2fs, max_duration=%.1fs for %s",
+        start_offset,
+        max_duration_seconds,
+        audio_path.name,
+    )
+
+    # ------------------------------------------------------------------
+    # Step 4: trim with ffmpeg -c copy (fast, no re-encode)
+    # ------------------------------------------------------------------
+    tmp_dir = Path(tempfile.gettempdir())
+    uid = uuid4().hex[:8]
+    tmp_output = tmp_dir / f"pretrim_{uid}{audio_path.suffix}"
+
+    try:
+        trim_cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss", str(start_offset),
+            "-i", str(audio_path),
+            "-t", str(max_duration_seconds),
+            "-c", "copy",
+            str(tmp_output),
+        ]
+        trim_result = subprocess.run(
+            trim_cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if trim_result.returncode != 0:
+            logger.warning(
+                "ffmpeg trim failed for %s (rc=%d): %s -- returning original",
+                audio_path.name,
+                trim_result.returncode,
+                trim_result.stderr[:300],
+            )
+            tmp_output.unlink(missing_ok=True)
+            return audio_path
+
+        # Replace the original file with the trimmed version
+        import shutil
+
+        shutil.move(str(tmp_output), str(audio_path))
+        logger.info("pre_trim: replaced %s with trimmed version", audio_path.name)
+        return audio_path
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning(
+            "ffmpeg trim error for %s: %s -- returning original",
+            audio_path.name,
+            exc,
+        )
+        tmp_output.unlink(missing_ok=True)
+        return audio_path
+
+
 def check_rubberband_version() -> int:
     """Check rubberband CLI version. Returns major version (2, 3, or 4).
 
