@@ -485,6 +485,17 @@ def align_words(
     import sys
     import torch
 
+    # Torch 2.6+ defaults torch.load to weights_only=True, which blocks
+    # pyannote's VAD checkpoint (uses omegaconf globals). Allowlist them.
+    try:
+        import omegaconf
+        torch.serialization.add_safe_globals([
+            omegaconf.listconfig.ListConfig,
+            omegaconf.dictconfig.DictConfig,
+        ])
+    except (ImportError, AttributeError):
+        pass
+
     # Patch whisperx logging to use stderr (it defaults to stdout, polluting output)
     import whisperx as _whisperx  # noqa: N813 — lazy import to avoid loading torch at module level
     try:
