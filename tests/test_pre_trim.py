@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from musicmixer.services.processor import pre_trim_for_processing
 
@@ -77,6 +75,14 @@ def _trim_fail(rc: int = 1) -> MagicMock:
     return result
 
 
+def _trim_command(mock_run: MagicMock) -> list[str]:
+    return mock_run.call_args_list[2][0][0]
+
+
+def _command_option(command: list[str], option: str) -> str:
+    return command[command.index(option) + 1]
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -129,22 +135,15 @@ class TestLongFileGetsTrimmed:
         assert result == audio
         assert mock_run.call_count == 3
 
-        # Verify the trim call (3rd call) has correct args
-        trim_call_args = mock_run.call_args_list[2][0][0]
-        assert trim_call_args[0] == "ffmpeg"
-        assert "-y" in trim_call_args
-        assert "-ss" in trim_call_args
-        assert "-t" in trim_call_args
-        assert "-c" in trim_call_args
-        assert "copy" in trim_call_args
-
-        # Verify -t value is the max_duration_seconds
-        t_idx = trim_call_args.index("-t")
-        assert trim_call_args[t_idx + 1] == "210.0"
-
-        # Verify -ss offset is 0.0 (no silence detected)
-        ss_idx = trim_call_args.index("-ss")
-        assert trim_call_args[ss_idx + 1] == "0.0"
+        trim_command = _trim_command(mock_run)
+        assert trim_command[0] == "ffmpeg"
+        assert "-y" in trim_command
+        assert "-ss" in trim_command
+        assert "-t" in trim_command
+        assert "-c" in trim_command
+        assert "copy" in trim_command
+        assert _command_option(trim_command, "-t") == "210.0"
+        assert _command_option(trim_command, "-ss") == "0.0"
 
     @patch("shutil.move")
     @patch("musicmixer.services.processor.subprocess.run")
@@ -161,10 +160,8 @@ class TestLongFileGetsTrimmed:
 
         result = pre_trim_for_processing(audio, max_duration_seconds=210.0)
 
-        # shutil.move should be called to replace original with trimmed file
         assert mock_move.call_count == 1
         move_args = mock_move.call_args[0]
-        # Second arg should be the original audio path
         assert move_args[1] == str(audio)
 
 
@@ -285,10 +282,8 @@ class TestLeadingSilenceSkipped:
 
         assert result == audio
 
-        # Verify the trim call uses 3.5 as the -ss offset
-        trim_call_args = mock_run.call_args_list[2][0][0]
-        ss_idx = trim_call_args.index("-ss")
-        assert trim_call_args[ss_idx + 1] == "3.5"
+        trim_command = _trim_command(mock_run)
+        assert _command_option(trim_command, "-ss") == "3.5"
 
     @patch("shutil.move")
     @patch("musicmixer.services.processor.subprocess.run")
@@ -305,10 +300,8 @@ class TestLeadingSilenceSkipped:
 
         result = pre_trim_for_processing(audio, max_duration_seconds=210.0)
 
-        # Verify -ss is 0.0
-        trim_call_args = mock_run.call_args_list[2][0][0]
-        ss_idx = trim_call_args.index("-ss")
-        assert trim_call_args[ss_idx + 1] == "0.0"
+        trim_command = _trim_command(mock_run)
+        assert _command_option(trim_command, "-ss") == "0.0"
 
     @patch("shutil.move")
     @patch("musicmixer.services.processor.subprocess.run")
@@ -327,11 +320,9 @@ class TestLeadingSilenceSkipped:
         result = pre_trim_for_processing(audio, max_duration_seconds=210.0)
 
         assert result == audio
-        # Trim should still happen (3rd call) with offset 0
         assert mock_run.call_count == 3
-        trim_call_args = mock_run.call_args_list[2][0][0]
-        ss_idx = trim_call_args.index("-ss")
-        assert trim_call_args[ss_idx + 1] == "0.0"
+        trim_command = _trim_command(mock_run)
+        assert _command_option(trim_command, "-ss") == "0.0"
 
 
 class TestOffsetCappedAt10s:
@@ -352,10 +343,8 @@ class TestOffsetCappedAt10s:
 
         result = pre_trim_for_processing(audio, max_duration_seconds=210.0)
 
-        # Verify -ss is capped at 10.0, not 25.0
-        trim_call_args = mock_run.call_args_list[2][0][0]
-        ss_idx = trim_call_args.index("-ss")
-        assert trim_call_args[ss_idx + 1] == "10.0"
+        trim_command = _trim_command(mock_run)
+        assert _command_option(trim_command, "-ss") == "10.0"
 
     @patch("shutil.move")
     @patch("musicmixer.services.processor.subprocess.run")
@@ -372,9 +361,8 @@ class TestOffsetCappedAt10s:
 
         result = pre_trim_for_processing(audio, max_duration_seconds=210.0)
 
-        trim_call_args = mock_run.call_args_list[2][0][0]
-        ss_idx = trim_call_args.index("-ss")
-        assert trim_call_args[ss_idx + 1] == "10.0"
+        trim_command = _trim_command(mock_run)
+        assert _command_option(trim_command, "-ss") == "10.0"
 
     @patch("shutil.move")
     @patch("musicmixer.services.processor.subprocess.run")
@@ -391,6 +379,5 @@ class TestOffsetCappedAt10s:
 
         result = pre_trim_for_processing(audio, max_duration_seconds=210.0)
 
-        trim_call_args = mock_run.call_args_list[2][0][0]
-        ss_idx = trim_call_args.index("-ss")
-        assert trim_call_args[ss_idx + 1] == "7.5"
+        trim_command = _trim_command(mock_run)
+        assert _command_option(trim_command, "-ss") == "7.5"

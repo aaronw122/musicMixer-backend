@@ -27,7 +27,7 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import AsyncGenerator, Callable
+from typing import TYPE_CHECKING, AsyncGenerator, Callable
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -37,6 +37,9 @@ from musicmixer.config import settings
 from musicmixer.models import SessionState
 from musicmixer.services.cleanup import cleanup_expired_sessions
 from musicmixer.api.shelf import ensure_on_shelf
+
+if TYPE_CHECKING:
+    from musicmixer.services.youtube import YouTubeAudioResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -72,6 +75,29 @@ def _update_avg_remix_duration(elapsed_seconds: float) -> None:
     with _avg_lock:
         # Exponential moving average (alpha=0.3 gives recent runs more weight)
         _AVG_REMIX_DURATION_S = 0.7 * _AVG_REMIX_DURATION_S + 0.3 * elapsed_seconds
+
+
+def _pre_trim_youtube_download(
+    download_result: "YouTubeAudioResult | None",
+    max_duration_seconds: int,
+) -> None:
+    """Trim long YouTube downloads before GPU-heavy processing."""
+    if download_result is None:
+        return
+
+    if download_result.duration_seconds <= max_duration_seconds:
+        return
+
+    from musicmixer.services.processor import pre_trim_for_processing
+
+    pre_trim_for_processing(
+        download_result.wav_path,
+        max_duration_seconds=max_duration_seconds,
+    )
+    download_result.duration_seconds = min(
+        download_result.duration_seconds,
+        max_duration_seconds,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -361,15 +387,9 @@ def _youtube_pipeline_wrapper(
 
         _emit_monotonic("Both songs downloaded!", 0.45)
 
-        # --- Pre-trim long songs to avoid GPU OOM and speed up processing ---
-        from musicmixer.services.processor import pre_trim_for_processing
-        max_dur = settings.processing_max_duration_seconds
-        if result_a is not None and result_a.duration_seconds > max_dur:
-            pre_trim_for_processing(result_a.wav_path, max_duration_seconds=max_dur)
-            result_a.duration_seconds = min(result_a.duration_seconds, max_dur)
-        if result_b is not None and result_b.duration_seconds > max_dur:
-            pre_trim_for_processing(result_b.wav_path, max_duration_seconds=max_dur)
-            result_b.duration_seconds = min(result_b.duration_seconds, max_dur)
+        max_processing_duration = settings.processing_max_duration_seconds
+        _pre_trim_youtube_download(result_a, max_processing_duration)
+        _pre_trim_youtube_download(result_b, max_processing_duration)
 
         # Check cancellation before starting heavy pipeline work
         from musicmixer.services.pipeline import check_cancelled

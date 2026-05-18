@@ -12,9 +12,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_PINNED_REVISION = "5ac5227fccf286519464fdf211e15b606898408e"
-_HF_REPO = "ASLP-lab/SongFormer"
-
 # Maps SongFormer labels to musicMixer vocabulary.
 LABEL_MAP: dict[str, str] = {
     "intro": "intro",
@@ -31,6 +28,31 @@ LABEL_MAP: dict[str, str] = {
 }
 
 _DEFAULT_LABEL = "verse"
+
+
+def analyze_structure_ml(audio_path: Path) -> list[dict]:
+    """Detect song sections using SongFormer.
+
+    Returns a list of segment dicts with keys ``label``, ``start``, and
+    ``end`` (seconds, float). Uses Modal GPU; returns ``[]`` on failure
+    so the caller can fall back to heuristic detection.
+    """
+    try:
+        raw_segments = _analyze_modal(audio_path)
+    except Exception:
+        logger.warning(
+            "Modal SongFormer inference failed; skipping ML structure "
+            "detection so the pipeline can use heuristic fallback",
+            exc_info=True,
+        )
+        return []
+
+    logger.info("Raw SongFormer segments: %s", _summarize_segments(raw_segments))
+
+    mapped_segments = _map_labels(raw_segments)
+    logger.info("Mapped segments: %s", _summarize_segments(mapped_segments))
+
+    return mapped_segments
 
 
 def _map_labels(segments: list[dict]) -> list[dict]:
@@ -56,54 +78,6 @@ def _map_labels(segments: list[dict]) -> list[dict]:
             "end": float(seg["end"]),
         })
     return mapped
-
-
-def _analyze_local(audio_path: Path) -> list[dict]:
-    """Run SongFormer inference on local CPU.
-
-    Requires transformers, torch, and SongFormer's dependencies to be
-    installed locally. This is a dev/validation fallback — production
-    uses Modal GPU.
-    """
-    import os
-    import sys
-
-    from huggingface_hub import snapshot_download
-    from transformers import AutoModel
-
-    logger.info("Running SongFormer locally on CPU for %s", audio_path.name)
-    t0 = time.monotonic()
-
-    # Download (or locate cached) model repo with all sibling modules.
-    local_dir = snapshot_download(
-        repo_id=_HF_REPO,
-        revision=_PINNED_REVISION,
-        repo_type="model",
-        local_dir_use_symlinks=False,
-        ignore_patterns=["SongFormer.pt", "SongFormer.safetensors"],
-    )
-
-    # SongFormer's custom code imports sibling modules from the repo dir.
-    if local_dir not in sys.path:
-        sys.path.insert(0, local_dir)
-    os.environ["SONGFORMER_LOCAL_DIR"] = local_dir
-
-    model = AutoModel.from_pretrained(
-        local_dir,
-        trust_remote_code=True,
-        low_cpu_mem_usage=False,
-    )
-    model.eval()
-
-    raw_segments: list[dict] = model(str(audio_path))
-
-    elapsed = time.monotonic() - t0
-    logger.info(
-        "Local SongFormer inference completed in %.1fs (%d segments)",
-        elapsed,
-        len(raw_segments),
-    )
-    return raw_segments
 
 
 def _analyze_modal(audio_path: Path) -> list[dict]:
@@ -132,33 +106,12 @@ def _analyze_modal(audio_path: Path) -> list[dict]:
     return raw_segments
 
 
-def analyze_structure_ml(audio_path: Path) -> list[dict]:
-    """Detect song sections using SongFormer.
-
-    Returns a list of segment dicts with keys ``label``, ``start``, and
-    ``end`` (seconds, float). Uses Modal GPU; returns ``[]`` on failure
-    so the caller can fall back to heuristic detection.
-    """
-    try:
-        raw_segments = _analyze_modal(audio_path)
-    except Exception:
-        logger.warning(
-            "Modal SongFormer inference failed — skipping ML structure "
-            "detection (pipeline will use heuristic fallback)",
-            exc_info=True,
+def _summarize_segments(segments: list[dict]) -> list[tuple[str | None, float, float]]:
+    return [
+        (
+            segment.get("label"),
+            round(segment.get("start", 0), 2),
+            round(segment.get("end", 0), 2),
         )
-        return []
-
-    logger.info(
-        "Raw SongFormer segments: %s",
-        [(s.get("label"), round(s.get("start", 0), 2), round(s.get("end", 0), 2)) for s in raw_segments],
-    )
-
-    mapped = _map_labels(raw_segments)
-
-    logger.info(
-        "Mapped segments: %s",
-        [(s["label"], round(s["start"], 2), round(s["end"], 2)) for s in mapped],
-    )
-
-    return mapped
+        for segment in segments
+    ]
