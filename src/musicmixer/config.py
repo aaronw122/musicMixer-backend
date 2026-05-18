@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 3
     queue_entry_ttl_minutes: int = 150
     processing_timeout_minutes: int = 20
+    processing_max_duration_seconds: int = 210  # trim input audio longer than 3:30 before processing
     distributed_limiter_enabled: bool = False
 
     # Stem separation
