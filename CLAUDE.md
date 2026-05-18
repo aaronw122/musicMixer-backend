@@ -209,12 +209,18 @@ WhisperX (word alignment) requires a one-time model pre-download:
 
 ```bash
 cd backend
-uv run python -c "import whisperx; whisperx.load_model('base', 'cpu', compute_type='int8', language='en')"
+uv run python -c "
+import torch, omegaconf
+torch.serialization.add_safe_globals([omegaconf.listconfig.ListConfig, omegaconf.dictconfig.DictConfig])
+import whisperx
+whisperx.load_model('base', 'cpu', compute_type='int8', language='en')
+print('Models downloaded successfully')
+"
 ```
 
 This downloads the Whisper base model, pyannote VAD model, and wav2vec2 alignment model (~1.5GB total). Without this, word alignment will fail on first run.
 
-**Torch 2.6+ compatibility:** The pyannote VAD checkpoint uses `omegaconf` globals that torch's `weights_only=True` default blocks. This is handled automatically in `pulsemap.py` via `torch.serialization.add_safe_globals()`.
+**Torch 2.6+ compatibility:** The pyannote VAD checkpoint uses `omegaconf` globals that torch's `weights_only=True` default blocks. The `add_safe_globals` call above (and in `pulsemap.py`) allowlists them.
 
 ## Lessons Learned
 
