@@ -485,12 +485,6 @@ def align_words(
     import sys
     import torch
 
-    # Torch 2.6+ defaults torch.load to weights_only=True, which blocks
-    # pyannote's VAD checkpoint (uses many omegaconf globals).
-    # Monkey-patch torch.load to use weights_only=False for model loading.
-    _orig_load = torch.load
-    torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
-
     # Patch whisperx logging to use stderr (it defaults to stdout, polluting output)
     import whisperx as _whisperx  # noqa: N813 — lazy import to avoid loading torch at module level
     try:
@@ -511,19 +505,26 @@ def align_words(
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
 
-    # Load and transcribe
-    model = _whisperx.load_model("base", device, compute_type=compute_type, language="en")
-    audio = _whisperx.load_audio(str(vocal_stem_path))
-    result = model.transcribe(audio, batch_size=8, language="en")
+    # Torch 2.6+ defaults torch.load to weights_only=True, which blocks
+    # pyannote's VAD checkpoint (uses omegaconf globals). Temporarily
+    # patch torch.load for model loading only, then restore.
+    _orig_load = torch.load
+    torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
+    try:
+        model = _whisperx.load_model("base", device, compute_type=compute_type, language="en")
+        audio = _whisperx.load_audio(str(vocal_stem_path))
+        result = model.transcribe(audio, batch_size=8, language="en")
 
-    # Align with wav2vec2
-    align_model, metadata = _whisperx.load_align_model(
-        language_code="en", device=device,
-    )
-    aligned = _whisperx.align(
-        result["segments"], align_model, metadata, audio, device,
-        return_char_alignments=False,
-    )
+        # Align with wav2vec2
+        align_model, metadata = _whisperx.load_align_model(
+            language_code="en", device=device,
+        )
+        aligned = _whisperx.align(
+            result["segments"], align_model, metadata, audio, device,
+            return_char_alignments=False,
+        )
+    finally:
+        torch.load = _orig_load
 
     # Extract word events
     word_events: list[WordEvent] = []
