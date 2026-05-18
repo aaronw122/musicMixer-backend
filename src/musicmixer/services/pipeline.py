@@ -419,13 +419,6 @@ def _step_analyze_structure(
     # --- PulseMap analysis (parallel) ---
     # Runs after stems are available. Each analysis is config-gated and
     # wrapped in try/except so failures don't block the pipeline.
-    from musicmixer.services.pulsemap import (
-        align_words,
-        detect_chords,
-        detect_polyphony,
-        transcribe_drum_pattern,
-    )
-
     pulsemap_futures: dict[str, object] = {}
     pulsemap_workers = 0
     vocal_stem_a = song_a_stems_dir / "vocals.wav"
@@ -443,6 +436,12 @@ def _step_analyze_structure(
         pulsemap_workers += 1
 
     if pulsemap_workers > 0:
+        from musicmixer.services.pulsemap import (
+            align_words,
+            detect_chords,
+            detect_polyphony,
+            transcribe_drum_pattern,
+        )
         logger.info(
             "Session %s: PulseMap analysis: submitting %d tasks",
             session_id, pulsemap_workers,

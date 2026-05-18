@@ -44,11 +44,7 @@ try:
 except ImportError:
     _HAS_LV_CHORDIA = False
 
-try:
-    import whisperx as _whisperx
-    _HAS_WHISPERX = True
-except ImportError:
-    _HAS_WHISPERX = False
+_HAS_WHISPERX = bool(__import__("importlib").util.find_spec("whisperx"))
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +397,7 @@ def align_words(
         )
 
     import torch
+    import whisperx as _whisperx  # noqa: N813 — lazy import to avoid loading torch at module level
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"

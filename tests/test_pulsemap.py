@@ -308,22 +308,23 @@ class TestAlignWords:
             ],
         }
 
-        with patch.object(pulsemap_module, "_HAS_WHISPERX", True), \
-             patch.object(pulsemap_module, "_whisperx") as mock_wx:
-            mock_model = MagicMock()
-            mock_model.transcribe.return_value = {
-                "segments": [{"text": "test"}],
-                "language": "en",
-            }
-            mock_wx.load_model.return_value = mock_model
-            mock_wx.load_audio.return_value = np.zeros(16000, dtype=np.float32)
-            mock_wx.load_align_model.return_value = (MagicMock(), MagicMock())
-            mock_wx.align.return_value = mock_aligned
+        mock_wx = MagicMock()
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = {
+            "segments": [{"text": "test"}],
+            "language": "en",
+        }
+        mock_wx.load_model.return_value = mock_model
+        mock_wx.load_audio.return_value = np.zeros(16000, dtype=np.float32)
+        mock_wx.load_align_model.return_value = (MagicMock(), MagicMock())
+        mock_wx.align.return_value = mock_aligned
 
-            # Patch torch for device detection
-            with patch.dict("sys.modules", {"torch": MagicMock(cuda=MagicMock(is_available=MagicMock(return_value=False)))}):
-                from musicmixer.services.pulsemap import align_words
-                result = align_words(Path("/fake/vocals.wav"))
+        mock_torch = MagicMock(cuda=MagicMock(is_available=MagicMock(return_value=False)))
+
+        with patch.object(pulsemap_module, "_HAS_WHISPERX", True), \
+             patch.dict("sys.modules", {"whisperx": mock_wx, "torch": mock_torch}):
+            from musicmixer.services.pulsemap import align_words
+            result = align_words(Path("/fake/vocals.wav"))
 
         assert isinstance(result, WordAlignment)
         assert len(result.words) == 5
