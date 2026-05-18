@@ -181,7 +181,7 @@ class TestFlagGating:
             mock_settings.pulsemap_polyphony_enabled = False
             mock_settings.pulsemap_chords_enabled = False
             mock_settings.pulsemap_drums_enabled = False
-            mock_settings.pulsemap_word_align_enabled = False
+            mock_settings.pulsemap_word_alignment_enabled = False
 
             # Patch interpreter's module-level settings reference
             with patch("musicmixer.services.interpreter.settings", mock_settings):

@@ -1187,11 +1187,11 @@ def _sample_chord_progression() -> ChordProgression:
 
 
 def _sample_polyphony_solo() -> PolyphonyInfo:
-    return PolyphonyInfo(polyphonic=False, method="mid_side", gate1_ratio=0.02, gate2_percent=None)
+    return PolyphonyInfo(polyphonic=False, method="mid_side", gate1_ratio=0.02, gate2_ratio=None)
 
 
 def _sample_polyphony_duet() -> PolyphonyInfo:
-    return PolyphonyInfo(polyphonic=True, method="mid_side", gate1_ratio=0.25, gate2_percent=45.0)
+    return PolyphonyInfo(polyphonic=True, method="mid_side", gate1_ratio=0.25, gate2_ratio=45.0)
 
 
 def _sample_drum_pattern() -> DrumPattern:
@@ -1205,11 +1205,11 @@ def _sample_drum_pattern() -> DrumPattern:
 def _sample_word_alignment() -> WordAlignment:
     return WordAlignment(
         words=[
-            WordEvent(t=12340, text="Never", end=12560),
-            WordEvent(t=12560, text="gonna", end=12780),
-            WordEvent(t=12780, text="give", end=12950),
-            WordEvent(t=12950, text="you", end=13100),
-            WordEvent(t=13100, text="up", end=13300),
+            WordEvent(start_ms=12340, text="Never", end=12560),
+            WordEvent(start_ms=12560, text="gonna", end=12780),
+            WordEvent(start_ms=12780, text="give", end=12950),
+            WordEvent(start_ms=12950, text="you", end=13100),
+            WordEvent(start_ms=13100, text="up", end=13300),
         ],
         source="whisperx",
         lrclib_validated=True,
@@ -1423,8 +1423,8 @@ class TestPulseMapLayer5:
     def test_format_word_timing_sample_basic(self):
         """_format_word_timing_sample produces correct compact format."""
         words = [
-            WordEvent(t=1000, text="hello", end=1200),
-            WordEvent(t=2000, text="world", end=2200),
+            WordEvent(start_ms=1000, text="hello", end=1200),
+            WordEvent(start_ms=2000, text="world", end=2200),
         ]
         result = _format_word_timing_sample(words)
         assert "[1000ms] hello" in result
@@ -1432,7 +1432,7 @@ class TestPulseMapLayer5:
 
     def test_format_word_timing_sample_truncation(self):
         """Long word lists are sampled down to max_words."""
-        words = [WordEvent(t=i * 100, text=f"w{i}", end=i * 100 + 50) for i in range(100)]
+        words = [WordEvent(start_ms=i * 100, text=f"w{i}", end=i * 100 + 50) for i in range(100)]
         result = _format_word_timing_sample(words, max_words=10)
         # Should contain at most 10 word entries
         assert result.count("ms]") == 10

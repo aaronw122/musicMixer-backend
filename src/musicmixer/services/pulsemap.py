@@ -147,13 +147,13 @@ def detect_polyphony(vocal_stem_path: Path) -> PolyphonyInfo:
             logger.info("Polyphony gate 1: solo (side/mid ratio=%.4f)", ratio)
             return PolyphonyInfo(
                 polyphonic=False, method="mid_side",
-                gate1_ratio=ratio, gate2_percent=None,
+                gate1_ratio=ratio, gate2_ratio=None,
             )
         if ratio > 0.15:
             logger.info("Polyphony gate 1: polyphonic (side/mid ratio=%.4f)", ratio)
             return PolyphonyInfo(
                 polyphonic=True, method="mid_side",
-                gate1_ratio=ratio, gate2_percent=None,
+                gate1_ratio=ratio, gate2_ratio=None,
             )
         # Ambiguous range (0.05 - 0.15): fall through to Gate 2
         gate1_ratio: float | None = ratio
@@ -168,7 +168,7 @@ def detect_polyphony(vocal_stem_path: Path) -> PolyphonyInfo:
         logger.info("Polyphony: essentia unavailable, defaulting to solo")
         return PolyphonyInfo(
             polyphonic=False, method="mid_side",
-            gate1_ratio=gate1_ratio, gate2_percent=None,
+            gate1_ratio=gate1_ratio, gate2_ratio=None,
         )
 
     # Convert to mono float32 for essentia
@@ -204,7 +204,7 @@ def detect_polyphony(vocal_stem_path: Path) -> PolyphonyInfo:
         logger.info("Polyphony gate 2: no frames from Klapuri")
         return PolyphonyInfo(
             polyphonic=False, method="klapuri",
-            gate1_ratio=gate1_ratio, gate2_percent=0.0,
+            gate1_ratio=gate1_ratio, gate2_ratio=0.0,
         )
 
     multi_count = sum(1 for pitches in frames_pitches if len(pitches) >= 2)
@@ -217,7 +217,7 @@ def detect_polyphony(vocal_stem_path: Path) -> PolyphonyInfo:
     )
     return PolyphonyInfo(
         polyphonic=polyphonic, method="klapuri",
-        gate1_ratio=gate1_ratio, gate2_percent=pct,
+        gate1_ratio=gate1_ratio, gate2_ratio=pct,
     )
 
 
@@ -535,7 +535,7 @@ def align_words(
                 text = text.strip()
                 if text:
                     word_events.append(WordEvent(
-                        t=round(start * 1000),
+                        start_ms=round(start * 1000),
                         text=text,
                         end=round(word_info.get("end", start + 0.3) * 1000),
                     ))
@@ -574,7 +574,7 @@ def _validate_against_lrclib(
     Returns (validated: bool, offset_ms: int | None).
     """
     # Build sorted list of word start times
-    stt_words = sorted(w.t for w in words)
+    stt_words = sorted(w.start_ms for w in words)
     if len(stt_words) < 3:
         return False, None
 

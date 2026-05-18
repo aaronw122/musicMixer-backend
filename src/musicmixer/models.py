@@ -180,7 +180,7 @@ class PolyphonyInfo:
     polyphonic: bool
     method: str  # "mid_side" or "klapuri"
     gate1_ratio: float | None
-    gate2_percent: float | None
+    gate2_ratio: float | None
 
 
 @dataclass
@@ -197,7 +197,7 @@ class DrumPattern:
 @dataclass
 class WordEvent:
     """A single word with start/end timing."""
-    t: int        # start time ms
+    start_ms: int # start time ms
     text: str     # single word
     end: int      # end time ms
 

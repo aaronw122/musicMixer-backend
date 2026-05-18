@@ -296,8 +296,8 @@ class TestAlignWords:
 
         assert isinstance(result, WordAlignment)
         assert len(result.words) == 5
-        assert result.words[0] == WordEvent(t=1000, text="Never", end=1200)
-        assert result.words[4] == WordEvent(t=1950, text="up", end=2100)
+        assert result.words[0] == WordEvent(start_ms=1000, text="Never", end=1200)
+        assert result.words[4] == WordEvent(start_ms=1950, text="up", end=2100)
         assert result.source == "whisperx"
         assert result.lrclib_validated is False
 
@@ -318,12 +318,12 @@ class TestLrclibValidation:
         """Words with matching LRCLIB timestamps should validate with low offset."""
         # Cluster-based validation needs 3+ words with >1s gaps to form clusters
         words = [
-            WordEvent(t=1000, text="hello", end=1200),
-            WordEvent(t=1300, text="world", end=1500),
-            WordEvent(t=5000, text="foo", end=5200),
-            WordEvent(t=5300, text="bar", end=5500),
-            WordEvent(t=10000, text="baz", end=10200),
-            WordEvent(t=10400, text="qux", end=10600),
+            WordEvent(start_ms=1000, text="hello", end=1200),
+            WordEvent(start_ms=1300, text="world", end=1500),
+            WordEvent(start_ms=5000, text="foo", end=5200),
+            WordEvent(start_ms=5300, text="bar", end=5500),
+            WordEvent(start_ms=10000, text="baz", end=10200),
+            WordEvent(start_ms=10400, text="qux", end=10600),
         ]
         # Clusters: [1000, 5000, 10000] — LRCLIB lines match closely
         lyrics = LyricsData(
@@ -345,12 +345,12 @@ class TestLrclibValidation:
         """Words with large uniform offset from LRCLIB should fail validation."""
         # Clusters at [10000, 20000, 30000]
         words = [
-            WordEvent(t=10000, text="hello", end=10200),
-            WordEvent(t=10300, text="world", end=10500),
-            WordEvent(t=20000, text="foo", end=20200),
-            WordEvent(t=20300, text="bar", end=20500),
-            WordEvent(t=30000, text="baz", end=30200),
-            WordEvent(t=30400, text="qux", end=30600),
+            WordEvent(start_ms=10000, text="hello", end=10200),
+            WordEvent(start_ms=10300, text="world", end=10500),
+            WordEvent(start_ms=20000, text="foo", end=20200),
+            WordEvent(start_ms=20300, text="bar", end=20500),
+            WordEvent(start_ms=30000, text="baz", end=30200),
+            WordEvent(start_ms=30400, text="qux", end=30600),
         ]
         # Completely different time range — no overlap with clusters
         lyrics = LyricsData(
@@ -368,7 +368,7 @@ class TestLrclibValidation:
 
     def test_no_synced_lines(self) -> None:
         """Lines without timestamps should produce no validation."""
-        words = [WordEvent(t=1000, text="hello", end=1200)]
+        words = [WordEvent(start_ms=1000, text="hello", end=1200)]
         lyrics = LyricsData(
             artist="Test", title="Test", source="lrclib",
             is_synced=True,
@@ -450,7 +450,7 @@ class TestAudioMetadataIntegration:
             ),
             polyphony_info=PolyphonyInfo(
                 polyphonic=False, method="mid_side",
-                gate1_ratio=0.02, gate2_percent=None,
+                gate1_ratio=0.02, gate2_ratio=None,
             ),
             drum_pattern=DrumPattern(
                 kick_count=48, snare_count=24, hihat_count=96,
@@ -458,7 +458,7 @@ class TestAudioMetadataIntegration:
                 style_hint="four_on_floor",
             ),
             word_alignment=WordAlignment(
-                words=[WordEvent(t=1000, text="hello", end=1200)],
+                words=[WordEvent(start_ms=1000, text="hello", end=1200)],
                 source="whisperx",
                 lrclib_validated=True,
                 lrclib_offset_ms=50,

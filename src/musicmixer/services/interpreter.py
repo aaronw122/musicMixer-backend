@@ -22,7 +22,7 @@ from pathlib import Path
 import anthropic
 
 from musicmixer.config import settings
-from musicmixer.models import VOCAL_SOURCE, AudioMetadata, IntentPlan, IntentSection, LyricsData, RemixPlan, Section
+from musicmixer.models import VOCAL_SOURCE, AudioMetadata, IntentPlan, IntentSection, LyricsData, RemixPlan, Section, WordAlignment, WordEvent
 from musicmixer.services.tempo import compute_stretch_pct, estimate_material_budget, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -653,8 +653,8 @@ def _build_lyrics_layer(
     lyrics_a: LyricsData | None,
     lyrics_b: LyricsData | None,
     max_lines_per_song: int = 60,
-    word_alignment_a: "WordAlignment | None" = None,
-    word_alignment_b: "WordAlignment | None" = None,
+    word_alignment_a: WordAlignment | None = None,
+    word_alignment_b: WordAlignment | None = None,
 ) -> str:
     """Build Layer 5: Lyrics text for the system prompt.
 
@@ -695,16 +695,16 @@ def _build_lyrics_layer(
                 parts.append(f"  {line.text}")
 
         # PulseMap: Word-level timing (additive, shown after bar-level lyrics)
-        wa = word_alignments.get(label)
-        if wa and wa.words:
+        word_alignment = word_alignments.get(label)
+        if word_alignment and word_alignment.words:
             parts.append(f"\n{label} word timing (sample):")
-            parts.append(_format_word_timing_sample(wa.words))
+            parts.append(_format_word_timing_sample(word_alignment.words))
 
     return "\n".join(parts)
 
 
 def _format_word_timing_sample(
-    words: list,
+    words: list[WordEvent],
     max_words: int = 30,
 ) -> str:
     """Format a compact word-timing sample from WordEvent list.
@@ -722,7 +722,7 @@ def _format_word_timing_sample(
 
     chunks: list[str] = []
     for w in sample:
-        chunks.append(f"[{w.t}ms] {w.text}")
+        chunks.append(f"[{w.start_ms}ms] {w.text}")
 
     return "  " + " ".join(chunks)
 
