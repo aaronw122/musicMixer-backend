@@ -123,6 +123,10 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
         mock_settings.lyrics_lookup_enabled = False
         mock_settings.ab_taste_model_v1 = False
         mock_settings.anthropic_api_key = ""  # Prevent LLM API calls in tests
+        mock_settings.pulsemap_polyphony_enabled = False
+        mock_settings.pulsemap_chords_enabled = False
+        mock_settings.pulsemap_drums_enabled = False
+        mock_settings.pulsemap_word_align_enabled = False
 
         # Apply settings overrides (AB flags, etc.)
         if settings_overrides:
