@@ -34,9 +34,8 @@ jobs:
 
       - name: Install dependencies (CPU-only torch to skip CUDA bloat)
         # local extra: audio-separator (needed when STEM_BACKEND=local)
-        # analysis extra: essentia (needed by analysis module imports)
         # Override torch index to CPU-only — tests don't need GPU
-        run: uv sync --frozen --extra local --extra analysis --index-strategy unsafe-best-match
+        run: uv sync --frozen --extra local --index-strategy unsafe-best-match
         env:
           UV_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
 
