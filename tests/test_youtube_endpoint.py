@@ -64,6 +64,7 @@ def client(tmp_path):
         mock_settings.processing_max_duration_seconds = 210
         mock_settings.max_upload_duration_seconds = 900
         mock_settings.distributed_limiter_enabled = False
+        mock_settings.remix_cache_enabled = False
 
         # Create required directories
         (tmp_path / "uploads").mkdir()
@@ -72,7 +73,8 @@ def client(tmp_path):
 
         with patch("musicmixer.api.remix.settings", mock_settings), \
              patch("musicmixer.main.settings", mock_settings), \
-             patch("musicmixer.api.remix.cleanup_expired_sessions"):
+             patch("musicmixer.api.remix.cleanup_expired_sessions"), \
+             patch("musicmixer.services.song_cache.get_cached_song", return_value=None):
             with TestClient(app) as c:
                 yield c
 
@@ -424,7 +426,10 @@ class TestYouTubePipelineWrapper:
             mock_settings.queue_entry_ttl_minutes = 15
             mock_settings.processing_max_duration_seconds = 210
 
-            with patch("musicmixer.services.pipeline.run_pipeline") as mock_pipeline:
+            with patch("musicmixer.services.pipeline.analyze_songs") as mock_analyze, \
+                 patch("musicmixer.services.pipeline.run_remix") as mock_remix, \
+                 patch("musicmixer.services.song_cache.cache_song_metadata"), \
+                 patch("musicmixer.services.song_cache.cache_song_stems"):
                 with patch("musicmixer.services.youtube.download_youtube_audio", new=fake_download):
                     _youtube_pipeline_wrapper(
                         session_id="test-session",
@@ -439,11 +444,14 @@ class TestYouTubePipelineWrapper:
         # Both songs downloaded
         assert download_call_count == 2
 
-        # Pipeline was called with correct paths and filenames
-        mock_pipeline.assert_called_once()
-        call_kwargs = mock_pipeline.call_args
+        # Analysis was called with correct filenames
+        mock_analyze.assert_called_once()
+        call_kwargs = mock_analyze.call_args
         assert call_kwargs.kwargs.get("song_a_original_filename") == "Song A Title" or \
                call_kwargs[1].get("song_a_original_filename") == "Song A Title"
+
+        # Remix was called after analysis
+        mock_remix.assert_called_once()
 
         # Lock was released
         assert not lock.locked()
@@ -487,7 +495,10 @@ class TestYouTubePipelineWrapper:
             mock_settings.queue_entry_ttl_minutes = 15
             mock_settings.processing_max_duration_seconds = 210
 
-            with patch("musicmixer.services.pipeline.run_pipeline"):
+            with patch("musicmixer.services.pipeline.analyze_songs"), \
+                 patch("musicmixer.services.pipeline.run_remix"), \
+                 patch("musicmixer.services.song_cache.cache_song_metadata"), \
+                 patch("musicmixer.services.song_cache.cache_song_stems"):
                 with patch("musicmixer.services.youtube.download_youtube_audio", new=fake_download):
                     _youtube_pipeline_wrapper(
                         session_id="test-session",

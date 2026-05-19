@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
+    #Redis
+    redis_url: str = "redis://localhost:6379"
+    song_cache_dir: Path = Path("data/song_cache")
+
     # Twilio SMS notifications
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""

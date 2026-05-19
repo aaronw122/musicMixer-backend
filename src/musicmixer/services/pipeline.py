@@ -7,8 +7,10 @@ Complete 16-step chain: separation -> analysis -> plan -> processing -> render -
 import logging
 import queue
 import time
+from pathlib import Path
+from typing import Any
 
-from musicmixer.models import LyricsData, SessionState
+from musicmixer.models import AnalyzedSongs, LyricsData, SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -186,8 +188,8 @@ def _step_separate_and_analyze(
     ml_segments_b: list[dict] | None = None
     structure_ml_enabled = settings.section_detection_backend in ("auto", "ml")
 
+    from musicmixer.services.structure_ml import analyze_structure_ml
     if structure_ml_enabled:
-        from musicmixer.services.structure_ml import analyze_structure_ml
         logger.info(
             "Session %s: ML structure detection enabled (backend=%s)",
             session_id, settings.section_detection_backend,
@@ -354,7 +356,8 @@ def _run_pulsemap_analysis(
 
     from musicmixer.config import settings
 
-    pulsemap_futures: dict[str, object] = {}
+    from concurrent.futures import Future
+    pulsemap_futures: dict[str, Future] = {}
     pulsemap_workers = 0
     vocal_stem_a = song_a_stems_dir / "vocals.wav"
     drum_stem_b = song_b_stems_dir / "drums.wav"
@@ -1454,7 +1457,7 @@ def _step_sum_and_auto_level(
     # Gently boosts instrumental-only moments (between vocal phrases)
     # and slightly reduces the loudest peaks. Uses long window so
     # gain changes are imperceptible (no pumping).
-    auto_level_kwargs = dict(window_sec=4.0, max_boost_db=1.5, max_cut_db=2.5)
+    auto_level_kwargs: dict[str, Any] = dict(window_sec=4.0, max_boost_db=1.5, max_cut_db=2.5)
 
     # CRITICAL: detector_audio must be set to instrumental_bus to avoid the volume-dip
     # regression (the ~11s/~22s dip bug). Without this, auto_level uses the mixed signal
@@ -1689,75 +1692,32 @@ def _step_export_and_finalize(
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
-def run_pipeline(
+def analyze_songs(
     session_id: str,
     song_a_path: str,
     song_b_path: str,
-    prompt: str = "",
-    event_queue: queue.Queue = None,
-    session: SessionState = None,
+    event_queue: queue.Queue | None = None,
+    session: SessionState | None = None,
     song_a_original_filename: str = "",
     song_b_original_filename: str = "",
     source_quality_a: str | None = None,
     source_quality_b: str | None = None,
-    force_vocal_source: str | None = None,
     shelf_song_id_a: str | None = None,
     shelf_song_id_b: str | None = None,
-) -> None:
-    """Complete remix pipeline: separation, analysis, tempo matching, arrangement, export.
+) -> AnalyzedSongs:
+    """Analysis phase (steps 1-3.8): separation, audio analysis, structure detection.
 
-    Pipeline steps:
-        1.  Separate stems (concurrent for both songs)
-        2.  Analyze both original songs (BPM, beat grid, key, duration)
-        3.  Reconcile BPM between songs
-       3.5  Analyze song structure (sections, vocal gaps, PulseMap: chords,
-            polyphony, drums, word alignment)
-       3.8  Measure per-stem LUFS for LLM interpreter
-        4.  Generate mix plan (LLM or deterministic fallback)
-       4.5  Taste stage (candidate generation + scoring, if enabled)
-        5.  Determine vocal/instrumental sources from plan
-        6.  Load and standardize all stems (44.1kHz, stereo, float32)
-        7.  Trim stems to source time ranges
-       7.5  Detect and exclude near-silent stems
-       7.7  Vocal pre-filter bandpass (150Hz-16kHz)
-      7.72  Adaptive spectral analysis (profiles, conflicts, corrections)
-      7.75  Corrective EQ per stem (adaptive when available, preset fallback)
-        8.  Compute tempo plan (target BPM, which stems to stretch)
-       8.5  Key convergence (pitch shifts to align keys)
-        9.  Tempo match via rubberband (parallel across stems)
-       10.  Post-stretch beat grid re-detection
-       11.  Vocal compression (3:1, -20dB threshold, 3.0dB makeup)
-      11.5  Cross-song level matching (LUFS-based)
-      11.8  Pre-limit drum and bass transients
-       12.  Render arrangement into vocal + instrumental buses
-      12.5  Spectral ducking (300Hz-3kHz pocket in instrumental)
-       13.  Sum buses into final mix
-      13.7  Auto-leveler (4s window, 1.5dB boost, 2.5dB cut)
-       14.  Static mastering (LUFS normalize + limiter)
-      14.5  Post-mastering LUFS correction (iterate-and-converge)
-      14.6  Safety soft clip (catches inter-sample true peaks)
-       15.  Fade-in / fade-out
-       16.  Export to MP3 (320kbps, no pre-dither) + finalize session
+    Returns an AnalyzedSongs with everything the remix phase needs.
     """
+    assert event_queue is not None
+    assert session is not None
+
     from pathlib import Path
     from musicmixer.config import settings
 
-    song_a_path = Path(song_a_path)
-    song_b_path = Path(song_b_path)
+    _song_a = Path(song_a_path)
+    _song_b = Path(song_b_path)
     stems_dir = settings.data_dir / "stems" / session_id
-    remix_dir = settings.data_dir / "remixes" / session_id
-    remix_dir.mkdir(parents=True, exist_ok=True)
-    output_path = remix_dir / "remix.mp3"
-
-    logger.info("Session %s: pipeline started (prompt=%r)", session_id, prompt[:80])
-
-    # === REMIX CACHE CHECK ===
-    remix_cache_key = _check_remix_cache(
-        session_id, song_a_path, song_b_path, prompt,
-        output_path, session, event_queue,
-    )
-    if session.status == "complete":
-        return
 
     # === STEPS 1+2: Separation + analysis (overlapped) ===
     (
@@ -1765,7 +1725,7 @@ def run_pipeline(
         lyrics_a_data, lyrics_b_data, ml_segments_a, ml_segments_b,
         song_a_stems_dir, song_b_stems_dir,
     ) = _step_separate_and_analyze(
-        session_id, song_a_path, song_b_path, stems_dir,
+        session_id, _song_a, _song_b, stems_dir,
         song_a_original_filename, song_b_original_filename,
         event_queue, session,
         shelf_song_id_a=shelf_song_id_a,
@@ -1774,8 +1734,6 @@ def run_pipeline(
 
     check_cancelled(session)
 
-    # Emit analyzing progress AFTER separation progress to maintain monotonic
-    # step ordering for SSE clients (separating -> analyzing -> processing -> ...)
     emit_progress(event_queue, {
         "step": "analyzing",
         "detail": "Figuring out the BPM and musical key...",
@@ -1803,8 +1761,8 @@ def run_pipeline(
         song_a_stems_dir, song_b_stems_dir,
         ml_segments_a, ml_segments_b,
         event_queue, session,
-        song_a_path=song_a_path,
-        song_b_path=song_b_path,
+        song_a_path=_song_a,
+        song_b_path=_song_b,
         lyrics_a_data=lyrics_a_data,
     )
 
@@ -1815,11 +1773,52 @@ def run_pipeline(
 
     check_cancelled(session)
 
+    return AnalyzedSongs(
+        meta_a=meta_a,
+        meta_b=meta_b,
+        song_a_stems=song_a_stems,
+        song_b_stems=song_b_stems,
+        song_a_stems_dir=song_a_stems_dir,
+        song_b_stems_dir=song_b_stems_dir,
+        lyrics_a=lyrics_a_data,
+        lyrics_b=lyrics_b_data,
+        vocal_stem_lufs=vocal_stem_lufs,
+        inst_stem_lufs=inst_stem_lufs,
+    )
+
+
+def run_remix(
+    session_id: str,
+    analysis: AnalyzedSongs,
+    prompt: str = "",
+    event_queue: queue.Queue | None = None,
+    session: SessionState | None = None,
+    source_quality_a: str | None = None,
+    source_quality_b: str | None = None,
+    force_vocal_source: str | None = None,
+    remix_cache_key: str | None = None,
+) -> None:
+    """Remix phase (steps 4-16): LLM planning, DSP processing, export.
+
+    Takes pre-analyzed song data and a prompt, produces a finished MP3.
+    """
+    assert event_queue is not None
+    assert session is not None
+
+    from musicmixer.config import settings
+
+    remix_dir = settings.data_dir / "remixes" / session_id
+    remix_dir.mkdir(parents=True, exist_ok=True)
+    output_path = remix_dir / "remix.mp3"
+
+    meta_a = analysis.meta_a
+    meta_b = analysis.meta_b
+
     # === STEP 4 + 4.5: Interpret prompt + taste stage ===
     plan, vocal_type = _step_interpret_prompt(
         session_id, prompt, meta_a, meta_b,
-        lyrics_a_data, lyrics_b_data,
-        vocal_stem_lufs, inst_stem_lufs,
+        analysis.lyrics_a, analysis.lyrics_b,
+        analysis.vocal_stem_lufs, analysis.inst_stem_lufs,
         force_vocal_source,
         event_queue, session,
     )
@@ -1827,7 +1826,7 @@ def run_pipeline(
     # === STEPS 5+6: Load and standardize stems ===
     vocal_audio, inst_audio, is_lossy_vocal_source, is_lossy_inst_source = (
         _step_load_and_standardize_stems(
-            session_id, song_a_stems, song_b_stems,
+            session_id, analysis.song_a_stems, analysis.song_b_stems,
             source_quality_a, source_quality_b,
             event_queue, session,
         )
@@ -1852,7 +1851,7 @@ def run_pipeline(
     # === STEP 9: Tempo match via rubberband ===
     vocal_audio, inst_audio = _step_tempo_match(
         session_id, vocal_audio, inst_audio,
-        meta_a, meta_b,  # vocal_meta=meta_a, inst_meta=meta_b
+        meta_a, meta_b,
         target_bpm, need_vocal_rb, need_inst_rb,
         vocal_semitones, inst_semitones,
         sr, event_queue, session,
@@ -1897,4 +1896,75 @@ def run_pipeline(
     _step_export_and_finalize(
         session_id, mixed, sr, output_path, plan,
         remix_cache_key, session, event_queue,
+    )
+
+
+def run_pipeline(
+    session_id: str,
+    song_a_path: str | Path,
+    song_b_path: str | Path,
+    prompt: str = "",
+    event_queue: queue.Queue | None = None,
+    session: SessionState | None = None,
+    song_a_original_filename: str = "",
+    song_b_original_filename: str = "",
+    source_quality_a: str | None = None,
+    source_quality_b: str | None = None,
+    force_vocal_source: str | None = None,
+    shelf_song_id_a: str | None = None,
+    shelf_song_id_b: str | None = None,
+) -> None:
+    """Complete remix pipeline: analyze songs, then remix.
+
+    Convenience wrapper that calls analyze_songs() then run_remix().
+    Used by the file upload path. The YouTube path calls them separately.
+    """
+    assert event_queue is not None
+    assert session is not None
+
+    from pathlib import Path
+    from musicmixer.config import settings
+
+    _song_a = Path(song_a_path)
+    _song_b = Path(song_b_path)
+    remix_dir = settings.data_dir / "remixes" / session_id
+    remix_dir.mkdir(parents=True, exist_ok=True)
+    output_path = remix_dir / "remix.mp3"
+
+    logger.info("Session %s: pipeline started (prompt=%r)", session_id, prompt[:80])
+
+    # === REMIX CACHE CHECK ===
+    remix_cache_key = _check_remix_cache(
+        session_id, _song_a, _song_b, prompt,
+        output_path, session, event_queue,
+    )
+    if session.status == "complete":
+        return
+
+    # === ANALYSIS PHASE (steps 1-3.8) ===
+    analysis = analyze_songs(
+        session_id=session_id,
+        song_a_path=str(_song_a),
+        song_b_path=str(_song_b),
+        event_queue=event_queue,
+        session=session,
+        song_a_original_filename=song_a_original_filename,
+        song_b_original_filename=song_b_original_filename,
+        source_quality_a=source_quality_a,
+        source_quality_b=source_quality_b,
+        shelf_song_id_a=shelf_song_id_a,
+        shelf_song_id_b=shelf_song_id_b,
+    )
+
+    # === REMIX PHASE (steps 4-16) ===
+    run_remix(
+        session_id=session_id,
+        analysis=analysis,
+        prompt=prompt,
+        event_queue=event_queue,
+        session=session,
+        source_quality_a=source_quality_a,
+        source_quality_b=source_quality_b,
+        force_vocal_source=force_vocal_source,
+        remix_cache_key=remix_cache_key,
     )

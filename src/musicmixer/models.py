@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -240,6 +241,46 @@ class AudioMetadata:
     polyphony_info: Optional[PolyphonyInfo] = None
     drum_pattern: Optional[DrumPattern] = None
     word_alignment: Optional[WordAlignment] = None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline analysis result (output of analysis phase, input to DSP phase)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AnalyzedSongs:
+    """Everything the DSP pipeline needs to build a remix.
+
+    Produced by analyze_songs() or reconstructed from cached data.
+    This is the boundary between the analysis phase (steps 1-3.8)
+    and the remix phase (steps 4-16).
+    """
+    meta_a: AudioMetadata
+    meta_b: AudioMetadata
+    song_a_stems: dict[str, Path]        # stem_name -> Path
+    song_b_stems: dict[str, Path]        # stem_name -> Path
+    song_a_stems_dir: Path               # directory containing Song A stem WAVs
+    song_b_stems_dir: Path               # directory containing Song B stem WAVs
+    lyrics_a: LyricsData | None
+    lyrics_b: LyricsData | None
+    vocal_stem_lufs: dict[str, float]   # stem_name -> LUFS float
+    inst_stem_lufs: dict[str, float]    # stem_name -> LUFS float
+
+
+# ---------------------------------------------------------------------------
+# Song cache (Redis-backed per-song cache)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CachedSong:
+    """Result of a Redis cache lookup for a single song."""
+    video_id: str
+    title: str
+    artist: str
+    meta: AudioMetadata
+    lyrics: LyricsData | None
+    stems_path: str | None
+    has_stems: bool
 
 
 # ---------------------------------------------------------------------------
