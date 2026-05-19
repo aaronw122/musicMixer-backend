@@ -220,8 +220,8 @@ def _make_lyrics(is_synced: bool = True, lines: list[LyricLine] | None = None) -
     """Create synthetic lyrics data for testing."""
     if lines is None:
         lines = [
-            LyricLine(text="Hello world", timestamp_seconds=5.0, bar_number=2),
-            LyricLine(text="Second line", timestamp_seconds=10.0, bar_number=4),
+            LyricLine(text="Hello world", timestamp_seconds=5.0),
+            LyricLine(text="Second line", timestamp_seconds=10.0),
         ]
     return LyricsData(
         artist="Test Artist",
@@ -1393,24 +1393,24 @@ class TestPulseMapLayer5:
     """Tests for PulseMap word alignment in Layer 5 (Lyrics)."""
 
     def test_word_timing_appended_to_lyrics(self):
-        """Word timing sample appears after bar-level lyrics when word_alignment is set."""
+        """Word timing sample appears after lyrics text when word_alignment is set."""
         lyrics = _make_lyrics()
         wa = _sample_word_alignment()
         result = _build_lyrics_layer(lyrics, None, word_alignment_a=wa)
-        # Bar-level lyrics must still be present
-        assert "bar" in result
+        # Lyrics text must still be present
         assert "Hello world" in result
+        assert "Second line" in result
         # Word timing should also appear
         assert "word timing (sample)" in result
         assert "[12340ms] Never" in result
         assert "[13100ms] up" in result
 
-    def test_bar_level_preserved_without_word_alignment(self):
-        """Bar-level lyrics are preserved when word_alignment is None."""
+    def test_lyrics_preserved_without_word_alignment(self):
+        """Lyrics text is preserved when word_alignment is None."""
         lyrics = _make_lyrics()
         result = _build_lyrics_layer(lyrics, None)
-        assert "bar" in result
         assert "Hello world" in result
+        assert "Second line" in result
         assert "word timing" not in result
 
     def test_no_lyrics_no_word_timing(self):

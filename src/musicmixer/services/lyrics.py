@@ -1,10 +1,10 @@
-"""Lyrics lookup, parsing, and bar mapping for LLM arrangement intelligence.
+"""Lyrics lookup and parsing for LLM arrangement intelligence.
 
 Fetches known-correct lyrics from free online databases (LRCLIB, Musixmatch)
-via the syncedlyrics library, parses LRC format into timestamped lines, and
-maps those lines to bar numbers derived from beat detection data. The result
-is injected as Layer 5 in the LLM system prompt so it can make smarter
+via the syncedlyrics library, parses LRC format into timestamped lines. The
+result is injected as Layer 5 in the LLM system prompt so it can make smarter
 arrangement decisions (avoid cutting mid-phrase, identify hooks, match themes).
+Word-level timing is provided by PulseMap's WordAlignment data.
 
 If no lyrics are found, the pipeline continues exactly as before — this is
 purely additive.
@@ -13,12 +13,10 @@ purely additive.
 from __future__ import annotations
 
 import logging
-import math
 import re
 import time
 from pathlib import Path
 
-import librosa
 import numpy as np
 import syncedlyrics
 from mutagen.easyid3 import EasyID3
@@ -37,9 +35,6 @@ MAX_LYRIC_LINES = 60
 
 # Timeout for syncedlyrics network lookup (seconds)
 LYRICS_TIMEOUT_SECONDS = 15
-
-# Default sample rate matching analysis.py
-ANALYSIS_SR = 22050
 
 # ---------------------------------------------------------------------------
 # 3a. Filename parsing
@@ -302,114 +297,7 @@ def parse_plain_lyrics(text: str) -> list[LyricLine]:
 
 
 # ---------------------------------------------------------------------------
-# 3f. Bar mapping
-# ---------------------------------------------------------------------------
-
-def _compute_bar_times_from_beats(
-    beat_frames: np.ndarray,
-    sr: int = ANALYSIS_SR,
-) -> np.ndarray:
-    """Derive bar boundary times from beat frames.
-
-    Takes every 4th beat frame (bar start) and converts to seconds.
-    Returns array of bar start times in seconds.
-    """
-    if beat_frames is None or len(beat_frames) < 4:
-        return np.array([])
-
-    bar_frames = beat_frames[::4]
-    bar_times = librosa.frames_to_time(bar_frames, sr=sr)
-    return bar_times
-
-
-def _compute_bar_times_from_bpm(
-    bpm: float,
-    duration_seconds: float = 300.0,
-) -> np.ndarray:
-    """Compute bar boundary times from BPM (fallback when beat_frames unavailable).
-
-    Assumes 4/4 time: bar_duration = (60/bpm) * 4.
-    """
-    if bpm <= 0:
-        return np.array([])
-
-    bar_duration = (60.0 / bpm) * 4
-    num_bars = int(math.ceil(duration_seconds / bar_duration))
-    return np.arange(num_bars) * bar_duration
-
-
-def map_lyrics_to_bars(
-    lines: list[LyricLine],
-    beat_frames: np.ndarray | None,
-    bpm: float,
-    sr: int = ANALYSIS_SR,
-    duration_seconds: float = 300.0,
-) -> list[LyricLine]:
-    """Map synced lyric lines to bar numbers using beat detection data.
-
-    Uses beat_frames[::4] via librosa.frames_to_time() for accurate mapping.
-    Falls back to BPM-based calculation if beat_frames unavailable.
-    """
-    if not lines:
-        return lines
-
-    # Compute bar boundary times
-    bar_times = _compute_bar_times_from_beats(beat_frames, sr=sr)
-    if len(bar_times) == 0:
-        bar_times = _compute_bar_times_from_bpm(bpm, duration_seconds)
-    if len(bar_times) == 0:
-        return lines
-
-    # Map each line to a bar using searchsorted
-    for line in lines:
-        if line.timestamp_seconds is not None:
-            # searchsorted returns the index where the timestamp would be inserted
-            # to keep the array sorted — this is the bar number (0-indexed).
-            # We use side='right' and subtract 1 to get the bar that contains the timestamp.
-            bar_idx = int(np.searchsorted(bar_times, line.timestamp_seconds, side="right")) - 1
-            line.bar_number = max(0, bar_idx)
-
-    return lines
-
-
-def map_plain_lyrics_to_bars(
-    lines: list[LyricLine],
-    vocal_active: np.ndarray | None,
-    total_bars: int,
-) -> list[LyricLine]:
-    """Distribute plain (unsynced) lyrics across vocal-active bars proportionally.
-
-    For plain lyrics without timestamps, we spread them evenly across bars
-    where vocals are detected as active.
-    """
-    if not lines or total_bars <= 0:
-        return lines
-
-    # Find vocal-active bar indices
-    if vocal_active is not None and len(vocal_active) > 0:
-        active_bars = np.where(vocal_active)[0].tolist()
-    else:
-        # Fallback: assume all bars are vocal-active
-        active_bars = list(range(total_bars))
-
-    if not active_bars:
-        active_bars = list(range(total_bars))
-
-    # Distribute lines evenly across active bars
-    num_lines = len(lines)
-    num_active = len(active_bars)
-
-    for i, line in enumerate(lines):
-        # Map line index to active bar index proportionally
-        bar_list_idx = int(i * num_active / num_lines)
-        bar_list_idx = min(bar_list_idx, num_active - 1)
-        line.bar_number = active_bars[bar_list_idx]
-
-    return lines
-
-
-# ---------------------------------------------------------------------------
-# 3g. Top-level function
+# 3f. Top-level function
 # ---------------------------------------------------------------------------
 
 def lookup_lyrics_for_song(

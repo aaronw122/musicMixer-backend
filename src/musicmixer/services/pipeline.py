@@ -576,57 +576,6 @@ def _step_analyze_structure(
     }, session=session)
 
 
-def _step_map_lyrics_to_bars(
-    session_id: str,
-    lyrics_a_data: LyricsData | None,
-    lyrics_b_data: LyricsData | None,
-    meta_a, meta_b,
-):
-    """Step 3.7: Map lyrics timestamps to bar numbers.
-
-    Mutates lyrics_data.lines in place.
-    """
-    from musicmixer.services.lyrics import map_lyrics_to_bars, map_plain_lyrics_to_bars
-
-    for label, lyrics_data, meta in [
-        ("A", lyrics_a_data, meta_a),
-        ("B", lyrics_b_data, meta_b),
-    ]:
-        if lyrics_data is None:
-            continue
-        try:
-            if lyrics_data.is_synced:
-                lyrics_data.lines = map_lyrics_to_bars(
-                    lyrics_data.lines,
-                    beat_frames=meta.beat_frames,
-                    bpm=meta.bpm,
-                )
-            else:
-                # Plain lyrics: distribute across vocal-active bars
-                vocal_active = None
-                total_bars = 0
-                if meta.stem_analysis is not None:
-                    vocal_active = meta.stem_analysis.vocal_active
-                if meta.song_structure is not None:
-                    total_bars = meta.song_structure.total_bars
-                if total_bars > 0:
-                    lyrics_data.lines = map_plain_lyrics_to_bars(
-                        lyrics_data.lines,
-                        vocal_active=vocal_active,
-                        total_bars=total_bars,
-                    )
-            mapped_count = sum(1 for l in lyrics_data.lines if l.bar_number is not None)
-            logger.info(
-                "Session %s: Song %s lyrics: %d/%d lines mapped to bars",
-                session_id, label, mapped_count, len(lyrics_data.lines),
-            )
-        except Exception:
-            logger.warning(
-                "Session %s: Bar mapping failed for Song %s lyrics",
-                session_id, label, exc_info=True,
-            )
-
-
 def _step_measure_stem_lufs(
     session_id: str,
     song_a_stems_dir,
@@ -1763,7 +1712,6 @@ def run_pipeline(
         3.  Reconcile BPM between songs
        3.5  Analyze song structure (sections, vocal gaps, PulseMap: chords,
             polyphony, drums, word alignment)
-       3.7  Map lyrics timestamps to bar numbers
        3.8  Measure per-stem LUFS for LLM interpreter
         4.  Generate mix plan (LLM or deterministic fallback)
        4.5  Taste stage (candidate generation + scoring, if enabled)
@@ -1859,9 +1807,6 @@ def run_pipeline(
         song_b_path=song_b_path,
         lyrics_a_data=lyrics_a_data,
     )
-
-    # === STEP 3.7: Map lyrics to bars ===
-    _step_map_lyrics_to_bars(session_id, lyrics_a_data, lyrics_b_data, meta_a, meta_b)
 
     # === STEP 3.8: Measure per-stem LUFS ===
     vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(

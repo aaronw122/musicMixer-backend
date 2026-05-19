@@ -216,7 +216,7 @@ CAPABILITIES:
 5. DYNAMIC RANGE: The remix MUST have at least 1 contrast moment (e.g., breakdown -> drop) and use a minimum of 3 different energy levels across sections.
 6. ENDING: End with 4-8 bars of reduced energy or a natural outro. NEVER cut the remix at full energy -- it sounds broken.
 7. ROLE VARIATION: Vary stem roles across sections. Strip down to drums+bass+vocals for contrast, then promote more stems to "support" for impact. Flat roles across all sections produces a lifeless mix.
-8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 bar numbers with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section.
+8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 lyrics and word timing with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section.
 9. VOCAL PRESENCE: Both songs carry musical identity. If Song B's instrumentals are only audible during intros and outros, the mashup is karaoke — Song B becomes wallpaper. Give Song B at least one section of 8-16 bars where it stands on its own: a breakdown, a drop, or an instrumental bridge in the middle of the arrangement. This lets the listener hear both songs as participants. If a stretch advisory is present in the dynamic context, defer to its vocal budget. Override freely when the source material or user prompt calls for vocal-forward treatment."""
 
     # Section 5: Stem Role Guidelines (roles, frequency awareness, energy arc, mixing advisory, phrase alignment)
@@ -642,7 +642,7 @@ def _build_lyrics_layer(
 ) -> str:
     """Build Layer 5: Lyrics text for the system prompt.
 
-    Formats synced lyrics with bar numbers, plain lyrics with just text.
+    Formats lyrics as plain text lines.
     When word_alignment is available for a song, appends a compact word-level
     timing sample (additive -- bar-level lyrics remain as the primary view).
     Caps at max_lines_per_song per song; samples evenly if longer.
@@ -673,10 +673,7 @@ def _build_lyrics_layer(
             lines = [lines[int(i * step)] for i in range(max_lines_per_song)]
 
         for line in lines:
-            if line.bar_number is not None:
-                parts.append(f"  bar {line.bar_number:>3}: {line.text}")
-            else:
-                parts.append(f"  {line.text}")
+            parts.append(f"  {line.text}")
 
         # PulseMap: Word-level timing (additive, shown after bar-level lyrics)
         word_alignment = word_alignments.get(label)

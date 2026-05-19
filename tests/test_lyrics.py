@@ -14,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import numpy as np
 import pytest
 
 from musicmixer.models import LyricLine, LyricsData
@@ -25,11 +24,7 @@ from musicmixer.services.lyrics import (
     fetch_lyrics,
     parse_lrc,
     parse_plain_lyrics,
-    map_lyrics_to_bars,
-    map_plain_lyrics_to_bars,
     lookup_lyrics_for_song,
-    _compute_bar_times_from_beats,
-    _compute_bar_times_from_bpm,
     MAX_LYRIC_LINES,
 )
 
@@ -252,134 +247,6 @@ class TestParsePlainLyrics:
     def test_empty_input(self) -> None:
         """Empty string returns empty list."""
         assert parse_plain_lyrics("") == []
-
-
-# ===========================================================================
-# Bar mapping tests
-# ===========================================================================
-
-class TestComputeBarTimes:
-    def test_from_beat_frames(self) -> None:
-        """Bar times derived from beat frames (every 4th beat)."""
-        # 8 beats at known frame positions, expect 2 bar times
-        beat_frames = np.array([0, 512, 1024, 1536, 2048, 2560, 3072, 3584])
-        bar_times = _compute_bar_times_from_beats(beat_frames, sr=22050)
-        assert len(bar_times) == 2  # frames at index 0 and 4
-        assert bar_times[0] == pytest.approx(0.0, abs=0.01)
-        # Frame 2048 at sr=22050 ≈ 0.0929 seconds
-        assert bar_times[1] > 0
-
-    def test_from_beat_frames_too_few(self) -> None:
-        """Too few beat frames returns empty array."""
-        bar_times = _compute_bar_times_from_beats(np.array([0, 512]))
-        assert len(bar_times) == 0
-
-    def test_from_bpm(self) -> None:
-        """BPM fallback computes expected bar times."""
-        # 120 BPM, 4/4 time → bar = 2 seconds
-        bar_times = _compute_bar_times_from_bpm(120.0, duration_seconds=10.0)
-        assert len(bar_times) == 5  # 0, 2, 4, 6, 8
-        assert bar_times[0] == pytest.approx(0.0)
-        assert bar_times[1] == pytest.approx(2.0)
-        assert bar_times[2] == pytest.approx(4.0)
-
-    def test_from_bpm_zero(self) -> None:
-        """Zero BPM returns empty array."""
-        bar_times = _compute_bar_times_from_bpm(0.0)
-        assert len(bar_times) == 0
-
-
-class TestMapLyricsToBars:
-    def test_with_beat_frames(self) -> None:
-        """Map synced lyrics to bars using beat frames."""
-        # Create beat frames at 120 BPM in librosa frame indices
-        # (sr=22050, hop_length=512): 0.5s ≈ frame 22, bar = 4 beats ≈ 86 frames
-        beat_frames = np.array([
-            0, 22, 43, 65,       # bar 0: ~0.0s to ~1.5s
-            86, 108, 129, 151,   # bar 1: ~2.0s to ~3.5s
-            172, 194, 215, 237,  # bar 2: ~4.0s to ~5.5s
-        ])
-        lines = [
-            LyricLine(text="Bar zero line", timestamp_seconds=0.5),
-            LyricLine(text="Bar one line", timestamp_seconds=2.5),
-            LyricLine(text="Bar two line", timestamp_seconds=5.0),
-        ]
-        result = map_lyrics_to_bars(lines, beat_frames, bpm=120.0)
-        assert result[0].bar_number == 0
-        assert result[1].bar_number == 1
-        assert result[2].bar_number == 2
-
-    def test_bpm_fallback(self) -> None:
-        """Map lyrics to bars using BPM when beat_frames is None."""
-        # 120 BPM → bar_duration = 2s
-        lines = [
-            LyricLine(text="Start", timestamp_seconds=0.5),
-            LyricLine(text="Bar 1", timestamp_seconds=2.5),
-            LyricLine(text="Bar 2", timestamp_seconds=4.5),
-        ]
-        result = map_lyrics_to_bars(lines, beat_frames=None, bpm=120.0, duration_seconds=10.0)
-        assert result[0].bar_number == 0
-        assert result[1].bar_number == 1
-        assert result[2].bar_number == 2
-
-    def test_empty_lines(self) -> None:
-        """Empty lines list returns empty."""
-        result = map_lyrics_to_bars([], beat_frames=None, bpm=120.0)
-        assert result == []
-
-    def test_no_timestamps(self) -> None:
-        """Lines without timestamps get no bar number."""
-        lines = [LyricLine(text="No timestamp")]
-        result = map_lyrics_to_bars(lines, beat_frames=None, bpm=120.0, duration_seconds=10.0)
-        assert result[0].bar_number is None
-
-
-class TestMapPlainLyricsToBars:
-    def test_distribute_across_vocal_bars(self) -> None:
-        """Plain lyrics distributed across vocal-active bars."""
-        lines = [
-            LyricLine(text="Line 1"),
-            LyricLine(text="Line 2"),
-            LyricLine(text="Line 3"),
-            LyricLine(text="Line 4"),
-        ]
-        # Bars 0-9, but only bars 2, 4, 6, 8 are vocal-active
-        vocal_active = np.array([False, False, True, False, True, False, True, False, True, False])
-
-        result = map_plain_lyrics_to_bars(lines, vocal_active, total_bars=10)
-        # 4 lines across 4 active bars [2, 4, 6, 8]
-        assert result[0].bar_number == 2
-        assert result[1].bar_number == 4
-        assert result[2].bar_number == 6
-        assert result[3].bar_number == 8
-
-    def test_more_lines_than_active_bars(self) -> None:
-        """More lines than active bars: multiple lines per bar."""
-        lines = [LyricLine(text=f"Line {i}") for i in range(6)]
-        vocal_active = np.array([False, True, False, True, False])
-
-        result = map_plain_lyrics_to_bars(lines, vocal_active, total_bars=5)
-        # All lines should have bar numbers from [1, 3]
-        for line in result:
-            assert line.bar_number in [1, 3]
-
-    def test_no_vocal_active(self) -> None:
-        """No vocal_active data: distribute across all bars."""
-        lines = [LyricLine(text="Line 1"), LyricLine(text="Line 2")]
-        result = map_plain_lyrics_to_bars(lines, vocal_active=None, total_bars=4)
-        assert result[0].bar_number == 0
-        assert result[1].bar_number == 2
-
-    def test_empty_lines(self) -> None:
-        """Empty lines list returns empty."""
-        result = map_plain_lyrics_to_bars([], vocal_active=None, total_bars=10)
-        assert result == []
-
-    def test_zero_total_bars(self) -> None:
-        """Zero total bars returns unchanged lines."""
-        lines = [LyricLine(text="Line")]
-        result = map_plain_lyrics_to_bars(lines, vocal_active=None, total_bars=0)
-        assert result[0].bar_number is None
 
 
 # ===========================================================================
