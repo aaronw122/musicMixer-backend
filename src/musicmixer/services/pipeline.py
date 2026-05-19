@@ -1,7 +1,7 @@
 """Day 2 pipeline orchestrator.
 
 Runs the remix pipeline in a background thread, emitting SSE progress events.
-Complete 15-step chain: separation -> analysis -> plan -> processing -> render -> export.
+Complete 16-step chain: separation -> analysis -> plan -> processing -> render -> export.
 """
 
 import logging
@@ -1631,7 +1631,7 @@ def _step_fades(
     plan,
     event_queue, session,
 ):
-    """Step 16: Fade-in / fade-out.
+    """Step 15: Fade-in / fade-out.
 
     Returns mixed array with fades applied.
     """
@@ -1661,11 +1661,11 @@ def _step_export_and_finalize(
     session: SessionState,
     event_queue: queue.Queue,
 ):
-    """Step 17: Export MP3, write cache, update session, emit complete event."""
+    """Step 16: Export MP3, write cache, update session, emit complete event."""
     from musicmixer.config import settings
     from musicmixer.services.processor import export_mp3
 
-    logger.info("Session %s: [17/17] exporting MP3...", session_id)
+    logger.info("Session %s: [16/16] exporting MP3...", session_id)
     emit_progress(event_queue, {
         "step": "rendering",
         "detail": "Bouncing your remix...",
@@ -1788,8 +1788,8 @@ def run_pipeline(
        14.  Static mastering (LUFS normalize + limiter)
       14.5  Post-mastering LUFS correction (iterate-and-converge)
       14.6  Safety soft clip (catches inter-sample true peaks)
-       16.  Fade-in / fade-out
-       17.  Export to MP3 (320kbps, no pre-dither) + finalize session
+       15.  Fade-in / fade-out
+       16.  Export to MP3 (320kbps, no pre-dither) + finalize session
     """
     from pathlib import Path
     from musicmixer.config import settings
@@ -1943,12 +1943,12 @@ def run_pipeline(
         event_queue, session,
     )
 
-    # === STEP 16: Fades ===
+    # === STEP 15: Fades ===
     mixed = _step_fades(session_id, mixed, sr, plan, event_queue, session)
 
     check_cancelled(session)
 
-    # === STEP 17: Export + finalize ===
+    # === STEP 16: Export + finalize ===
     _step_export_and_finalize(
         session_id, mixed, sr, output_path, plan,
         remix_cache_key, session, event_queue,
