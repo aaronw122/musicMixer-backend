@@ -1054,13 +1054,15 @@ def _step_trim_filter_eq(
 
 def _step_compute_tempo_and_key_plan(
     session_id: str,
-    vocal_meta, inst_meta,
     meta_a, meta_b,
     plan,
     vocal_type: str,
     session: SessionState,
 ) -> tuple:
     """Steps 8 + 8.5: Compute tempo plan and key convergence.
+
+    meta_a is the vocal source, meta_b is the instrumental source
+    (fixed convention).
 
     Returns (target_bpm, need_vocal_rb, need_inst_rb,
              vocal_semitones, inst_semitones).
@@ -1070,7 +1072,7 @@ def _step_compute_tempo_and_key_plan(
 
     # === STEP 8: Compute tempo plan ===
     target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings, stretch_pct = compute_tempo_plan(
-        vocal_meta.bpm, inst_meta.bpm, plan.tempo_source,
+        meta_a.bpm, meta_b.bpm, plan.tempo_source,
     )
     plan.warnings.extend(tempo_warnings)
     logger.info(
@@ -1756,30 +1758,38 @@ def run_pipeline(
     """Complete remix pipeline: separation, analysis, tempo matching, arrangement, export.
 
     Pipeline steps:
-      1. Separate stems (concurrent for both songs)
-      2. Analyze both original songs (BPM, beat grid, duration)
-      3. Reconcile BPM between songs
-      4. Generate mix plan (LLM or deterministic fallback)
-     4.5. Taste stage (candidate generation + scoring, if enabled)
-      5. Determine vocal/instrumental sources from plan
-      6. Load and standardize all stems (44.1kHz, stereo, float32)
-      7. Trim stems to source time ranges
-     7.5. Detect and exclude near-silent stems
-     7.7. Vocal pre-filter bandpass (150Hz-16kHz)
-    7.75. Corrective EQ per stem (always on)
-      8. Compute tempo plan (target BPM, which stems to stretch)
-      9. Tempo match via rubberband
-     10. Post-stretch beat grid re-detection
-     11. Vocal compression (3:1, -20dB, 3.0dB makeup)
-    11.5. Cross-song level matching
-    11.8. Pre-limit drum/bass transients
-     12. Render arrangement into vocal + instrumental buses
-    12.5. Spectral ducking (300-3kHz pocket)
-     13. Sum buses into final mix
-    13.7. Auto-leveler (4s window, 1.5dB boost, 2.5dB cut)
-     14. Static mastering (LUFS normalize + limiter + correction loop + soft clip)
-     15. Fade-in / fade-out
-     16. Export to MP3 (320kbps, no pre-dither)
+        1.  Separate stems (concurrent for both songs)
+        2.  Analyze both original songs (BPM, beat grid, key, duration)
+        3.  Reconcile BPM between songs
+       3.5  Analyze song structure (sections, vocal gaps, PulseMap: chords,
+            polyphony, drums, word alignment)
+       3.7  Map lyrics timestamps to bar numbers
+       3.8  Measure per-stem LUFS for LLM interpreter
+        4.  Generate mix plan (LLM or deterministic fallback)
+       4.5  Taste stage (candidate generation + scoring, if enabled)
+        5.  Determine vocal/instrumental sources from plan
+        6.  Load and standardize all stems (44.1kHz, stereo, float32)
+        7.  Trim stems to source time ranges
+       7.5  Detect and exclude near-silent stems
+       7.7  Vocal pre-filter bandpass (150Hz-16kHz)
+      7.72  Adaptive spectral analysis (profiles, conflicts, corrections)
+      7.75  Corrective EQ per stem (adaptive when available, preset fallback)
+        8.  Compute tempo plan (target BPM, which stems to stretch)
+       8.5  Key convergence (pitch shifts to align keys)
+        9.  Tempo match via rubberband (parallel across stems)
+       10.  Post-stretch beat grid re-detection
+       11.  Vocal compression (3:1, -20dB threshold, 3.0dB makeup)
+      11.5  Cross-song level matching (LUFS-based)
+      11.8  Pre-limit drum and bass transients
+       12.  Render arrangement into vocal + instrumental buses
+      12.5  Spectral ducking (300Hz-3kHz pocket in instrumental)
+       13.  Sum buses into final mix
+      13.7  Auto-leveler (4s window, 1.5dB boost, 2.5dB cut)
+       14.  Static mastering (LUFS normalize + limiter)
+      14.5  Post-mastering LUFS correction (iterate-and-converge)
+      14.6  Safety soft clip (catches inter-sample true peaks)
+       16.  Fade-in / fade-out
+       17.  Export to MP3 (320kbps, no pre-dither) + finalize session
     """
     from pathlib import Path
     from musicmixer.config import settings
@@ -1887,10 +1897,9 @@ def run_pipeline(
     )
 
     # === STEPS 8+8.5: Tempo plan + key convergence ===
-    # vocal_meta = meta_a, inst_meta = meta_b (fixed convention)
     target_bpm, need_vocal_rb, need_inst_rb, vocal_semitones, inst_semitones = (
         _step_compute_tempo_and_key_plan(
-            session_id, meta_a, meta_b, meta_a, meta_b,
+            session_id, meta_a, meta_b,
             plan, vocal_type, session,
         )
     )
