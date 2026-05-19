@@ -26,6 +26,7 @@ dependencies = [
     "essentia; python_version < '3.12'",
     "lv-chordia>=0.1.0",
     "whisperx>=3.0.0",
+    "redis>=7.4.0",
 ]
 
 [project.optional-dependencies]

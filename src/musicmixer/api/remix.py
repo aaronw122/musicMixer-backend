@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from musicmixer.config import settings
-from musicmixer.models import SessionState
+from musicmixer.models import CachedSong, SessionState
 from musicmixer.services.cleanup import cleanup_expired_sessions
 from musicmixer.api.shelf import ensure_on_shelf
 
@@ -133,10 +133,11 @@ def _pipeline_wrapper(
     Ownership note: after successful executor.submit(), this wrapper is the sole
     owner of the acquired processing slot and MUST release it on exit.
     """
+    from musicmixer.services.pipeline import CancelledError, run_pipeline
+
     pipeline_start = time.monotonic()
     try:
         session.status = "processing"
-        from musicmixer.services.pipeline import CancelledError, run_pipeline
 
         run_pipeline(
             session_id=session_id,
@@ -297,6 +298,8 @@ def _youtube_pipeline_wrapper(
     app_state,
     shelf_song_id_a: str | None = None,
     shelf_song_id_b: str | None = None,
+    cached_song_a: CachedSong | None = None,
+    cached_song_b: CachedSong | None = None,
 ) -> None:
     """Downloads YouTube audio in parallel, then runs the pipeline.
 
@@ -308,13 +311,88 @@ def _youtube_pipeline_wrapper(
     owner of the acquired processing slot and MUST release it on exit.
     """
     pipeline_start = time.monotonic()
+    from musicmixer.services.pipeline import (
+        CancelledError, analyze_songs, emit_progress, run_remix, run_pipeline,
+    )
+
     try:
         session.status = "processing"
-        from musicmixer.services.pipeline import CancelledError, emit_progress, run_pipeline
         from musicmixer.services.youtube import download_youtube_audio
 
         upload_dir = settings.data_dir / "uploads" / session_id
         upload_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Check if both songs are fully cached (stems + metadata) ---
+        both_fully_cached = (
+            cached_song_a is not None and cached_song_a.has_stems
+            and cached_song_b is not None and cached_song_b.has_stems
+        )
+
+        if both_fully_cached:
+            # Skip downloads + analysis — jump straight to remix with cached data
+            logger.info("Session %s: Both songs fully cached, skipping downloads + analysis", session_id)
+            emit_progress(session.events, {
+                "step": "downloading",
+                "detail": "Both songs cached — skipping download!",
+                "progress": 0.45,
+            }, session=session)
+
+            from musicmixer.services.pipeline import check_cancelled, _step_measure_stem_lufs
+            from musicmixer.services.song_cache import get_cached_stems
+            from musicmixer.models import AnalyzedSongs
+
+            check_cancelled(session)
+
+            assert cached_song_a is not None
+            assert cached_song_b is not None
+
+            # Copy cached stems to session directory
+            stems_dir = settings.data_dir / "stems" / session_id
+            song_a_stems_dir = stems_dir / "song_a"
+            song_b_stems_dir = stems_dir / "song_b"
+            stems_restored = (
+                get_cached_stems(cached_song_a.video_id, song_a_stems_dir)
+                and get_cached_stems(cached_song_b.video_id, song_b_stems_dir)
+            )
+
+            if stems_restored:
+                # Build stem path dicts
+                stem_names = ["vocals", "drums", "bass", "guitar", "piano", "other"]
+                song_a_stems = {n: song_a_stems_dir / f"{n}.wav" for n in stem_names if (song_a_stems_dir / f"{n}.wav").exists()}
+                song_b_stems = {n: song_b_stems_dir / f"{n}.wav" for n in stem_names if (song_b_stems_dir / f"{n}.wav").exists()}
+
+                # Measure LUFS from restored stems
+                vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(
+                    session_id, song_a_stems_dir, song_b_stems_dir,
+                )
+
+                analysis = AnalyzedSongs(
+                    meta_a=cached_song_a.meta,
+                    meta_b=cached_song_b.meta,
+                    song_a_stems=song_a_stems,
+                    song_b_stems=song_b_stems,
+                    song_a_stems_dir=song_a_stems_dir,
+                    song_b_stems_dir=song_b_stems_dir,
+                    lyrics_a=cached_song_a.lyrics,
+                    lyrics_b=cached_song_b.lyrics,
+                    vocal_stem_lufs=vocal_stem_lufs,
+                    inst_stem_lufs=inst_stem_lufs,
+                )
+
+                run_remix(
+                    session_id=session_id,
+                    analysis=analysis,
+                    prompt=prompt,
+                    event_queue=session.events,
+                    session=session,
+                    source_quality_a=cached_song_a.meta.source_quality,
+                    source_quality_b=cached_song_b.meta.source_quality,
+                )
+                _update_avg_remix_duration(time.monotonic() - pipeline_start)
+                return
+
+            # Stems gone from disk — fall through to normal download path
+            logger.warning("Session %s: Cached stems missing, falling back to full pipeline", session_id)
 
         # --- Monotonic progress tracker ---
         # Both downloads report into the 0.05-0.45 range.  Song A maps to
@@ -413,14 +491,11 @@ def _youtube_pipeline_wrapper(
             session_id, source_quality_a, source_quality_b,
         )
 
-        # --- Run existing pipeline (45-100%) ---
-        # The pipeline's own progress events map into the remaining 45-100% range.
-        # We pass the WAV paths directly — the pipeline doesn't know they came from YouTube.
-        run_pipeline(
+        # --- Analyze + remix (45-100%) ---
+        analysis = analyze_songs(
             session_id=session_id,
             song_a_path=str(result_a.wav_path),
             song_b_path=str(result_b.wav_path),
-            prompt=prompt,
             event_queue=session.events,
             session=session,
             song_a_original_filename=result_a.title,
@@ -429,6 +504,30 @@ def _youtube_pipeline_wrapper(
             source_quality_b=source_quality_b,
             shelf_song_id_a=shelf_song_id_a,
             shelf_song_id_b=shelf_song_id_b,
+        )
+
+        # Cache analysis results to Redis for future cache hits
+        from musicmixer.api.shelf import _extract_video_id
+        from musicmixer.services.song_cache import cache_song_metadata, cache_song_stems
+        from pathlib import Path
+
+        for url, title, meta, lyrics, stems_dir in [
+            (url_a, result_a.title, analysis.meta_a, analysis.lyrics_a, analysis.song_a_stems_dir),
+            (url_b, result_b.title, analysis.meta_b, analysis.lyrics_b, analysis.song_b_stems_dir),
+        ]:
+            vid = _extract_video_id(url)
+            if vid is not None:
+                cache_song_metadata(vid, title, "", meta, lyrics)
+                cache_song_stems(vid, Path(stems_dir))
+
+        run_remix(
+            session_id=session_id,
+            analysis=analysis,
+            prompt=prompt,
+            event_queue=session.events,
+            session=session,
+            source_quality_a=source_quality_a,
+            source_quality_b=source_quality_b,
         )
         _update_avg_remix_duration(time.monotonic() - pipeline_start)
 
@@ -681,6 +780,19 @@ def create_youtube_remix(
     if shelf_song_id_b:
         logger.info("Resolved shelf song ID for URL B: %s", shelf_song_id_b[:12])
 
+    # Check Redis song cache for each URL
+    from musicmixer.api.shelf import _extract_video_id
+    from musicmixer.services.song_cache import get_cached_song
+
+    video_id_a = _extract_video_id(body.url_a)
+    video_id_b = _extract_video_id(body.url_b)
+    cached_a = get_cached_song(video_id_a) if video_id_a else None
+    cached_b = get_cached_song(video_id_b) if video_id_b else None
+    if cached_a:
+        logger.info("Song cache HIT for URL A (video_id=%s, has_stems=%s)", video_id_a, cached_a.has_stems)
+    if cached_b:
+        logger.info("Song cache HIT for URL B (video_id=%s, has_stems=%s)", video_id_b, cached_b.has_stems)
+
     # Auto-save both songs to the shelf (idempotent — skips duplicates)
     try:
         ensure_on_shelf(body.url_a)
@@ -765,6 +877,8 @@ def create_youtube_remix(
             app_state,
             shelf_song_id_a=shelf_song_id_a,
             shelf_song_id_b=shelf_song_id_b,
+            cached_song_a=cached_a,
+            cached_song_b=cached_b,
         )
 
     _enqueue_or_start(app_state, session_id, session, run_fn)

@@ -11,6 +11,8 @@ services:
       - "host.docker.internal:host-gateway"
     mem_limit: 3g
     env_file: .env
+    depends_on:
+      - redis
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8880/health')"]
       interval: 30s
@@ -22,7 +24,17 @@ services:
       - ${MODAL_TOML_PATH:-/root/.modal.toml}:/root/.modal.toml:ro
       - ${YT_COOKIES_PATH:-/root/musicmixer/yt-cookies.txt}:/app/yt-cookies.txt
       - yt-dlp-cache:/root/.cache/yt-dlp
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    restart: unless-stopped
+
 
 volumes:
   musicmixer-data:
   yt-dlp-cache:
+  redis-data:
