@@ -48,6 +48,44 @@ _HAS_WHISPERX = bool(__import__("importlib").util.find_spec("whisperx"))
 
 
 # ---------------------------------------------------------------------------
+# Lazy-loaded WhisperX model singletons (avoids 5-15s reload per call)
+# ---------------------------------------------------------------------------
+
+_whisperx_model = None
+_whisperx_model_key: tuple[str, str] | None = None  # (device, compute_type)
+
+_align_model = None
+_align_metadata = None
+_align_model_key: tuple[str, str] | None = None  # (language_code, device)
+
+
+def _get_whisperx_model(device: str, compute_type: str):
+    """Return cached WhisperX transcription model, loading on first call."""
+    global _whisperx_model, _whisperx_model_key
+    key = (device, compute_type)
+    if _whisperx_model is None or _whisperx_model_key != key:
+        import whisperx
+        logger.info("Loading WhisperX model (device=%s, compute_type=%s)...", device, compute_type)
+        _whisperx_model = whisperx.load_model("base", device, compute_type=compute_type, language="en")
+        _whisperx_model_key = key
+    return _whisperx_model
+
+
+def _get_align_model(language_code: str, device: str):
+    """Return cached WhisperX alignment model + metadata, loading on first call."""
+    global _align_model, _align_metadata, _align_model_key
+    key = (language_code, device)
+    if _align_model is None or _align_model_key != key:
+        import whisperx
+        logger.info("Loading WhisperX align model (lang=%s, device=%s)...", language_code, device)
+        _align_model, _align_metadata = whisperx.load_align_model(
+            language_code=language_code, device=device,
+        )
+        _align_model_key = key
+    return _align_model, _align_metadata
+
+
+# ---------------------------------------------------------------------------
 # Roman numeral mapping for chord summary
 # ---------------------------------------------------------------------------
 
@@ -511,14 +549,12 @@ def align_words(
     _orig_load = torch.load
     torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
     try:
-        model = _whisperx.load_model("base", device, compute_type=compute_type, language="en")
+        model = _get_whisperx_model(device, compute_type)
         audio = _whisperx.load_audio(str(vocal_stem_path))
         result = model.transcribe(audio, batch_size=8, language="en")
 
         # Align with wav2vec2
-        align_model, metadata = _whisperx.load_align_model(
-            language_code="en", device=device,
-        )
+        align_model, metadata = _get_align_model("en", device)
         aligned = _whisperx.align(
             result["segments"], align_model, metadata, audio, device,
             return_char_alignments=False,

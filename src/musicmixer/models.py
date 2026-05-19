@@ -135,15 +135,14 @@ class CrossSongRelationships:
 
 @dataclass
 class LyricLine:
-    """A single line of lyrics, optionally synced to a timestamp and bar."""
+    """A single line of lyrics, optionally synced to a timestamp."""
     text: str
     timestamp_seconds: float | None = None
-    bar_number: int | None = None
 
 
 @dataclass
 class LyricsData:
-    """Complete lyrics data for a song, with optional bar-level sync."""
+    """Complete lyrics data for a song."""
     artist: str
     title: str
     source: str              # "lrclib" | "musixmatch" | "filename" | "id3"
