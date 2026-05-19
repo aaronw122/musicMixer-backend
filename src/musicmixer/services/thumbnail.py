@@ -46,8 +46,11 @@ async def fetch_thumbnail(url: str) -> tuple[bytes, str]:
     try:
         async with httpx.AsyncClient(
             timeout=_FETCH_TIMEOUT_SECONDS,
-            follow_redirects=True,
-            max_redirects=3,
+            # Redirects disabled: YouTube thumbnail CDN URLs are direct and
+            # don't redirect in practice.  Disabling prevents SSRF via
+            # attacker-controlled redirect targets if the allowlist ever
+            # admits a domain that issues open redirects.
+            follow_redirects=False,
         ) as client:
             response = await client.get(url)
             response.raise_for_status()
