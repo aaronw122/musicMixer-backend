@@ -29,7 +29,7 @@ image = (
 )
 
 
-@app.function(image=image, gpu="A10G", timeout=300)
+@app.function(image=image, gpu="L40S", timeout=300)
 def separate_stems_remote(audio_bytes: bytes, filename: str = "input.wav") -> dict[str, bytes]:
     """Run BS-Roformer-SW 6-stem separation on cloud GPU.
 
