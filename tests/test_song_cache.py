@@ -149,14 +149,17 @@ def _make_lyrics_data() -> LyricsData:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def clean_redis():
-    """Flush test keys before and after each test."""
+    """Provide a fresh Redis client and clean up test keys after each test."""
+    import musicmixer.services.song_cache as _mod
+    _mod._redis_client = None  # reset singleton to force fresh connection
     r = _get_redis()
     yield r
     # Clean up any test keys
     for key in r.scan_iter("song:test_*"):
         r.delete(key)
+    _mod._redis_client = None
 
 
 @pytest.fixture
