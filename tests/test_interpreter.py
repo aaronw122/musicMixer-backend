@@ -1238,42 +1238,41 @@ def _sample_stem_analysis() -> StemAnalysis:
     )
 
 
-class TestPulseMapSystemPrompt:
-    """Tests for PulseMap rules in the static system prompt."""
+class TestMixingRulesInPrompt:
+    """Tests that mixing rules (polyphony, chords, drums, word timing) are in the static system prompt."""
 
-    def test_pulsemap_rules_in_static_block(self):
-        """PulseMap analysis rules section appears in static system prompt."""
+    def test_no_pulsemap_section_header(self):
+        """PulseMap analysis rules section has been dissolved into existing sections."""
         block = _build_system_prompt_block()
         text = block["text"]
-        assert "PULSEMAP ANALYSIS RULES" in text
+        assert "PULSEMAP ANALYSIS RULES" not in text
 
     def test_polyphony_rules_present(self):
-        """Polyphony rules appear in static system prompt."""
+        """Polyphony rules appear in Stem Role Guidelines."""
         block = _build_system_prompt_block()
         text = block["text"]
         assert "polyphonic vocals" in text.lower()
         assert "Solo vocals" in text
 
     def test_chord_rules_present(self):
-        """Chord progression rules appear in static system prompt."""
+        """Chord progression rules appear in Arrangement/Transitions sections."""
         block = _build_system_prompt_block()
         text = block["text"]
-        assert "chord progressions" in text.lower()
+        assert "chord changes" in text.lower()
         assert "Shared chords" in text
 
     def test_drum_rules_present(self):
-        """Drum pattern rules appear in static system prompt."""
+        """Drum pattern rules appear in Genre Guidance."""
         block = _build_system_prompt_block()
         text = block["text"]
-        assert "drum patterns" in text.lower()
         assert "groove compatibility" in text.lower()
 
-    def test_word_alignment_rules_present(self):
-        """Word-level timing rules appear in static system prompt."""
+    def test_word_timing_rules_present(self):
+        """Word-level timing rules appear in Transitions and Stem Role Guidelines."""
         block = _build_system_prompt_block()
         text = block["text"]
-        assert "word-level timing" in text.lower()
-        assert "vocal gaps >500ms" in text
+        assert "Vocal gaps >500ms" in text
+        assert "breathe WITH the vocal" in text
 
 
 class TestPulseMapLayer1:

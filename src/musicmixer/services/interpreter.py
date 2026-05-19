@@ -232,6 +232,8 @@ FREQUENCY AWARENESS (role assignment guide):
 - Drums and bass rarely conflict with vocals — they are safe at "support" alongside vocal "lead". Exception: heavy sub-bass (808s, deep bass synths) can mud low male vocals or baritone singers. In bass-heavy genres (trap, hip-hop), demote bass to "background" during vocal leads if the vocal energy sits low.
 - The "other" stem is the most dangerous vocal mask when it contains sustained mid-range content (synth leads, pads, sustained strings). Default it to "texture" in vocal sections unless Layer 3 shows it is low-energy or sparse. In hip-hop/R&B, "other" is often horn stabs or samples that sit fine at "background".
 - In medium-energy sections, keep max 3 stems at "support" or above — push the rest to "background". Peak sections are exempt: a full-band climax with 4-5 stems at "support" is what makes it peak.
+- Polyphonic vocals (harmony/duet) already fill the mid-frequency space. Reduce concurrent instrumental stems to avoid mud. Solo vocals have more headroom — you can layer denser instrumentals underneath.
+- Instrumental energy should breathe WITH the vocal: pull back during rapid-fire lyrics, push forward during held notes or gaps.
 
 ENERGY LEVELS AND ARC:
 - "low": Sparse, minimal. If leading INTO a higher section, keep 1-2 stems at "support" to maintain momentum. If fading out, everything "background" or lower.
@@ -258,7 +260,8 @@ MIXING ADVISORY:
 - Default: start with instrumental only (establishes the beat before vocals enter)
 - Always end with instrumental only or a fade
 - transition_beats must be less than half the entry length, and never more than 8 beats. Long crossfades destroy punch.
-- Label meanings: "chorus" = vocal-led high energy. "drop" = instrumental-led high energy. "bridge" = transitional. "breakdown" = energy decreasing."""
+- Label meanings: "chorus" = vocal-led high energy. "drop" = instrumental-led high energy. "bridge" = transitional. "breakdown" = energy decreasing.
+- Prefer section boundaries that align with chord changes. Avoid placing vocal sections over instrumental sections with clashing chord progressions."""
 
     # Section 6: Genre Guidance
     section_6 = """GENRE GUIDANCE (infer from BPM + energy profile + section map):
@@ -268,7 +271,8 @@ MIXING ADVISORY:
 - Pop/rock (100-140 BPM): Verse-chorus dynamics — stripped for verses, full for choruses. Guitar often drives energy shifts.
 - EDM/dance (120-160 BPM): Breakdown -> build -> drop. Align drops with sections annotated DROP. The "other" stem often carries the main synth hook.
 - Jam/rock (variable BPM): Extended instrumental sections. Vocal gaps are natural entry points.
-- If BPM alone is ambiguous (e.g., 130 BPM could be pop, EDM, or trap), use the section map and energy profile to disambiguate. Trap has sparse density; EDM has full+extra density at drops; pop has verse-chorus alternation."""
+- If BPM alone is ambiguous (e.g., 130 BPM could be pop, EDM, or trap), use the section map and energy profile to disambiguate. Trap has sparse density; EDM has full+extra density at drops; pop has verse-chorus alternation.
+- Check groove compatibility between songs. Same drum style = safe to blend. Conflicting styles = use one song's drums at a time. Sparse drum patterns leave room for rhythmically complex vocals; dense patterns work better under simpler vocal lines."""
 
     # Section 8: Stem Separation Artifacts
     section_8 = """STEM SEPARATION ARTIFACTS:
@@ -279,7 +283,9 @@ Stem separation leaves residual bleed — ghost vocals in instrumental stems, in
 - "cut": Hard switch with no overlap. Best for maximum impact when moving UP in energy (breakdown-to-drop, build-to-chorus) or for same-energy lateral transitions (verse-to-verse). Avoid for large energy drops — sounds broken.
 - "crossfade": Gradual blend over transition_beats. Default choice — works for ascending, descending, and same-level transitions. Prefer over cut when energy change is gradual.
 - "fade": Volume ramp from/to silence. Use for the first section (fade in) and last section (fade out). Also works for bringing vocals in from nothing.
-- Transitions should land on bar boundaries (multiples of 4 beats). A crossfade starting mid-bar sounds sloppy."""
+- Transitions should land on bar boundaries (multiples of 4 beats). A crossfade starting mid-bar sounds sloppy.
+- Shared chords between Song A and Song B are ideal transition points.
+- Vocal gaps >500ms are safe transition points. Place section transitions during word gaps, not mid-phrase."""
 
     # Section 4: Arrangement Approach (reference patterns, not rigid templates)
     section_4 = """ARRANGEMENT APPROACH:
@@ -311,34 +317,12 @@ WARNINGS: Populate this array ONLY for issues that actually degrade audio qualit
 - Key shift exceeds 3 semitones
 Do NOT warn about normal characteristics like one song having more vocals than the other — that is expected (Song A provides vocals, Song B provides instrumentals). Empty array is fine."""
 
-    # Section 11: PulseMap analysis rules (polyphony, chords, drums, word alignment)
-    section_11 = """PULSEMAP ANALYSIS RULES (when analysis data is available in Layers 1/3/4/5):
-
-POLYPHONY:
-- If Song A has polyphonic vocals (harmony/duet), the vocal stem already fills the mid-frequency space. Reduce concurrent instrumental stems to avoid mud.
-- Solo vocals have more headroom — you can layer denser instrumentals underneath.
-
-CHORD PROGRESSIONS:
-- When chord progressions are available, prefer section boundaries that align with chord changes.
-- Shared chords between Song A and Song B are ideal transition points.
-- Avoid placing vocal sections over instrumental sections with clashing chord progressions.
-
-DRUM PATTERNS:
-- When drum patterns are available, check groove compatibility. Same style = safe to blend. Conflicting styles = use one song's drums at a time.
-- Sparse drum patterns leave room for rhythmically complex vocals. Dense patterns work better under simpler vocal lines.
-
-WORD-LEVEL TIMING:
-- When word-level timing is available, use it for precision: vocal gaps >500ms are safe transition points.
-- Place section transitions during word gaps, not mid-phrase.
-- Instrumental energy should breathe WITH the vocal: pull back during rapid-fire lyrics, push forward during held notes or gaps."""
-
     # Ordering principle: definitions first, rules after.
     # Block 1 (ontology): role → arrangement rules → transitions → arrangement approach → stem roles → genre
     # Block 2 (constraints): guards → artifact awareness → tempo/key rules → explanation/warnings
-    # Block 3 (conditional): PulseMap analysis rules
     static_sections = [
         section_1, section_2, section_3, section_4, section_5, section_6,
-        section_7, section_8, section_9, section_10, section_11,
+        section_7, section_8, section_9, section_10,
     ]
     return {
         "type": "text",
