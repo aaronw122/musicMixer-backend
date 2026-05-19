@@ -203,6 +203,19 @@ Coming in Day 2. Day 1 pipeline is fully synchronous (POST blocks until done).
 
 8. **Modal container cold starts** can take 60-90s on first run. Subsequent runs are faster. The pipeline timeout is 300s to accommodate this.
 
+## PulseMap Analysis Setup
+
+WhisperX (word alignment) requires a one-time model pre-download:
+
+```bash
+cd backend
+uv run python -c "import torch; _l=torch.load; torch.load=lambda *a,**k:_l(*a,**{**k,'weights_only':False}); import whisperx; whisperx.load_model('base','cpu',compute_type='int8',language='en'); print('done')"
+```
+
+This downloads the Whisper base model, pyannote VAD model, and wav2vec2 alignment model (~1.5GB total). Without this, word alignment will fail on first run.
+
+**Torch 2.6+ compatibility:** The pyannote VAD checkpoint uses `omegaconf` globals that torch's `weights_only=True` default blocks. The pre-download command and `pulsemap.py` both monkey-patch `torch.load` with `weights_only=False` to work around this. Version mismatch warnings during download are safe to ignore.
+
 ## Lessons Learned
 
 - **Kill background agents before `uv run dev`.** Agents writing files in the backend dir trigger `--reload` restart loops. See "File Watcher" section above. Quick check: `pgrep -lf 'claude -p|codex exec'`

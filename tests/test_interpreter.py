@@ -5,13 +5,34 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from musicmixer.models import AudioMetadata, EnergyBuckets, IntentPlan, IntentSection, LyricLine, LyricsData, RemixPlan, Section, StemAnalysis
+from musicmixer.models import (
+    AudioMetadata,
+    ChordEvent,
+    ChordProgression,
+    DrumPattern,
+    EnergyBuckets,
+    IntentPlan,
+    IntentSection,
+    LyricLine,
+    LyricsData,
+    PolyphonyInfo,
+    RemixPlan,
+    Section,
+    StemAnalysis,
+    WordAlignment,
+    WordEvent,
+)
 from musicmixer.services.interpreter import (
     LLM_MAX_TOKENS,
     TARGET_REMIX_DURATION_SECONDS,
+    _build_cross_song_layer,
     _build_dynamic_context,
     _build_few_shot_messages,
+    _build_lyrics_layer,
+    _build_song_info,
+    _build_stem_character,
     _build_system_prompt_block,
+    _format_word_timing_sample,
     _validate_intent_duration,
     _validate_intent_plan,
     default_arrangement,
@@ -1116,3 +1137,366 @@ class TestLLMMaxTokensConstant:
 
         call_kwargs = mock_client.messages.create.call_args.kwargs
         assert call_kwargs["max_tokens"] == LLM_MAX_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# PulseMap prompt integration tests
+# ---------------------------------------------------------------------------
+
+
+def _make_metadata_with_pulsemap(
+    bpm: float = 120.0,
+    duration: float = 240.0,
+    chord_progression: ChordProgression | None = None,
+    polyphony_info: PolyphonyInfo | None = None,
+    drum_pattern: DrumPattern | None = None,
+    word_alignment: WordAlignment | None = None,
+    stem_analysis: StemAnalysis | None = None,
+) -> AudioMetadata:
+    """Create AudioMetadata with optional PulseMap fields for testing."""
+    beat_interval_frames = int(60 / bpm * 44100 / 512)
+    num_beats = int(bpm * duration / 60)
+    beat_frames = np.arange(0, num_beats) * beat_interval_frames
+    total_beats = round(bpm * duration / 60 / 4) * 4
+    return AudioMetadata(
+        bpm=bpm,
+        bpm_confidence=0.9,
+        beat_frames=beat_frames,
+        duration_seconds=duration,
+        total_beats=total_beats,
+        chord_progression=chord_progression,
+        polyphony_info=polyphony_info,
+        drum_pattern=drum_pattern,
+        word_alignment=word_alignment,
+        stem_analysis=stem_analysis,
+    )
+
+
+def _sample_chord_progression() -> ChordProgression:
+    return ChordProgression(
+        chords=[
+            ChordEvent(0, 2000, "Cmaj7"),
+            ChordEvent(2000, 4000, "Am"),
+            ChordEvent(4000, 6000, "F"),
+            ChordEvent(6000, 8000, "G"),
+        ],
+        unique_chords=["Cmaj7", "Am", "F", "G"],
+        most_common_chord="Cmaj7",
+        progression_summary="I-vi-IV-V in C major",
+    )
+
+
+def _sample_polyphony_solo() -> PolyphonyInfo:
+    return PolyphonyInfo(polyphonic=False, method="mid_side", gate1_ratio=0.02, gate2_ratio=None)
+
+
+def _sample_polyphony_duet() -> PolyphonyInfo:
+    return PolyphonyInfo(polyphonic=True, method="mid_side", gate1_ratio=0.25, gate2_ratio=45.0)
+
+
+def _sample_drum_pattern() -> DrumPattern:
+    return DrumPattern(
+        kick_count=48, snare_count=24, hihat_count=96,
+        total_hits=168, duration_ms=180000,
+        style_hint="four_on_floor",
+    )
+
+
+def _sample_word_alignment() -> WordAlignment:
+    return WordAlignment(
+        words=[
+            WordEvent(start_ms=12340, text="Never", end=12560),
+            WordEvent(start_ms=12560, text="gonna", end=12780),
+            WordEvent(start_ms=12780, text="give", end=12950),
+            WordEvent(start_ms=12950, text="you", end=13100),
+            WordEvent(start_ms=13100, text="up", end=13300),
+        ],
+        source="whisperx",
+        lrclib_validated=True,
+        lrclib_offset_ms=50,
+    )
+
+
+def _sample_stem_analysis() -> StemAnalysis:
+    """Minimal stem analysis for testing Layer 3."""
+    n_bars = 60
+    return StemAnalysis(
+        bar_rms={
+            "vocals": np.full(n_bars, 0.1, dtype=np.float32),
+            "drums": np.full(n_bars, 0.15, dtype=np.float32),
+            "bass": np.full(n_bars, 0.12, dtype=np.float32),
+            "guitar": np.full(n_bars, 0.08, dtype=np.float32),
+            "piano": np.full(n_bars, 0.05, dtype=np.float32),
+            "other": np.full(n_bars, 0.03, dtype=np.float32),
+        },
+        combined_energy=np.full(n_bars, 0.5, dtype=np.float32),
+        vocal_active=np.ones(n_bars, dtype=bool),
+        vocal_gaps=[],
+        bucket_thresholds=EnergyBuckets(
+            noise_floor=0.02, p10=0.04, p50=0.08, p85=0.14,
+        ),
+    )
+
+
+class TestMixingRulesInPrompt:
+    """Tests that mixing rules (polyphony, chords, drums, word timing) are in the static system prompt."""
+
+    def test_no_pulsemap_section_header(self):
+        """PulseMap analysis rules section has been dissolved into existing sections."""
+        block = _build_system_prompt_block()
+        text = block["text"]
+        assert "PULSEMAP ANALYSIS RULES" not in text
+
+    def test_polyphony_rules_present(self):
+        """Polyphony rules appear in Stem Role Guidelines."""
+        block = _build_system_prompt_block()
+        text = block["text"]
+        assert "polyphonic vocals" in text.lower()
+        assert "Solo vocals" in text
+
+    def test_chord_rules_present(self):
+        """Chord progression rules appear in Arrangement/Transitions sections."""
+        block = _build_system_prompt_block()
+        text = block["text"]
+        assert "chord changes" in text.lower()
+        assert "Shared chords" in text
+
+    def test_drum_rules_present(self):
+        """Drum pattern rules appear in Genre Guidance."""
+        block = _build_system_prompt_block()
+        text = block["text"]
+        assert "groove compatibility" in text.lower()
+
+    def test_word_timing_rules_present(self):
+        """Word-level timing rules appear in Transitions and Stem Role Guidelines."""
+        block = _build_system_prompt_block()
+        text = block["text"]
+        assert "Vocal gaps >500ms" in text
+        assert "breathe WITH the vocal" in text
+
+
+class TestPulseMapLayer1:
+    """Tests for PulseMap data in Layer 1 (Song Overview)."""
+
+    def test_chord_progression_in_song_info(self):
+        """Chord progression summary appears in Layer 1 when present."""
+        meta = _make_metadata_with_pulsemap(chord_progression=_sample_chord_progression())
+        info = _build_song_info("Song A", meta, meta.total_beats)
+        assert "Chords: I-vi-IV-V in C major" in info
+
+    def test_no_chords_no_chord_line(self):
+        """No chord line when chord_progression is None."""
+        meta = _make_metadata_with_pulsemap()
+        info = _build_song_info("Song A", meta, meta.total_beats)
+        assert "Chords:" not in info
+
+    def test_polyphony_solo_in_song_info(self):
+        """Solo voice label appears when polyphony is solo."""
+        meta = _make_metadata_with_pulsemap(polyphony_info=_sample_polyphony_solo())
+        info = _build_song_info("Song A", meta, meta.total_beats)
+        assert "solo voice" in info
+
+    def test_polyphony_duet_in_song_info(self):
+        """Harmony/duet label appears when polyphony is polyphonic."""
+        meta = _make_metadata_with_pulsemap(polyphony_info=_sample_polyphony_duet())
+        info = _build_song_info("Song A", meta, meta.total_beats)
+        assert "harmony/duet detected" in info
+
+    def test_no_polyphony_no_line(self):
+        """No polyphony line when polyphony_info is None."""
+        meta = _make_metadata_with_pulsemap()
+        info = _build_song_info("Song A", meta, meta.total_beats)
+        assert "polyphony" not in info.lower()
+
+
+class TestPulseMapLayer3:
+    """Tests for PulseMap data in Layer 3 (Stem Character)."""
+
+    def test_drum_pattern_in_stem_character(self):
+        """Drum pattern info appears in Layer 3 when present."""
+        meta = _make_metadata_with_pulsemap(
+            drum_pattern=_sample_drum_pattern(),
+            stem_analysis=_sample_stem_analysis(),
+        )
+        char = _build_stem_character("Song B", meta)
+        assert "Drum pattern: four-on-floor" in char
+        assert "kick=48" in char
+        assert "snare=24" in char
+        assert "hihat=96" in char
+
+    def test_no_drum_pattern_no_line(self):
+        """No drum pattern line when drum_pattern is None."""
+        meta = _make_metadata_with_pulsemap(stem_analysis=_sample_stem_analysis())
+        char = _build_stem_character("Song B", meta)
+        assert "Drum pattern:" not in char
+
+    def test_silent_drum_pattern_no_line(self):
+        """No drum pattern line when total_hits is 0."""
+        silent_drums = DrumPattern(
+            kick_count=0, snare_count=0, hihat_count=0,
+            total_hits=0, duration_ms=180000,
+            style_hint="silent",
+        )
+        meta = _make_metadata_with_pulsemap(
+            drum_pattern=silent_drums,
+            stem_analysis=_sample_stem_analysis(),
+        )
+        char = _build_stem_character("Song B", meta)
+        assert "Drum pattern:" not in char
+
+
+class TestPulseMapLayer4:
+    """Tests for PulseMap data in Layer 4 (Cross-Song)."""
+
+    def test_shared_chords_compatibility(self):
+        """Chord compatibility line shows shared chords when both songs have them."""
+        chords_a = ChordProgression(
+            chords=[], unique_chords=["Am", "F", "C", "G"],
+            most_common_chord="Am", progression_summary="test",
+        )
+        chords_b = ChordProgression(
+            chords=[], unique_chords=["Am", "F", "Dm", "E"],
+            most_common_chord="Am", progression_summary="test",
+        )
+        meta_a = _make_metadata_with_pulsemap(chord_progression=chords_a)
+        meta_b = _make_metadata_with_pulsemap(chord_progression=chords_b)
+        cross = _build_cross_song_layer(meta_a, meta_b)
+        assert "Chord compatibility:" in cross
+        assert "Am" in cross
+        assert "F" in cross
+        assert "good harmonic overlap" in cross
+
+    def test_no_shared_chords(self):
+        """Warns about harmonic clashes when no chords are shared."""
+        chords_a = ChordProgression(
+            chords=[], unique_chords=["C", "G"],
+            most_common_chord="C", progression_summary="test",
+        )
+        chords_b = ChordProgression(
+            chords=[], unique_chords=["Dm", "E"],
+            most_common_chord="Dm", progression_summary="test",
+        )
+        meta_a = _make_metadata_with_pulsemap(chord_progression=chords_a)
+        meta_b = _make_metadata_with_pulsemap(chord_progression=chords_b)
+        cross = _build_cross_song_layer(meta_a, meta_b)
+        assert "no shared chords" in cross
+
+    def test_no_chords_no_compatibility_line(self):
+        """No chord compatibility line when chord data is absent."""
+        meta_a = _make_metadata_with_pulsemap()
+        meta_b = _make_metadata_with_pulsemap()
+        cross = _build_cross_song_layer(meta_a, meta_b)
+        assert "Chord compatibility:" not in cross
+
+
+class TestPulseMapLayer5:
+    """Tests for PulseMap word alignment in Layer 5 (Lyrics)."""
+
+    def test_word_timing_appended_to_lyrics(self):
+        """Word timing sample appears after bar-level lyrics when word_alignment is set."""
+        lyrics = _make_lyrics()
+        wa = _sample_word_alignment()
+        result = _build_lyrics_layer(lyrics, None, word_alignment_a=wa)
+        # Bar-level lyrics must still be present
+        assert "bar" in result
+        assert "Hello world" in result
+        # Word timing should also appear
+        assert "word timing (sample)" in result
+        assert "[12340ms] Never" in result
+        assert "[13100ms] up" in result
+
+    def test_bar_level_preserved_without_word_alignment(self):
+        """Bar-level lyrics are preserved when word_alignment is None."""
+        lyrics = _make_lyrics()
+        result = _build_lyrics_layer(lyrics, None)
+        assert "bar" in result
+        assert "Hello world" in result
+        assert "word timing" not in result
+
+    def test_no_lyrics_no_word_timing(self):
+        """No word timing shown when there are no lyrics (even if alignment exists)."""
+        wa = _sample_word_alignment()
+        result = _build_lyrics_layer(None, None, word_alignment_a=wa)
+        assert result == ""
+
+    def test_format_word_timing_sample_basic(self):
+        """_format_word_timing_sample produces correct compact format."""
+        words = [
+            WordEvent(start_ms=1000, text="hello", end=1200),
+            WordEvent(start_ms=2000, text="world", end=2200),
+        ]
+        result = _format_word_timing_sample(words)
+        assert "[1000ms] hello" in result
+        assert "[2000ms] world" in result
+
+    def test_format_word_timing_sample_truncation(self):
+        """Long word lists are sampled down to max_words."""
+        words = [WordEvent(start_ms=i * 100, text=f"w{i}", end=i * 100 + 50) for i in range(100)]
+        result = _format_word_timing_sample(words, max_words=10)
+        # Should contain at most 10 word entries
+        assert result.count("ms]") == 10
+
+    def test_format_word_timing_sample_empty(self):
+        """Empty word list returns placeholder."""
+        result = _format_word_timing_sample([])
+        assert "no words" in result
+
+
+class TestPulseMapDynamicContext:
+    """Tests for PulseMap data flowing through _build_dynamic_context end-to-end."""
+
+    def test_all_pulsemap_fields_in_dynamic_context(self):
+        """When all PulseMap fields are populated, they appear in dynamic context."""
+        meta_a = _make_metadata_with_pulsemap(
+            chord_progression=_sample_chord_progression(),
+            polyphony_info=_sample_polyphony_duet(),
+            word_alignment=_sample_word_alignment(),
+            stem_analysis=_sample_stem_analysis(),
+        )
+        meta_b = _make_metadata_with_pulsemap(
+            chord_progression=ChordProgression(
+                chords=[], unique_chords=["Am", "Dm"],
+                most_common_chord="Am", progression_summary="test",
+            ),
+            drum_pattern=_sample_drum_pattern(),
+            stem_analysis=_sample_stem_analysis(),
+        )
+        lyrics_a = _make_lyrics()
+        args = dict(
+            song_a_meta=meta_a,
+            song_b_meta=meta_b,
+            total_available_beats=400,
+            lyrics_a=lyrics_a,
+        )
+        ctx = _build_dynamic_context(**args)
+
+        # Layer 1: chords and polyphony
+        assert "I-vi-IV-V in C major" in ctx
+        assert "harmony/duet detected" in ctx
+        # Layer 3: drum pattern
+        assert "four-on-floor" in ctx
+        # Layer 4: chord compatibility
+        assert "Chord compatibility:" in ctx
+        assert "Am" in ctx
+        # Layer 5: word timing
+        assert "word timing (sample)" in ctx
+        assert "[12340ms] Never" in ctx
+
+    def test_no_pulsemap_fields_graceful_degradation(self):
+        """When all PulseMap fields are None, context is still valid without them."""
+        meta_a = _make_metadata_with_pulsemap()
+        meta_b = _make_metadata_with_pulsemap()
+        args = dict(
+            song_a_meta=meta_a,
+            song_b_meta=meta_b,
+            total_available_beats=400,
+        )
+        ctx = _build_dynamic_context(**args)
+        assert "SONG DATA:" in ctx
+        assert "LAYER 1: SONG OVERVIEW" in ctx
+        # PulseMap-specific content should be absent
+        assert "Chords:" not in ctx
+        assert "polyphony" not in ctx.lower()
+        assert "Drum pattern:" not in ctx
+        assert "Chord compatibility:" not in ctx
+        assert "word timing" not in ctx

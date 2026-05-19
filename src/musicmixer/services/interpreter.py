@@ -22,7 +22,7 @@ from pathlib import Path
 import anthropic
 
 from musicmixer.config import settings
-from musicmixer.models import VOCAL_SOURCE, AudioMetadata, IntentPlan, IntentSection, LyricsData, RemixPlan, Section
+from musicmixer.models import VOCAL_SOURCE, AudioMetadata, IntentPlan, IntentSection, LyricsData, RemixPlan, Section, WordAlignment, WordEvent
 from musicmixer.services.tempo import compute_stretch_pct, estimate_material_budget, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -232,6 +232,8 @@ FREQUENCY AWARENESS (role assignment guide):
 - Drums and bass rarely conflict with vocals — they are safe at "support" alongside vocal "lead". Exception: heavy sub-bass (808s, deep bass synths) can mud low male vocals or baritone singers. In bass-heavy genres (trap, hip-hop), demote bass to "background" during vocal leads if the vocal energy sits low.
 - The "other" stem is the most dangerous vocal mask when it contains sustained mid-range content (synth leads, pads, sustained strings). Default it to "texture" in vocal sections unless Layer 3 shows it is low-energy or sparse. In hip-hop/R&B, "other" is often horn stabs or samples that sit fine at "background".
 - In medium-energy sections, keep max 3 stems at "support" or above — push the rest to "background". Peak sections are exempt: a full-band climax with 4-5 stems at "support" is what makes it peak.
+- Polyphonic vocals (harmony/duet) already fill the mid-frequency space. Reduce concurrent instrumental stems to avoid mud. Solo vocals have more headroom — you can layer denser instrumentals underneath.
+- Instrumental energy should breathe WITH the vocal: pull back during rapid-fire lyrics, push forward during held notes or gaps.
 
 ENERGY LEVELS AND ARC:
 - "low": Sparse, minimal. If leading INTO a higher section, keep 1-2 stems at "support" to maintain momentum. If fading out, everything "background" or lower.
@@ -258,7 +260,8 @@ MIXING ADVISORY:
 - Default: start with instrumental only (establishes the beat before vocals enter)
 - Always end with instrumental only or a fade
 - transition_beats must be less than half the entry length, and never more than 8 beats. Long crossfades destroy punch.
-- Label meanings: "chorus" = vocal-led high energy. "drop" = instrumental-led high energy. "bridge" = transitional. "breakdown" = energy decreasing."""
+- Label meanings: "chorus" = vocal-led high energy. "drop" = instrumental-led high energy. "bridge" = transitional. "breakdown" = energy decreasing.
+- Prefer section boundaries that align with chord changes. Avoid placing vocal sections over instrumental sections with clashing chord progressions."""
 
     # Section 6: Genre Guidance
     section_6 = """GENRE GUIDANCE (infer from BPM + energy profile + section map):
@@ -268,7 +271,8 @@ MIXING ADVISORY:
 - Pop/rock (100-140 BPM): Verse-chorus dynamics — stripped for verses, full for choruses. Guitar often drives energy shifts.
 - EDM/dance (120-160 BPM): Breakdown -> build -> drop. Align drops with sections annotated DROP. The "other" stem often carries the main synth hook.
 - Jam/rock (variable BPM): Extended instrumental sections. Vocal gaps are natural entry points.
-- If BPM alone is ambiguous (e.g., 130 BPM could be pop, EDM, or trap), use the section map and energy profile to disambiguate. Trap has sparse density; EDM has full+extra density at drops; pop has verse-chorus alternation."""
+- If BPM alone is ambiguous (e.g., 130 BPM could be pop, EDM, or trap), use the section map and energy profile to disambiguate. Trap has sparse density; EDM has full+extra density at drops; pop has verse-chorus alternation.
+- Check groove compatibility between songs. Same drum style = safe to blend. Conflicting styles = use one song's drums at a time. Sparse drum patterns leave room for rhythmically complex vocals; dense patterns work better under simpler vocal lines."""
 
     # Section 8: Stem Separation Artifacts
     section_8 = """STEM SEPARATION ARTIFACTS:
@@ -279,7 +283,9 @@ Stem separation leaves residual bleed — ghost vocals in instrumental stems, in
 - "cut": Hard switch with no overlap. Best for maximum impact when moving UP in energy (breakdown-to-drop, build-to-chorus) or for same-energy lateral transitions (verse-to-verse). Avoid for large energy drops — sounds broken.
 - "crossfade": Gradual blend over transition_beats. Default choice — works for ascending, descending, and same-level transitions. Prefer over cut when energy change is gradual.
 - "fade": Volume ramp from/to silence. Use for the first section (fade in) and last section (fade out). Also works for bringing vocals in from nothing.
-- Transitions should land on bar boundaries (multiples of 4 beats). A crossfade starting mid-bar sounds sloppy."""
+- Transitions should land on bar boundaries (multiples of 4 beats). A crossfade starting mid-bar sounds sloppy.
+- Shared chords between Song A and Song B are ideal transition points.
+- Vocal gaps >500ms are safe transition points. Place section transitions during word gaps, not mid-phrase."""
 
     # Section 4: Arrangement Approach (reference patterns, not rigid templates)
     section_4 = """ARRANGEMENT APPROACH:
@@ -432,7 +438,11 @@ Arrangements shorter than {int(min_ref * 0.7)}s will be REJECTED."""
         song_data_parts.append("\n=== LAYER 4: CROSS-SONG ===")
         song_data_parts.append(cross_song)
 
-    lyrics_layer = _build_lyrics_layer(lyrics_a, lyrics_b)
+    lyrics_layer = _build_lyrics_layer(
+        lyrics_a, lyrics_b,
+        word_alignment_a=getattr(song_a_meta, "word_alignment", None),
+        word_alignment_b=getattr(song_b_meta, "word_alignment", None),
+    )
     if lyrics_layer:
         song_data_parts.append(lyrics_layer)
 
@@ -544,6 +554,18 @@ def _build_stem_character(
     result = f"{label} stems: " + ". ".join(stem_descs) + "."
     if suppressed:
         result += f" ({' | '.join(suppressed)})"
+
+    # PulseMap: Drum pattern info
+    drum_pattern = getattr(meta, "drum_pattern", None)
+    if drum_pattern and drum_pattern.total_hits > 0:
+        style = drum_pattern.style_hint.replace("_", "-")
+        result += (
+            f" Drum pattern: {style} "
+            f"(kick={drum_pattern.kick_count}, "
+            f"snare={drum_pattern.snare_count}, "
+            f"hihat={drum_pattern.hihat_count})."
+        )
+
     return result
 
 
@@ -586,6 +608,19 @@ def _build_song_info(
         else:
             overview += " Energy: moderate dynamics."
 
+    # PulseMap: Chord progression summary
+    chord_prog = getattr(meta, "chord_progression", None)
+    if chord_prog and chord_prog.progression_summary:
+        overview += f" Chords: {chord_prog.progression_summary}."
+
+    # PulseMap: Vocal polyphony info
+    polyphony = getattr(meta, "polyphony_info", None)
+    if polyphony is not None:
+        if polyphony.polyphonic:
+            overview += " Vocal polyphony: harmony/duet detected."
+        else:
+            overview += " Vocal polyphony: solo voice."
+
     return overview
 
 
@@ -602,10 +637,14 @@ def _build_lyrics_layer(
     lyrics_a: LyricsData | None,
     lyrics_b: LyricsData | None,
     max_lines_per_song: int = 60,
+    word_alignment_a: WordAlignment | None = None,
+    word_alignment_b: WordAlignment | None = None,
 ) -> str:
     """Build Layer 5: Lyrics text for the system prompt.
 
     Formats synced lyrics with bar numbers, plain lyrics with just text.
+    When word_alignment is available for a song, appends a compact word-level
+    timing sample (additive -- bar-level lyrics remain as the primary view).
     Caps at max_lines_per_song per song; samples evenly if longer.
     Returns empty string if no lyrics exist for either song.
     """
@@ -616,6 +655,8 @@ def _build_lyrics_layer(
         "\n=== LAYER 5: LYRICS ===",
         "Use these lyrics to avoid cutting mid-phrase, identify hooks, and match themes to the prompt.",
     ]
+
+    word_alignments = {"Song A": word_alignment_a, "Song B": word_alignment_b}
 
     for label, lyrics in [("Song A", lyrics_a), ("Song B", lyrics_b)]:
         if not lyrics or not lyrics.lines:
@@ -637,7 +678,37 @@ def _build_lyrics_layer(
             else:
                 parts.append(f"  {line.text}")
 
+        # PulseMap: Word-level timing (additive, shown after bar-level lyrics)
+        word_alignment = word_alignments.get(label)
+        if word_alignment and word_alignment.words:
+            parts.append(f"\n{label} word timing (sample):")
+            parts.append(_format_word_timing_sample(word_alignment.words))
+
     return "\n".join(parts)
+
+
+def _format_word_timing_sample(
+    words: list[WordEvent],
+    max_words: int = 30,
+) -> str:
+    """Format a compact word-timing sample from WordEvent list.
+
+    Shows up to max_words words in "[ms] word" format, sampled evenly
+    if longer. Keeps token count reasonable (~100 tokens for 30 words).
+    """
+    if not words:
+        return "  (no words)"
+
+    sample = words
+    if len(words) > max_words:
+        step = len(words) / max_words
+        sample = [words[int(i * step)] for i in range(max_words)]
+
+    chunks: list[str] = []
+    for w in sample:
+        chunks.append(f"[{w.start_ms}ms] {w.text}")
+
+    return "  " + " ".join(chunks)
 
 
 def _build_cross_song_layer(
@@ -679,6 +750,20 @@ def _build_cross_song_layer(
         ]
         if inst_sections:
             lines.append(f"Instrumental source: Song B clean sections at {', '.join(inst_sections)}.")
+
+    # PulseMap: Chord compatibility between songs
+    chords_a = getattr(meta_a, "chord_progression", None)
+    chords_b = getattr(meta_b, "chord_progression", None)
+    if chords_a and chords_b and chords_a.unique_chords and chords_b.unique_chords:
+        shared = set(chords_a.unique_chords) & set(chords_b.unique_chords)
+        if shared:
+            shared_str = ", ".join(sorted(shared))
+            lines.append(
+                f"Chord compatibility: both songs share {shared_str} "
+                f"-- good harmonic overlap."
+            )
+        else:
+            lines.append("Chord compatibility: no shared chords -- watch for harmonic clashes.")
 
     # Stretch info
     if stretch_pct is not None and stretch_pct > 0:
