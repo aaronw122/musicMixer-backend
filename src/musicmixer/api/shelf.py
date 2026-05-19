@@ -7,13 +7,13 @@ import json
 import tempfile
 import threading
 import urllib.parse
-import urllib.request
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -102,14 +102,15 @@ def _extract_artist(title: str) -> str:
 
 def _fetch_noembed_metadata(youtube_url: str) -> dict[str, str]:
     params = urllib.parse.urlencode({"url": youtube_url})
-    request = urllib.request.Request(
-        f"{_NOEMBED_URL}?{params}",
-        headers={"User-Agent": "musicMixer/0.1"},
-    )
 
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        response = httpx.get(
+            f"{_NOEMBED_URL}?{params}",
+            headers={"User-Agent": "musicMixer/0.1"},
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
     except Exception as exc:
         raise HTTPException(502, "Failed to fetch YouTube metadata") from exc
 
