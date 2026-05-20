@@ -1135,7 +1135,7 @@ _STEP_PROGRESS_CEILING: dict[str, float] = {
     "separating": 0.39,
     "analyzing": 0.57,
     "interpreting": 0.62,
-    "processing": 0.89,
+    "processing": 0.92,
     "rendering": 0.98,
 }
 
@@ -1187,7 +1187,7 @@ async def _event_stream(
         try:
             event = await loop.run_in_executor(
                 sse_executor,
-                functools.partial(session.events.get, timeout=3),
+                functools.partial(session.events.get, timeout=2),
             )
         except queue.Empty:
             now = time.monotonic()
@@ -1201,7 +1201,7 @@ async def _event_stream(
                 # into the next step's allocated range.
                 ceiling = _STEP_PROGRESS_CEILING.get(last_step, 0.98)
                 if last_progress < ceiling:
-                    last_progress = min(last_progress + 0.003, ceiling)
+                    last_progress = min(last_progress + 0.008, ceiling)
                     nudge = {
                         "step": last_step,
                         "detail": last_detail,
