@@ -1127,21 +1127,48 @@ async def get_progress(session_id: str, request: Request):
     )
 
 
+# Maximum progress the SSE nudge may reach within each pipeline step.
+# Prevents the bar from drifting past the range allocated to the
+# current step while the pipeline is idle.
+_STEP_PROGRESS_CEILING: dict[str, float] = {
+    "downloading": 0.10,
+    "separating": 0.39,
+    "analyzing": 0.57,
+    "interpreting": 0.62,
+    "processing": 0.89,
+    "rendering": 0.98,
+}
+
+
 async def _event_stream(
     session: SessionState,
     sse_executor,
     app_state=None,
     session_id: str = "",
 ) -> AsyncGenerator[str, None]:
-    """Generate SSE data events from the session's event queue."""
+    """Generate SSE data events from the session's event queue.
+
+    When the queue is idle for >3s during processing, the stream emits
+    a small synthetic progress nudge so the client-side bar never
+    appears frozen.  Nudges are capped at the current step's ceiling
+    so progress can't drift into the next step's range.
+    """
     loop = asyncio.get_running_loop()
     start = time.monotonic()
     last_heartbeat = time.monotonic()
 
+    # Track the last emitted values so we can nudge forward during idle
+    last_step = ""
+    last_detail = ""
+    last_progress = 0.0
+
     # On connect: send current state so reconnecting clients catch up
     if session.last_event:
         yield f"data: {json.dumps(session.last_event)}\n\n"
-        if session.last_event.get("step") in ("complete", "error"):
+        last_step = session.last_event.get("step", "")
+        last_detail = session.last_event.get("detail", "")
+        last_progress = session.last_event.get("progress", 0.0)
+        if last_step in ("complete", "error"):
             return
 
     # Drain stale events that arrived before the client connected
@@ -1160,16 +1187,31 @@ async def _event_stream(
         try:
             event = await loop.run_in_executor(
                 sse_executor,
-                functools.partial(session.events.get, timeout=5),
+                functools.partial(session.events.get, timeout=3),
             )
         except queue.Empty:
             now = time.monotonic()
-            # Send heartbeat every 15s while queued, keepalive otherwise
+            # Send heartbeat every 15s while queued
             if session.status == "queued" and now - last_heartbeat >= 15:
                 yield 'data: {"step":"heartbeat","detail":"","progress":0}\n\n'
                 last_heartbeat = now
+            elif session.status == "processing" and 0 < last_progress < 0.98:
+                # Nudge progress forward so the bar never freezes.
+                # Capped at the current step's ceiling to prevent drift
+                # into the next step's allocated range.
+                ceiling = _STEP_PROGRESS_CEILING.get(last_step, 0.98)
+                if last_progress < ceiling:
+                    last_progress = min(last_progress + 0.003, ceiling)
+                    nudge = {
+                        "step": last_step,
+                        "detail": last_detail,
+                        "progress": round(last_progress, 3),
+                    }
+                    yield f"data: {json.dumps(nudge)}\n\n"
+                else:
+                    # At ceiling — send keepalive to maintain connection
+                    yield 'data: {"step":"keepalive","detail":"","progress":-1}\n\n'
             else:
-                # Send keepalive as a data event (not SSE comment) so EventSource.onmessage fires
                 yield 'data: {"step":"keepalive","detail":"","progress":-1}\n\n'
             continue
         except asyncio.CancelledError:
@@ -1179,6 +1221,9 @@ async def _event_stream(
             break
 
         session.last_event = event
+        last_step = event.get("step", last_step)
+        last_detail = event.get("detail", last_detail)
+        last_progress = max(last_progress, event.get("progress", last_progress))
         yield f"data: {json.dumps(event)}\n\n"
 
         if event.get("step") in ("complete", "error", "cancelled"):
