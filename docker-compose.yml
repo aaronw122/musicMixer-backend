@@ -19,6 +19,11 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - musicmixer-data:/app/data
       - ${MODAL_TOML_PATH:-/root/.modal.toml}:/root/.modal.toml:ro

@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
     _enforce_distributed_limiter_startup_guard()
 
     # Create data directories
-    for subdir in ("uploads", "stems", "remixes"):
+    for subdir in ("uploads", "stems", "remixes", "logs"):
         (settings.data_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     mix_capacity = settings.max_concurrent_mixes
