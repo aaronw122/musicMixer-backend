@@ -149,6 +149,17 @@ curl -X POST http://localhost:8000/api/remix \
 curl http://localhost:8000/api/remix/<session_id>/audio --output remix.mp3
 ```
 
+### Memory-Constrained Testing
+
+Production runs on Hetzner CPX21 (4GB RAM) with `mem_limit: 3g` in docker-compose. When making changes that could increase RAM usage (new audio buffers, larger data structures, additional concurrent work, new dependencies), verify under prod-like memory limits:
+
+```bash
+cd backend
+docker compose up --build   # enforces mem_limit: 3g from docker-compose.yml
+```
+
+Docker uses Linux cgroups to track real RSS — `ulimit -v` on macOS tracks virtual memory and gives false positives, so always use Docker for memory testing.
+
 ## Background Jobs
 
 Coming in Day 2. Day 1 pipeline is fully synchronous (POST blocks until done).
