@@ -13,9 +13,10 @@ from fastapi.staticfiles import StaticFiles
 
 from musicmixer.api import health, remix, shelf, thumbnail
 from musicmixer.config import settings
+from musicmixer.logging_config import setup_logging
 from musicmixer.services.cleanup import cleanup_expired_sessions
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 _WORKER_ENV_VARS = ("UVICORN_WORKERS", "WEB_CONCURRENCY")
 

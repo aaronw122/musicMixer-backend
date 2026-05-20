@@ -27,6 +27,7 @@ dependencies = [
     "lv-chordia>=0.1.0",
     "whisperx>=3.0.0",
     "redis>=7.4.0",
+    "python-json-logger>=4.1.0",
 ]
 
 [project.optional-dependencies]

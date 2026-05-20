@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     port: int = 8880
     cors_origins: list[str] = ["http://localhost:5173", "https://mixer.awill.co"]
 
+    # Logging
+    log_level: str = "INFO"
+
     # File limits
     max_file_size_mb: int = 50
     max_upload_duration_seconds: int = 900  # 15 minutes
