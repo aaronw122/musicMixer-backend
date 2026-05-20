@@ -314,6 +314,7 @@ def _youtube_pipeline_wrapper(
     from musicmixer.services.pipeline import (
         CancelledError, analyze_songs, emit_progress, run_remix, run_pipeline,
     )
+    from musicmixer.services.pipeline_metrics import PipelineMetrics
 
     try:
         session.status = "processing"
@@ -379,6 +380,26 @@ def _youtube_pipeline_wrapper(
                     inst_stem_lufs=inst_stem_lufs,
                 )
 
+                _metrics = PipelineMetrics(session_id=session_id)
+                _metrics.song_a_title = cached_song_a.title
+                _metrics.song_b_title = cached_song_b.title
+                _metrics.song_a_video_id = cached_song_a.video_id
+                _metrics.song_b_video_id = cached_song_b.video_id
+                _metrics.song_a_cache_hit = True
+                _metrics.song_b_cache_hit = True
+                _metrics.bpm_a = cached_song_a.meta.bpm
+                _metrics.bpm_b = cached_song_b.meta.bpm
+                _metrics.key_a = cached_song_a.meta.key or ""
+                _metrics.scale_a = cached_song_a.meta.scale or ""
+                _metrics.key_b = cached_song_b.meta.key or ""
+                _metrics.scale_b = cached_song_b.meta.scale or ""
+                _metrics.key_confidence_a = cached_song_a.meta.key_confidence or 0.0
+                _metrics.key_confidence_b = cached_song_b.meta.key_confidence or 0.0
+                _metrics.duration_a_s = cached_song_a.meta.duration_seconds
+                _metrics.duration_b_s = cached_song_b.meta.duration_seconds
+                _metrics.log_input()
+                _metrics.log_analysis()
+
                 run_remix(
                     session_id=session_id,
                     analysis=analysis,
@@ -387,6 +408,7 @@ def _youtube_pipeline_wrapper(
                     session=session,
                     source_quality_a=cached_song_a.meta.source_quality,
                     source_quality_b=cached_song_b.meta.source_quality,
+                    metrics=_metrics,
                 )
                 _update_avg_remix_duration(time.monotonic() - pipeline_start)
                 return
@@ -498,6 +520,14 @@ def _youtube_pipeline_wrapper(
         )
 
         # --- Analyze + remix (45-100%) ---
+        _metrics = PipelineMetrics(session_id=session_id)
+        # Populate video IDs and titles for YouTube inputs
+        from musicmixer.api.shelf import _extract_video_id as _yt_extract_vid
+        _vid_a = _yt_extract_vid(url_a)
+        _vid_b = _yt_extract_vid(url_b)
+        _metrics.song_a_video_id = _vid_a or ""
+        _metrics.song_b_video_id = _vid_b or ""
+
         analysis = analyze_songs(
             session_id=session_id,
             song_a_path=str(result_a.wav_path),
@@ -510,6 +540,7 @@ def _youtube_pipeline_wrapper(
             source_quality_b=source_quality_b,
             shelf_song_id_a=shelf_song_id_a,
             shelf_song_id_b=shelf_song_id_b,
+            metrics=_metrics,
         )
 
         # Cache analysis results to Redis for future cache hits
@@ -534,6 +565,7 @@ def _youtube_pipeline_wrapper(
             session=session,
             source_quality_a=source_quality_a,
             source_quality_b=source_quality_b,
+            metrics=_metrics,
         )
         _update_avg_remix_duration(time.monotonic() - pipeline_start)
 
