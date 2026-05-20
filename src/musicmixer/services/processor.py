@@ -420,7 +420,7 @@ def compute_tempo_plan(
             )
         elif vocal_stretch_pct > 0.25:
             warnings.append(
-                "Vocals stretched significantly to match the beat -- they may sound different."
+                "Tempo was adjusted to align the songs -- the audio may contain minor distortions."
             )
     else:
         if vocal_stretch_pct > 0.45:
@@ -431,7 +431,7 @@ def compute_tempo_plan(
             )
         elif vocal_stretch_pct > 0.30:
             warnings.append(
-                "Vocals stretched significantly to match the beat -- they may sound different."
+                "Tempo was adjusted to align the songs -- the audio may contain minor distortions."
             )
 
     # Instrumental thresholds (checked only if stretching wasn't already disabled)
@@ -447,7 +447,7 @@ def compute_tempo_plan(
                 )
             elif inst_stretch_pct > 0.25:
                 warnings.append(
-                    "Instrumental stretched significantly -- beat may sound different."
+                    "Tempo was adjusted to align the songs -- the audio may contain minor distortions."
                 )
         else:
             # Speedup: disable at 45%, warn at 25%
@@ -459,7 +459,7 @@ def compute_tempo_plan(
                 )
             elif inst_stretch_pct > 0.25:
                 warnings.append(
-                    "Instrumental stretched significantly -- beat may sound different."
+                    "Tempo was adjusted to align the songs -- the audio may contain minor distortions."
                 )
 
     # Compute stretch percentage for both songs, only including sides that are actually stretched
@@ -475,7 +475,7 @@ def compute_tempo_plan(
     )
     stretch_pct = max(vocal_stretch_pct_val, inst_stretch_pct_val)
 
-    return target_bpm, stretch_vocals, stretch_instrumentals, warnings, stretch_pct
+    return target_bpm, stretch_vocals, stretch_instrumentals, list(dict.fromkeys(warnings)), stretch_pct
 
 
 # ---------------------------------------------------------------------------

@@ -270,17 +270,16 @@ def _enforce_muting_budget(
 def _validate_energy_budgets(
     sections_gains: list[dict[str, float]],
     section_labels: list[str],
-) -> list[str]:
+) -> None:
     """Constraint 4: auto-correct sections whose total gain is below target.
 
     When a section's total gain falls below the energy budget minimum, all
     non-silent stems in that section are scaled proportionally upward so the
     total hits the minimum.  Individual gains are capped at 1.0.
 
-    Sections above the target range still produce warnings (no downward
+    Sections above the target range still produce log warnings (no downward
     auto-correction — clipping is safer to flag than to silently fix).
     """
-    warnings: list[str] = []
     for i, (gains, label) in enumerate(zip(sections_gains, section_labels)):
         total = sum(gains.values())
         targets = ENERGY_BUDGET_TARGETS.get(label)
@@ -303,35 +302,31 @@ def _validate_energy_budgets(
                     i, label, total, new_total, lo,
                 )
             else:
-                # All stems silent — nothing to scale; emit warning
-                msg = (
-                    f"Section {i} ({label}): total gain {total:.2f} below "
-                    f"target range [{lo:.1f}, {hi:.1f}] (all stems silent)"
+                logger.warning(
+                    "Energy budget: section %d (%s) total gain %.2f below "
+                    "target range [%.1f, %.1f] (all stems silent)",
+                    i, label, total, lo, hi,
                 )
-                logger.warning("Energy budget: %s", msg)
-                warnings.append(msg)
         elif total > hi:
-            msg = (
-                f"Section {i} ({label}): total gain {total:.2f} above "
-                f"target range [{lo:.1f}, {hi:.1f}]"
+            logger.warning(
+                "Energy budget: section %d (%s) total gain %.2f above "
+                "target range [%.1f, %.1f]",
+                i, label, total, lo, hi,
             )
-            logger.warning("Energy budget: %s", msg)
-            warnings.append(msg)
-    return warnings
 
 
 def _apply_constraints(
     sections_gains: list[dict[str, float]],
     intent_sections: list[IntentSection],
-) -> list[str]:
-    """Apply all plan-level constraints (Step D). Returns energy budget warnings."""
+) -> None:
+    """Apply all plan-level constraints (Step D)."""
     labels = [s.label for s in intent_sections]
     energies = [s.energy for s in intent_sections]
 
     _enforce_min_active_instrumentals(sections_gains, labels)
     _enforce_no_globally_muted(sections_gains, energies)
     _enforce_muting_budget(sections_gains, energies)
-    return _validate_energy_budgets(sections_gains, labels)
+    _validate_energy_budgets(sections_gains, labels)
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +381,7 @@ def map_intent_to_gains(
         sections_gains.append(gains)
 
     # Step D: plan-level constraints
-    energy_warnings = _apply_constraints(sections_gains, intent.sections)
+    _apply_constraints(sections_gains, intent.sections)
 
     # Step E: build Section objects
     sections: list[Section] = []
@@ -400,9 +395,6 @@ def map_intent_to_gains(
             transition_beats=intent_section.transition_beats,
         ))
 
-    # Combine warnings
-    all_warnings = list(intent.warnings) + energy_warnings
-
     return RemixPlan(
         vocal_source=VOCAL_SOURCE,
         start_time_vocal=intent.start_time_vocal,
@@ -412,5 +404,5 @@ def map_intent_to_gains(
         sections=sections,
         tempo_source="weighted_midpoint",
         explanation=intent.explanation,
-        warnings=all_warnings,
+        warnings=list(intent.warnings),
     )

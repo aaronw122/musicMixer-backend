@@ -759,7 +759,7 @@ class TestEndToEnd:
         assert plan.sections[1].stem_gains["piano"] >= plan_no_lufs.sections[1].stem_gains["piano"]
 
     def test_warnings_propagated(self):
-        """Intent warnings plus energy budget warnings should appear in output."""
+        """Intent warnings should appear in output (energy budget warnings are log-only)."""
         intent = self._realistic_plan()
         plan = map_intent_to_gains(intent)
         # The original warning should be present
@@ -801,11 +801,10 @@ class TestEnergyBudgetAutoCorrect:
         lo, hi = ENERGY_BUDGET_TARGETS["chorus"]
         assert total_before < lo, "Pre-condition: total should be below target"
 
-        warnings = _validate_energy_budgets(gains, ["chorus"])
+        _validate_energy_budgets(gains, ["chorus"])
         total_after = sum(gains[0].values())
 
         assert total_after >= lo, "Auto-correct should bring total to at least the minimum"
-        assert len(warnings) == 0, "No warnings expected after successful auto-correct"
 
     def test_auto_correct_preserves_ordering(self):
         """After scaling, relative ordering of gains is preserved (below cap)."""
@@ -842,21 +841,24 @@ class TestEnergyBudgetAutoCorrect:
         for stem, val in gains[0].items():
             assert val <= 1.0, f"{stem} gain {val} exceeds 1.0 after auto-correct"
 
-    def test_above_target_produces_warning(self):
-        """Section above energy budget still produces a warning (no downward correction)."""
+    def test_above_target_no_modification(self):
+        """Section above energy budget is not modified (no downward correction)."""
         # Intro with all stems at lead + peak energy — will be way above intro target
         section = _make_intent_section(
             label="intro", energy="peak",
             stem_roles={s: "lead" for s in ALL_STEMS},
         )
         gains = [_compute_section_gains(section, None, None)]
+        original = dict(gains[0])
         total = sum(gains[0].values())
         _, hi = ENERGY_BUDGET_TARGETS["intro"]
         assert total > hi, "Pre-condition: total should be above target"
 
-        warnings = _validate_energy_budgets(gains, ["intro"])
-        assert len(warnings) == 1
-        assert "above" in warnings[0]
+        _validate_energy_budgets(gains, ["intro"])
+
+        # Gains should be unchanged (logged, not corrected)
+        for stem in ALL_STEMS:
+            assert gains[0][stem] == pytest.approx(original[stem], abs=0.001)
 
     def test_within_target_no_change(self):
         """Section within budget range is not modified."""
@@ -866,19 +868,18 @@ class TestEnergyBudgetAutoCorrect:
         gains = [_compute_section_gains(section, None, None)]
         original = dict(gains[0])
 
-        warnings = _validate_energy_budgets(gains, ["verse"])
+        _validate_energy_budgets(gains, ["verse"])
 
-        assert len(warnings) == 0
         for stem in ALL_STEMS:
             assert gains[0][stem] == pytest.approx(original[stem], abs=0.001)
 
-    def test_all_silent_below_target_warns(self):
-        """All-silent section below budget warns instead of scaling (nothing to scale)."""
+    def test_all_silent_below_target_no_modification(self):
+        """All-silent section below budget doesn't modify gains."""
         gains = [{"vocals": 0.0, "drums": 0.0, "bass": 0.0,
                   "guitar": 0.0, "piano": 0.0, "other": 0.0}]
-        warnings = _validate_energy_budgets(gains, ["chorus"])
-        assert len(warnings) == 1
-        assert "all stems silent" in warnings[0]
+        _validate_energy_budgets(gains, ["chorus"])
+        # All gains should still be zero (nothing to scale)
+        assert all(v == 0.0 for v in gains[0].values())
 
 
 # ---------------------------------------------------------------------------
