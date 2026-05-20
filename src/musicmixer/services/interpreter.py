@@ -218,7 +218,7 @@ CAPABILITIES:
 7. ROLE VARIATION: Vary stem roles across sections. Strip down to drums+bass+vocals for contrast, then promote more stems to "support" for impact. Flat roles across all sections produces a lifeless mix.
 8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 lyrics and word timing with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section.
 9. VOCAL PRESENCE: Both songs carry musical identity. If Song B's instrumentals are only audible during intros and outros, the mashup is karaoke — Song B becomes wallpaper. Give Song B at least one section of 8-16 bars where it stands on its own: a breakdown, a drop, or an instrumental bridge in the middle of the arrangement. This lets the listener hear both songs as participants. If a stretch advisory is present in the dynamic context, defer to its vocal budget. Override freely when the source material or user prompt calls for vocal-forward treatment.
-10. VOCALS EARLY: Vocals should appear no later than the second section. A short instrumental intro (8-16 bars) is fine, but don't hold vocals back longer than that — users came to hear both songs together. Set start_time_vocal to 0 unless there's a specific reason to skip the beginning of the vocal track."""
+10. VOCAL INTRO LIMIT: An instrumental intro is fine for building tension, but vocals must appear within the first ~30-40 seconds of the remix. Longer than that and the listener loses interest — they came to hear both songs together. Set start_time_vocal to 0 unless there's a specific reason to skip the beginning of the vocal track."""
 
     # Section 5: Stem Role Guidelines (roles, frequency awareness, energy arc, mixing advisory, phrase alignment)
     section_5 = """STEM ROLE GUIDELINES:
@@ -1079,10 +1079,12 @@ def _validate_intent_plan(
     if remainder != 0:
         last.end_beat += (4 - remainder)
 
-    # 9. Ensure vocals are available from the start of the song.
-    #    The LLM sometimes sets start_time_vocal far into the song,
-    #    leaving only a small window of vocal material. Clamp it to 0
-    #    so the full vocal track is available for arrangement.
+    # 9. Ensure the full vocal track is available as source material.
+    #    The LLM sometimes sets start_time_vocal far into the song
+    #    (e.g. 165s), throwing away most of the vocals. Clamp to 0
+    #    so the arranger has the full track to work with. The LLM
+    #    can still use silent/texture roles to delay when vocals
+    #    actually appear — this just keeps the material available.
     if plan.start_time_vocal > 10.0:
         logger.info(
             "Clamped start_time_vocal from %.1fs to 0.0 "
