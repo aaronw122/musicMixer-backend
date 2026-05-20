@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from musicmixer.api import health, remix, shelf, thumbnail
+from musicmixer.api import health, remix, shelf, stats, thumbnail
 from musicmixer.config import settings
 from musicmixer.logging_config import setup_logging
 from musicmixer.services.cleanup import cleanup_expired_sessions
@@ -131,6 +131,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(remix.router, prefix="/api")
 app.include_router(shelf.router, prefix="/api")
+app.include_router(stats.router, prefix="/api")
 app.include_router(thumbnail.router, prefix="/api")
 
 
