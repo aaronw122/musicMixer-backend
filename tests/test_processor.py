@@ -388,7 +388,7 @@ class TestComputeTempoPlan:
 
         90 vs 130 BPM: target clamps to 90*1.12=100.8.
         Vocal stretch = 12%, OK. Instrumental stretch = 130->100.8 = 28.95% slowdown.
-        Should warn about instrumental stretch.
+        Should warn about stretch distortions.
         """
         target, stretch_v, stretch_i, warnings, stretch_pct = compute_tempo_plan(90.0, 130.0)
         # Target = 90*1.12 = 100.8 after clamping (gap > 20%, vocal stretch > 12%)
@@ -398,7 +398,7 @@ class TestComputeTempoPlan:
         # 25% < 28.97% < 35%: warn but don't disable
         assert stretch_v is True
         assert stretch_i is True
-        assert any("instrumental" in w.lower() for w in warnings)
+        assert any("distortions" in w.lower() for w in warnings)
 
     def test_stretch_pct_zero_when_disabled(self):
         """stretch_pct is 0.0 when stretching is disabled for both sides.
