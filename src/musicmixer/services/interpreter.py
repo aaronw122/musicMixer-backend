@@ -160,12 +160,12 @@ REMIX_PLAN_TOOL: dict = {
             "explanation": {
                 "type": "string",
                 "maxLength": 500,
-                "description": "2-3 non-technical sentences explaining what you did and why. Shown directly to the user.",
+                "description": "2-3 non-technical sentences explaining what you did and why. Shown directly to the user. Write for a casual listener — no technical terms like 'artifacts', 'tempo stretch', 'stems', 'gain', or percentages. Focus on the musical vibe and creative choices.",
             },
             "warnings": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Caveats: what you couldn't fulfill, prompt ambiguities, quality concerns. Empty array if none.",
+                "description": "Caveats: what you couldn't fulfill or prompt ambiguities. Do NOT warn about tempo stretching or audio quality — that is handled downstream. Empty array if none.",
             },
         },
         "additionalProperties": False,
@@ -361,19 +361,19 @@ def _build_dynamic_context(
     stretch_section = ""
     if stretch_pct is not None and stretch_pct > 12:
         if stretch_pct <= 15:
-            impact = "moderate — artifacts noticeable on sustained vocal notes"
+            impact = "moderate — distortions noticeable on sustained vocal notes"
             vocal_budget = "40%"
         else:
-            impact = "significant — artifacts clearly audible throughout vocals"
+            impact = "significant — distortions clearly audible throughout vocals"
             vocal_budget = "30%"
         stretch_section = f"""STRETCH ADVISORY ({stretch_pct:.1f}% stretch on vocals):
-Vocal time-stretching above 12% introduces audible artifacts (phasiness, vowel warble). At {stretch_pct:.1f}%, quality impact is {impact}.
+Vocal time-stretching above 12% introduces audible distortions (phasiness, vowel warble). At {stretch_pct:.1f}%, quality impact is {impact}.
 
 Arrangement guidance to minimize degradation:
 1. VOCAL BUDGET: Keep vocal sections to ≤{vocal_budget} of total beats. Fill remaining time with instrumental sections (intro, breakdown, outro).
 2. FRAMING: Open and close with instrumental sections — first and last impressions must be clean.
-3. VOCAL SECTION LENGTH: Prefer shorter vocal sections (4-8 bars) over long ones. The ear locks onto stretch artifacts over time; breaks reset perception.
-4. MASKING: Back vocal sections with full, busy instrumental beds (drums + bass + harmony). Sparse accompaniment exposes artifacts. Avoid vocals over minimal or solo-instrument backing.
+3. VOCAL SECTION LENGTH: Prefer shorter vocal sections (4-8 bars) over long ones. The ear locks onto stretch distortions over time; breaks reset perception.
+4. MASKING: Back vocal sections with full, busy instrumental beds (drums + bass + harmony). Sparse accompaniment exposes distortions. Avoid vocals over minimal or solo-instrument backing.
 5. ENERGY: Place vocals in higher-energy sections where the dense mix provides natural masking.
 
 These are quality-driven defaults. Override with musical judgment if the prompt demands a vocal-focused arrangement."""
@@ -930,7 +930,7 @@ def _build_few_shot_messages() -> list[dict]:
                         ],
                         "vocal_type": "sung",
                         "explanation": "Slow Jam's vocals sit over Upbeat Track's instrumental, keeping a relaxed feel. The bridge section uses guitar as lead for contrast before the final vocal chorus.",
-                        "warnings": ["Song B's tempo was adjusted ~10% to match Song A. Minor artifacts may be audible in sustained instruments."],
+                        "warnings": [],
                     },
                 }
             ],
