@@ -177,18 +177,42 @@ async def _download_via_proxy(
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> YouTubeAudioResult:
     """Download audio via the yt-proxy service (residential IP)."""
+    import asyncio as _asyncio
+
     proxy_url = settings.youtube_proxy_service_url
     api_key = settings.youtube_proxy_api_key
 
     if progress_callback:
-        progress_callback(0.1, "Sending to download service...")
+        progress_callback(0.05, "Connecting...")
 
-    async with httpx.AsyncClient(timeout=600) as client:
-        resp = await client.post(
-            f"{proxy_url}/download",
-            json={"url": url, "max_duration_seconds": settings.youtube_max_duration_seconds},
-            headers={"X-API-Key": api_key} if api_key else {},
-        )
+    # Background ticker that bumps progress while the HTTP POST blocks
+    download_done = _asyncio.Event()
+
+    async def _tick_progress():
+        if not progress_callback:
+            return
+        frac = 0.1
+        step = 0.06
+        while frac < 0.85:
+            await _asyncio.sleep(2.5)
+            if download_done.is_set():
+                return
+            frac = min(frac + step, 0.85)
+            step *= 0.9  # decelerate toward cap
+            progress_callback(frac, "Downloading...")
+
+    ticker = _asyncio.create_task(_tick_progress())
+
+    try:
+        async with httpx.AsyncClient(timeout=600) as client:
+            resp = await client.post(
+                f"{proxy_url}/download",
+                json={"url": url, "max_duration_seconds": settings.youtube_max_duration_seconds},
+                headers={"X-API-Key": api_key} if api_key else {},
+            )
+    finally:
+        download_done.set()
+        await ticker
 
     if resp.status_code != 200:
         detail = resp.json().get("detail", "Download failed") if resp.headers.get("content-type", "").startswith("application/json") else "Download failed"
@@ -203,7 +227,10 @@ async def _download_via_proxy(
     audio_path.write_bytes(resp.content)
 
     if progress_callback:
-        progress_callback(1.0, "Download complete")
+        progress_callback(0.95, "Saving...")
+
+    if progress_callback:
+        progress_callback(1.0, "Done!")
 
     logger.info("Downloaded via proxy: title=%s, duration=%.1fs, size=%.1fMB, path=%s", title, duration, len(resp.content) / 1e6, audio_path)
 
