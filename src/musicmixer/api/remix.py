@@ -334,7 +334,7 @@ def _youtube_pipeline_wrapper(
             emit_progress(session.events, {
                 "step": "downloading",
                 "detail": "Both songs cached — skipping download!",
-                "progress": 0.45,
+                "progress": 0.10,
             }, session=session)
 
             from musicmixer.services.pipeline import check_cancelled, _step_measure_stem_lufs
@@ -395,8 +395,8 @@ def _youtube_pipeline_wrapper(
             logger.warning("Session %s: Cached stems missing, falling back to full pipeline", session_id)
 
         # --- Monotonic progress tracker ---
-        # Both downloads report into the 0.05-0.45 range.  Song A maps to
-        # 0.05-0.25 and Song B maps to 0.25-0.45 — but because they run
+        # Both downloads report into the 0.02-0.10 range.  Song A maps to
+        # 0.02-0.06 and Song B maps to 0.06-0.10 — but because they run
         # concurrently, raw values can arrive out-of-order.  We only emit
         # when the new value exceeds the high-water mark.
         _progress_lock = threading.Lock()
@@ -415,18 +415,24 @@ def _youtube_pipeline_wrapper(
             }, session=session)
 
         # --- Emit initial downloading event ---
-        _emit_monotonic("Downloading songs from YouTube...", 0.05)
+        _emit_monotonic("Getting your songs ready...", 0.02)
 
         # --- Progress callbacks ---
         def _progress_a(fraction: float, status: str) -> None:
-            # Map fraction 0-1 to progress 0.05-0.25
-            progress = 0.05 + fraction * 0.20
-            _emit_monotonic(f"Downloading song A: {status}", progress)
+            # Map fraction 0-1 to progress 0.02-0.06
+            progress = 0.02 + fraction * 0.04
+            if fraction >= 1.0:
+                _emit_monotonic("Got the first song!", progress)
+            else:
+                _emit_monotonic("Grabbing your first song...", progress)
 
         def _progress_b(fraction: float, status: str) -> None:
-            # Map fraction 0-1 to progress 0.25-0.45
-            progress = 0.25 + fraction * 0.20
-            _emit_monotonic(f"Downloading song B: {status}", progress)
+            # Map fraction 0-1 to progress 0.06-0.10
+            progress = 0.06 + fraction * 0.04
+            if fraction >= 1.0:
+                _emit_monotonic("Got the second song!", progress)
+            else:
+                _emit_monotonic("Grabbing your second song...", progress)
 
         # --- Download helpers (run async fn in a fresh event loop per thread) ---
         def _download_a():
@@ -463,7 +469,7 @@ def _youtube_pipeline_wrapper(
                 dl_executor.shutdown(wait=False, cancel_futures=True)
                 raise
 
-        _emit_monotonic("Both songs downloaded!", 0.45)
+        _emit_monotonic("Got both songs!", 0.10)
 
         max_processing_duration = settings.processing_max_duration_seconds
         _pre_trim_youtube_download(result_a, max_processing_duration)

@@ -460,9 +460,9 @@ class TestYouTubePipelineWrapper:
         """Wrapper should emit 'downloading' step progress events.
 
         Downloads run in parallel, so event ordering between A and B is
-        non-deterministic.  We verify: initial event at 0.05, at least one
-        progress callback fires, and the final "Both songs downloaded!" event
-        is at 0.45.  The monotonic tracker suppresses out-of-order values.
+        non-deterministic.  We verify: initial event at 0.02, at least one
+        progress callback fires, and the final "Got both songs!" event
+        is at 0.10.  The monotonic tracker suppresses out-of-order values.
         """
         from musicmixer.api.remix import _youtube_pipeline_wrapper
         from musicmixer.models import SessionState
@@ -519,13 +519,13 @@ class TestYouTubePipelineWrapper:
         download_events = [e for e in events if e.get("step") == "downloading"]
         assert len(download_events) >= 2  # At least: initial + "Both songs downloaded!"
 
-        # First event should be the initial download announcement at 0.05
-        assert download_events[0]["detail"] == "Downloading songs from YouTube..."
-        assert download_events[0]["progress"] == 0.05
+        # First event should be the initial download announcement at 0.02
+        assert download_events[0]["detail"] == "Getting your songs ready..."
+        assert download_events[0]["progress"] == 0.02
 
-        # Last downloading event should be "Both songs downloaded!" at 0.45
-        assert download_events[-1]["detail"] == "Both songs downloaded!"
-        assert download_events[-1]["progress"] == 0.45
+        # Last downloading event should be "Got both songs!" at 0.10
+        assert download_events[-1]["detail"] == "Got both songs!"
+        assert download_events[-1]["progress"] == 0.10
 
         # Progress values should be monotonically increasing
         progress_values = [e["progress"] for e in download_events]
@@ -594,13 +594,13 @@ class TestYouTubeProgressFlow:
             from musicmixer.services.pipeline import emit_progress
             emit_progress(session.events, {
                 "step": "downloading",
-                "detail": "Downloading song A from YouTube...",
-                "progress": 0.05,
+                "detail": "Getting your songs ready...",
+                "progress": 0.02,
             }, session=session)
             emit_progress(session.events, {
                 "step": "downloading",
-                "detail": "Both songs downloaded!",
-                "progress": 0.45,
+                "detail": "Got both songs!",
+                "progress": 0.10,
             }, session=session)
             emit_progress(session.events, {
                 "step": "complete",
