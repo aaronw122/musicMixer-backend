@@ -347,35 +347,20 @@ def _run_pulsemap_analysis(
     song_a_stems_dir, song_b_stems_dir,
     lyrics_a_data, session_id: str,
 ) -> None:
-    """Run PulseMap analyses in parallel (chords, polyphony, drums, word alignment).
+    """Run PulseMap analyses (chords sequential, lightweight tasks parallel).
 
+    Chords run one-at-a-time to limit peak memory (~500MB per ensemble).
+    Polyphony, drums, and word alignment run in parallel (lightweight).
     Each analysis is config-gated and wrapped in try/except so failures
     don't block the pipeline.  Mutates meta_a / meta_b in place.
     """
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+    from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
     from musicmixer.config import settings
 
-    from concurrent.futures import Future
     pulsemap_futures: dict[str, Future] = {}
-    pulsemap_workers = 0
     vocal_stem_a = song_a_stems_dir / "vocals.wav"
     drum_stem_b = song_b_stems_dir / "drums.wav"
-
-    if settings.pulsemap_polyphony_enabled and vocal_stem_a.exists():
-        pulsemap_workers += 1
-    if settings.pulsemap_chords_enabled and song_a_path is not None:
-        pulsemap_workers += 1
-    if settings.pulsemap_chords_enabled and song_b_path is not None:
-        pulsemap_workers += 1
-    if settings.pulsemap_drums_enabled and drum_stem_b.exists():
-        pulsemap_workers += 1
-    if settings.pulsemap_word_alignment_enabled and vocal_stem_a.exists():
-        pulsemap_workers += 1
-
-    if pulsemap_workers == 0:
-        logger.info("Session %s: PulseMap analysis: all analyses disabled or stems missing", session_id)
-        return
 
     from musicmixer.services.pulsemap import (
         align_words,
@@ -383,108 +368,112 @@ def _run_pulsemap_analysis(
         detect_polyphony,
         transcribe_drum_pattern,
     )
-    logger.info(
-        "Session %s: PulseMap analysis: submitting %d tasks",
-        session_id, pulsemap_workers,
-    )
 
-    with ThreadPoolExecutor(max_workers=pulsemap_workers) as pool:
-        if settings.pulsemap_polyphony_enabled and vocal_stem_a.exists():
-            pulsemap_futures["polyphony"] = pool.submit(detect_polyphony, vocal_stem_a)
+    _PULSEMAP_TIMEOUT_S = 120
+    task_count = 0
 
-        if settings.pulsemap_chords_enabled and song_a_path is not None:
-            pulsemap_futures["chords_a"] = pool.submit(detect_chords, song_a_path)
-
-        if settings.pulsemap_chords_enabled and song_b_path is not None:
-            pulsemap_futures["chords_b"] = pool.submit(detect_chords, song_b_path)
-
-        if settings.pulsemap_drums_enabled and drum_stem_b.exists():
-            pulsemap_futures["drums"] = pool.submit(transcribe_drum_pattern, drum_stem_b)
-
-        if settings.pulsemap_word_alignment_enabled and vocal_stem_a.exists():
-            pulsemap_futures["word_align"] = pool.submit(
-                align_words, vocal_stem_a, lyrics_a_data,
+    # --- Sequential chord detection (each loads ~500MB of ensemble models) ---
+    if settings.pulsemap_chords_enabled and song_a_path is not None:
+        task_count += 1
+        try:
+            meta_a.chord_progression = detect_chords(song_a_path)
+            logger.info(
+                "Session %s: Song A chords: %d events, summary=%s",
+                session_id,
+                len(meta_a.chord_progression.chords),
+                meta_a.chord_progression.progression_summary,
             )
+        except Exception:
+            logger.warning("Session %s: Chord detection failed for Song A", session_id, exc_info=True)
 
-        # Collect results (120s timeout — word alignment with WhisperX can be slow)
-        _PULSEMAP_TIMEOUT_S = 120
+    if settings.pulsemap_chords_enabled and song_b_path is not None:
+        task_count += 1
+        try:
+            meta_b.chord_progression = detect_chords(song_b_path)
+            logger.info(
+                "Session %s: Song B chords: %d events, summary=%s",
+                session_id,
+                len(meta_b.chord_progression.chords),
+                meta_b.chord_progression.progression_summary,
+            )
+        except Exception:
+            logger.warning("Session %s: Chord detection failed for Song B", session_id, exc_info=True)
 
-        if "polyphony" in pulsemap_futures:
-            try:
-                meta_a.polyphony_info = pulsemap_futures["polyphony"].result(timeout=_PULSEMAP_TIMEOUT_S)
-                logger.info(
-                    "Session %s: Polyphony: %s (method=%s)",
-                    session_id,
-                    "polyphonic" if meta_a.polyphony_info.polyphonic else "solo",
-                    meta_a.polyphony_info.method,
+    # --- Parallel lightweight tasks (polyphony + drums) ---
+    pulsemap_workers = 0
+    if settings.pulsemap_polyphony_enabled and vocal_stem_a.exists():
+        pulsemap_workers += 1
+    if settings.pulsemap_drums_enabled and drum_stem_b.exists():
+        pulsemap_workers += 1
+    if settings.pulsemap_word_alignment_enabled and vocal_stem_a.exists():
+        pulsemap_workers += 1
+
+    if pulsemap_workers == 0 and task_count == 0:
+        logger.info("Session %s: PulseMap analysis: all analyses disabled or stems missing", session_id)
+        return
+
+    task_count += pulsemap_workers
+    logger.info("Session %s: PulseMap analysis: running %d tasks (chords sequential, rest parallel)", session_id, task_count)
+
+    if pulsemap_workers > 0:
+        with ThreadPoolExecutor(max_workers=pulsemap_workers) as pool:
+            if settings.pulsemap_polyphony_enabled and vocal_stem_a.exists():
+                pulsemap_futures["polyphony"] = pool.submit(detect_polyphony, vocal_stem_a)
+
+            if settings.pulsemap_drums_enabled and drum_stem_b.exists():
+                pulsemap_futures["drums"] = pool.submit(transcribe_drum_pattern, drum_stem_b)
+
+            if settings.pulsemap_word_alignment_enabled and vocal_stem_a.exists():
+                pulsemap_futures["word_align"] = pool.submit(
+                    align_words, vocal_stem_a, lyrics_a_data,
                 )
-            except FuturesTimeoutError:
-                logger.warning("Session %s: Polyphony detection timed out", session_id)
-                pulsemap_futures["polyphony"].cancel()
-            except Exception:
-                logger.warning("Session %s: Polyphony detection failed", session_id, exc_info=True)
 
-        if "chords_a" in pulsemap_futures:
-            try:
-                meta_a.chord_progression = pulsemap_futures["chords_a"].result(timeout=_PULSEMAP_TIMEOUT_S)
-                logger.info(
-                    "Session %s: Song A chords: %d events, summary=%s",
-                    session_id,
-                    len(meta_a.chord_progression.chords),
-                    meta_a.chord_progression.progression_summary,
-                )
-            except FuturesTimeoutError:
-                logger.warning("Session %s: Chord detection timed out for Song A", session_id)
-                pulsemap_futures["chords_a"].cancel()
-            except Exception:
-                logger.warning("Session %s: Chord detection failed for Song A", session_id, exc_info=True)
+            if "polyphony" in pulsemap_futures:
+                try:
+                    meta_a.polyphony_info = pulsemap_futures["polyphony"].result(timeout=_PULSEMAP_TIMEOUT_S)
+                    logger.info(
+                        "Session %s: Polyphony: %s (method=%s)",
+                        session_id,
+                        "polyphonic" if meta_a.polyphony_info.polyphonic else "solo",
+                        meta_a.polyphony_info.method,
+                    )
+                except FuturesTimeoutError:
+                    logger.warning("Session %s: Polyphony detection timed out", session_id)
+                    pulsemap_futures["polyphony"].cancel()
+                except Exception:
+                    logger.warning("Session %s: Polyphony detection failed", session_id, exc_info=True)
 
-        if "chords_b" in pulsemap_futures:
-            try:
-                meta_b.chord_progression = pulsemap_futures["chords_b"].result(timeout=_PULSEMAP_TIMEOUT_S)
-                logger.info(
-                    "Session %s: Song B chords: %d events, summary=%s",
-                    session_id,
-                    len(meta_b.chord_progression.chords),
-                    meta_b.chord_progression.progression_summary,
-                )
-            except FuturesTimeoutError:
-                logger.warning("Session %s: Chord detection timed out for Song B", session_id)
-                pulsemap_futures["chords_b"].cancel()
-            except Exception:
-                logger.warning("Session %s: Chord detection failed for Song B", session_id, exc_info=True)
+            if "drums" in pulsemap_futures:
+                try:
+                    meta_b.drum_pattern = pulsemap_futures["drums"].result(timeout=_PULSEMAP_TIMEOUT_S)
+                    logger.info(
+                        "Session %s: Drum pattern: %s (kick=%d, snare=%d, hihat=%d)",
+                        session_id,
+                        meta_b.drum_pattern.style_hint,
+                        meta_b.drum_pattern.kick_count,
+                        meta_b.drum_pattern.snare_count,
+                        meta_b.drum_pattern.hihat_count,
+                    )
+                except FuturesTimeoutError:
+                    logger.warning("Session %s: Drum transcription timed out", session_id)
+                    pulsemap_futures["drums"].cancel()
+                except Exception:
+                    logger.warning("Session %s: Drum transcription failed", session_id, exc_info=True)
 
-        if "drums" in pulsemap_futures:
-            try:
-                meta_b.drum_pattern = pulsemap_futures["drums"].result(timeout=_PULSEMAP_TIMEOUT_S)
-                logger.info(
-                    "Session %s: Drum pattern: %s (kick=%d, snare=%d, hihat=%d)",
-                    session_id,
-                    meta_b.drum_pattern.style_hint,
-                    meta_b.drum_pattern.kick_count,
-                    meta_b.drum_pattern.snare_count,
-                    meta_b.drum_pattern.hihat_count,
-                )
-            except FuturesTimeoutError:
-                logger.warning("Session %s: Drum transcription timed out", session_id)
-                pulsemap_futures["drums"].cancel()
-            except Exception:
-                logger.warning("Session %s: Drum transcription failed", session_id, exc_info=True)
-
-        if "word_align" in pulsemap_futures:
-            try:
-                meta_a.word_alignment = pulsemap_futures["word_align"].result(timeout=_PULSEMAP_TIMEOUT_S)
-                logger.info(
-                    "Session %s: Word alignment: %d words, validated=%s",
-                    session_id,
-                    len(meta_a.word_alignment.words),
-                    meta_a.word_alignment.lrclib_validated,
-                )
-            except FuturesTimeoutError:
-                logger.warning("Session %s: Word alignment timed out", session_id)
-                pulsemap_futures["word_align"].cancel()
-            except Exception:
-                logger.warning("Session %s: Word alignment failed", session_id, exc_info=True)
+            if "word_align" in pulsemap_futures:
+                try:
+                    meta_a.word_alignment = pulsemap_futures["word_align"].result(timeout=_PULSEMAP_TIMEOUT_S)
+                    logger.info(
+                        "Session %s: Word alignment: %d words, validated=%s",
+                        session_id,
+                        len(meta_a.word_alignment.words),
+                        meta_a.word_alignment.lrclib_validated,
+                    )
+                except FuturesTimeoutError:
+                    logger.warning("Session %s: Word alignment timed out", session_id)
+                    pulsemap_futures["word_align"].cancel()
+                except Exception:
+                    logger.warning("Session %s: Word alignment failed", session_id, exc_info=True)
 
 
 def _step_analyze_structure(

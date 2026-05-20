@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     pulsemap_chords_enabled: bool = True
     pulsemap_polyphony_enabled: bool = True
     pulsemap_drums_enabled: bool = True
-    pulsemap_word_alignment_enabled: bool = True  # loads WhisperX + wav2vec2 models (~1.5GB)
+    pulsemap_word_alignment_enabled: bool = False  # disabled: loads WhisperX + wav2vec2 (~1.5GB), OOMs on 4GB hosts
 
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
