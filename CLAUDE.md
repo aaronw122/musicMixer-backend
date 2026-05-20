@@ -4,39 +4,6 @@ Python API and audio processing pipeline. Accepts two songs, separates them into
 
 Parent workspace CLAUDE.md (`../CLAUDE.md`) covers shared conventions (safety rules, documentation hierarchy, testing philosophy, self-improvement). This file covers backend-specific details only.
 
-## Repository Structure
-
-```
-backend/
-  pyproject.toml
-  .python-version          # Pin: Python 3.11
-  .env                     # Local config overrides (gitignored)
-  .gitignore
-  CLAUDE.md
-  src/
-    musicmixer/
-      __init__.py
-      main.py              # FastAPI app, CORS, lifespan, static mount
-      config.py            # Pydantic BaseSettings + .env loading
-      api/
-        __init__.py
-        health.py          # GET /health
-        remix.py           # POST /api/remix, GET /api/remix/{id}/audio
-      services/
-        __init__.py
-        separation.py      # Backend-agnostic dispatcher (modal vs local)
-        separation_modal.py  # Modal cloud GPU (BS-RoFormer 6-stem)
-        separation_local.py  # Local fallback (htdemucs_ft 4-stem)
-        mixer.py           # Stem overlay + MP3 export via ffmpeg
-        pipeline_day1.py   # Synchronous pipeline (Day 1 only)
-  static/
-    index.html             # Minimal test UI (replaced by React frontend later)
-  data/                    # Gitignored, created at runtime
-    uploads/               # Raw uploaded MP3/WAV files
-    stems/                 # Separated stem WAVs (~240MB per song)
-    remixes/               # Final mixed MP3 output
-```
-
 ## Tech Stack
 
 - **Python 3.11** -- pinned in `.python-version`
@@ -112,7 +79,8 @@ Two backends, two models. Controlled by `STEM_BACKEND` in `.env`:
 | **Env var** | `STEM_BACKEND=modal` (default) | `STEM_BACKEND=local` |
 | **Model** | BS-Roformer-SW (`BS-Roformer-SW.ckpt` by jarredou) | htdemucs_ft |
 | **Stems** | 6: vocals, drums, bass, guitar, piano, other | 4: vocals, drums, bass, other |
-| **Speed** | ~1 min/song (~2 min for 2 songs in parallel) | 10-20 min/song |
+| **GPU** | L40S (benchmarked 2026-05-19: 37% faster than A10G, same cost/run) | N/A |
+| **Speed** | ~16s/song warm, ~25s cold start overhead | 10-20 min/song |
 | **Requires** | Modal account + token (`uv run modal setup`) | Just CPU + RAM |
 
 Day 1 separates **both songs sequentially**, so double the single-song time.
@@ -123,12 +91,12 @@ Day 1 separates **both songs sequentially**, so double the single-song time.
 
 ## Expected Processing Times
 
-| Operation | Modal | Local CPU | Notes |
-|-----------|-------|-----------|-------|
-| Stem separation (1 song) | 3-5 min | 10-20 min | First Modal run adds 60-90s cold start |
-| Stem separation (2 songs) | 6-10 min | 20-40 min | Sequential in Day 1 |
+| Operation | Modal (L40S) | Local CPU | Notes |
+|-----------|--------------|-----------|-------|
+| Stem separation (1 song) | ~16s warm | 10-20 min | First Modal run adds ~25s cold start |
+| Stem separation (2 songs) | ~16s (parallel) | 20-40 min | Both songs run concurrently on separate GPUs |
 | Mixing + export | <10 sec | <10 sec | CPU-bound, fast |
-| Full pipeline (Day 1) | ~7-12 min | ~20-40 min | Upload → stems → mix → MP3 |
+| Full pipeline | ~2-3 min | ~20-40 min | Upload → stems → mix → MP3 |
 
 If processing seems stuck, check logs for progress. Stem separation produces no output until complete — long silences are normal.
 
@@ -143,6 +111,16 @@ If processing seems stuck, check logs for progress. Stem separation produces no 
 3. `uv run modal setup` (authenticates via browser)
 4. Verify: `uv run modal token list`
 5. Ensure `STEM_BACKEND=modal` in `.env` (or remove the line — modal is default)
+
+**Running Modal scripts:** Always run from `backend/` directory:
+
+```bash
+cd backend
+uv run modal run scripts/my_script.py           # run a Modal app
+uv run modal run scripts/my_script.py --arg val  # with args (Modal handles CLI args via function params)
+```
+
+**Do NOT use `uv run modal` from the workspace root** — `uv` resolves the venv from `pyproject.toml` in the current directory, and the root workspace doesn't have modal installed.
 
 **Fallback:** If Modal is not configured, set `STEM_BACKEND=local` in `.env` to use local CPU separation.
 
@@ -223,3 +201,4 @@ This downloads the Whisper base model, pyannote VAD model, and wav2vec2 alignmen
 - **No `.env` = Modal default.** Without `STEM_BACKEND=local` in `.env`, the server tries Modal (hangs if unconfigured).
 - **Long silences during separation are normal.** Stem separation produces no intermediate output. Don't assume it's stuck until you've exceeded the expected times (see "Expected Processing Times" above).
 - **Each session produces ~500MB of stem data.** Clean between test runs: `rm -rf data/stems/* data/uploads/* data/remixes/*`
+- **`uv run modal` fails with "Failed to spawn: `modal`"?** Two causes: (1) You're not in `backend/` — `uv` can't find the venv. (2) The venv was created at a different path (project moved/symlinked) and shebang paths in `.venv/bin/` are stale. Fix: `rm -rf .venv && uv sync`.

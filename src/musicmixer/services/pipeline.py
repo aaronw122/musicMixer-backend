@@ -1719,7 +1719,11 @@ def analyze_songs(
     _song_b = Path(song_b_path)
     stems_dir = settings.data_dir / "stems" / session_id
 
+    _t_analysis_start = time.monotonic()
+    _step_times: dict[str, float] = {}
+
     # === STEPS 1+2: Separation + analysis (overlapped) ===
+    _t0 = time.monotonic()
     (
         song_a_stems, song_b_stems, meta_a, meta_b,
         lyrics_a_data, lyrics_b_data, ml_segments_a, ml_segments_b,
@@ -1731,6 +1735,7 @@ def analyze_songs(
         shelf_song_id_a=shelf_song_id_a,
         shelf_song_id_b=shelf_song_id_b,
     )
+    _step_times["1+2 separate+analyze"] = time.monotonic() - _t0
 
     check_cancelled(session)
 
@@ -1753,9 +1758,12 @@ def analyze_songs(
     )
 
     # === STEP 3: Reconcile BPM ===
+    _t0 = time.monotonic()
     meta_a, meta_b = _step_reconcile_bpm(session_id, meta_a, meta_b, event_queue, session)
+    _step_times["3 reconcile_bpm"] = time.monotonic() - _t0
 
     # === STEP 3.5: Analyze song structure ===
+    _t0 = time.monotonic()
     _step_analyze_structure(
         session_id, meta_a, meta_b,
         song_a_stems_dir, song_b_stems_dir,
@@ -1765,13 +1773,27 @@ def analyze_songs(
         song_b_path=_song_b,
         lyrics_a_data=lyrics_a_data,
     )
+    _step_times["3.5 structure+pulsemap"] = time.monotonic() - _t0
 
     # === STEP 3.8: Measure per-stem LUFS ===
+    _t0 = time.monotonic()
     vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(
         session_id, song_a_stems_dir, song_b_stems_dir,
     )
+    _step_times["3.8 stem_lufs"] = time.monotonic() - _t0
 
     check_cancelled(session)
+
+    _analysis_total = time.monotonic() - _t_analysis_start
+    _timing_lines = " | ".join(f"{k}={v:.1f}s" for k, v in _step_times.items())
+    logger.info(
+        "Session %s: ANALYSIS TIMING (%.1fs total): %s",
+        session_id, _analysis_total, _timing_lines,
+    )
+
+    # Attach timing to session for the remix phase to merge
+    if session is not None:
+        session._analysis_step_times = _step_times  # type: ignore[attr-defined]
 
     return AnalyzedSongs(
         meta_a=meta_a,
@@ -1814,7 +1836,15 @@ def run_remix(
     meta_a = analysis.meta_a
     meta_b = analysis.meta_b
 
+    _t_remix_start = time.monotonic()
+    _step_times: dict[str, float] = {}
+
+    # Merge analysis timing if available
+    if hasattr(session, "_analysis_step_times"):
+        _step_times.update(session._analysis_step_times)  # type: ignore[attr-defined]
+
     # === STEP 4 + 4.5: Interpret prompt + taste stage ===
+    _t0 = time.monotonic()
     plan, vocal_type = _step_interpret_prompt(
         session_id, prompt, meta_a, meta_b,
         analysis.lyrics_a, analysis.lyrics_b,
@@ -1822,8 +1852,10 @@ def run_remix(
         force_vocal_source,
         event_queue, session,
     )
+    _step_times["4 llm_interpret"] = time.monotonic() - _t0
 
     # === STEPS 5+6: Load and standardize stems ===
+    _t0 = time.monotonic()
     vocal_audio, inst_audio, is_lossy_vocal_source, is_lossy_inst_source = (
         _step_load_and_standardize_stems(
             session_id, analysis.song_a_stems, analysis.song_b_stems,
@@ -1831,24 +1863,30 @@ def run_remix(
             event_queue, session,
         )
     )
+    _step_times["5+6 load_stems"] = time.monotonic() - _t0
 
     sr = 44100  # All stems standardized to this by validate_stem
 
     # === STEPS 7-7.75: Trim, filter, EQ ===
+    _t0 = time.monotonic()
     vocal_audio, inst_audio = _step_trim_filter_eq(
         session_id, vocal_audio, inst_audio, plan, sr,
         event_queue, session,
     )
+    _step_times["7 trim_filter_eq"] = time.monotonic() - _t0
 
     # === STEPS 8+8.5: Tempo plan + key convergence ===
+    _t0 = time.monotonic()
     target_bpm, need_vocal_rb, need_inst_rb, vocal_semitones, inst_semitones = (
         _step_compute_tempo_and_key_plan(
             session_id, meta_a, meta_b,
             plan, vocal_type, session,
         )
     )
+    _step_times["8 tempo_key_plan"] = time.monotonic() - _t0
 
     # === STEP 9: Tempo match via rubberband ===
+    _t0 = time.monotonic()
     vocal_audio, inst_audio = _step_tempo_match(
         session_id, vocal_audio, inst_audio,
         meta_a, meta_b,
@@ -1856,46 +1894,70 @@ def run_remix(
         vocal_semitones, inst_semitones,
         sr, event_queue, session,
     )
+    _step_times["9 tempo_match"] = time.monotonic() - _t0
 
     # === STEP 10: Post-stretch beat grid ===
+    _t0 = time.monotonic()
     post_stretch_beat_frames = _step_post_stretch_beat_grid(
         session_id, inst_audio, meta_b, target_bpm, plan, sr,
     )
+    _step_times["10 beat_grid"] = time.monotonic() - _t0
 
     # === STEPS 11-11.8: Compress, level match, pre-limit ===
+    _t0 = time.monotonic()
     vocal_audio, inst_audio = _step_compress_and_level_match(
         session_id, vocal_audio, inst_audio, sr,
         event_queue, session,
     )
+    _step_times["11 compress_level"] = time.monotonic() - _t0
 
     # === STEPS 12+12.5: Render arrangement + spectral ducking ===
+    _t0 = time.monotonic()
     vocal_bus, instrumental_bus, ducked_instrumental = _step_render_and_duck(
         session_id, plan, vocal_audio, inst_audio,
         post_stretch_beat_frames, sr, target_bpm,
         event_queue, session,
     )
+    _step_times["12 render_duck"] = time.monotonic() - _t0
 
     # === STEPS 13+13.7: Sum buses + auto-leveler ===
+    _t0 = time.monotonic()
     mixed = _step_sum_and_auto_level(
         session_id, vocal_bus, instrumental_bus, ducked_instrumental, sr,
     )
+    _step_times["13 sum_autolevel"] = time.monotonic() - _t0
 
     # === STEPS 14-14.6: Mastering chain ===
+    _t0 = time.monotonic()
     mixed = _step_master(
         session_id, mixed, sr,
         is_lossy_vocal_source, is_lossy_inst_source,
         event_queue, session,
     )
+    _step_times["14 master"] = time.monotonic() - _t0
 
     # === STEP 15: Fades ===
+    _t0 = time.monotonic()
     mixed = _step_fades(session_id, mixed, sr, plan, event_queue, session)
+    _step_times["15 fades"] = time.monotonic() - _t0
 
     check_cancelled(session)
 
     # === STEP 16: Export + finalize ===
+    _t0 = time.monotonic()
     _step_export_and_finalize(
         session_id, mixed, sr, output_path, plan,
         remix_cache_key, session, event_queue,
+    )
+    _step_times["16 export"] = time.monotonic() - _t0
+
+    # === TIMING SUMMARY ===
+    _remix_total = time.monotonic() - _t_remix_start
+    _sorted = sorted(_step_times.items(), key=lambda kv: kv[1], reverse=True)
+    _timing_lines = " | ".join(f"{k}={v:.1f}s" for k, v in _sorted)
+    logger.info(
+        "Session %s: PIPELINE TIMING (remix=%.1fs): %s",
+        session_id, _remix_total, _timing_lines,
     )
 
 
