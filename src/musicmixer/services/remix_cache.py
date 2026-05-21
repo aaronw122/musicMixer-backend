@@ -9,7 +9,7 @@ Cache layout:
     data/remix_cache/{sha256_hex}/metadata.json
 
 Thread-safety: writes use atomic rename (write to temp dir, then
-``os.rename`` into place), same pattern as stem_cache.py.
+``os.rename`` into place).
 """
 
 import hashlib
