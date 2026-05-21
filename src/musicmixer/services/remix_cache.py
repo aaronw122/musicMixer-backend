@@ -9,7 +9,7 @@ Cache layout:
     data/remix_cache/{sha256_hex}/metadata.json
 
 Thread-safety: writes use atomic rename (write to temp dir, then
-``os.rename`` into place), same pattern as stem_cache.py.
+``os.rename`` into place).
 """
 
 import hashlib
@@ -22,9 +22,24 @@ from pathlib import Path
 from typing import Any
 
 from musicmixer.config import settings
-from musicmixer.services.stem_cache import get_cache_key
 
 logger = logging.getLogger(__name__)
+
+
+def get_cache_key(audio_path: Path) -> str:
+    """Return SHA-256 hex digest of the file at *audio_path*.
+
+    Reads the file in 64 KiB chunks to avoid loading the entire file
+    into memory for large WAVs.
+    """
+    h = hashlib.sha256()
+    with open(audio_path, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def compute_url_cache_key(url_a: str, url_b: str, prompt: str) -> str:

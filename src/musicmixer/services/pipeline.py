@@ -170,8 +170,6 @@ def _step_separate_and_analyze(
     song_b_original_filename: str,
     event_queue: queue.Queue,
     session: SessionState,
-    shelf_song_id_a: str | None = None,
-    shelf_song_id_b: str | None = None,
 ) -> tuple:
     """Steps 1+2: Separation + analysis (overlapped).
 
@@ -230,9 +228,9 @@ def _step_separate_and_analyze(
     structure_future_b = None
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
-        # Separation futures (pass shelf_song_id for pre-cached shelf stems)
-        sep_future_a = pool.submit(separate_stems, song_a_path, song_a_stems_dir, None, shelf_song_id_a)
-        sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir, None, shelf_song_id_b)
+        # Separation futures
+        sep_future_a = pool.submit(separate_stems, song_a_path, song_a_stems_dir)
+        sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir)
 
         # Analysis futures (overlapped with separation -- no stem dependency)
         analysis_future_a = pool.submit(analyze_audio_full, song_a_path)
@@ -1781,8 +1779,6 @@ def analyze_songs(
     song_b_original_filename: str = "",
     source_quality_a: str | None = None,
     source_quality_b: str | None = None,
-    shelf_song_id_a: str | None = None,
-    shelf_song_id_b: str | None = None,
     metrics: PipelineMetrics | None = None,
 ) -> AnalyzedSongs:
     """Analysis phase (steps 1-3.8): separation, audio analysis, structure detection.
@@ -1812,8 +1808,6 @@ def analyze_songs(
         session_id, _song_a, _song_b, stems_dir,
         song_a_original_filename, song_b_original_filename,
         event_queue, session,
-        shelf_song_id_a=shelf_song_id_a,
-        shelf_song_id_b=shelf_song_id_b,
     )
     _step_times["1+2 separate+analyze"] = time.monotonic() - _t0
 
@@ -2176,8 +2170,6 @@ def run_pipeline(
     source_quality_a: str | None = None,
     source_quality_b: str | None = None,
     force_vocal_source: str | None = None,
-    shelf_song_id_a: str | None = None,
-    shelf_song_id_b: str | None = None,
 ) -> None:
     """Complete remix pipeline: analyze songs, then remix.
 
@@ -2220,8 +2212,6 @@ def run_pipeline(
         song_b_original_filename=song_b_original_filename,
         source_quality_a=source_quality_a,
         source_quality_b=source_quality_b,
-        shelf_song_id_a=shelf_song_id_a,
-        shelf_song_id_b=shelf_song_id_b,
         metrics=metrics,
     )
 
