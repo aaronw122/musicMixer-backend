@@ -148,9 +148,9 @@ def _starter_records() -> list[dict[str, Any]]:
     base_time = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
     seeds = [
         (
-            "https://www.youtube.com/watch?v=XhzpxjuwZy0",
+            "https://www.youtube.com/watch?v=yYl597lyZvo",
             "House of Pain - Jump Around",
-            "https://i.ytimg.com/vi/XhzpxjuwZy0/hqdefault.jpg",
+            "https://i.ytimg.com/vi/yYl597lyZvo/hqdefault.jpg",
         ),
         (
             "https://www.youtube.com/watch?v=qchPLaiKocI",
