@@ -37,7 +37,7 @@ jobs:
       - name: Build frontend
         run: cd frontend && bun run build
         env:
-          VITE_GOATCOUNTER_SITE: ${{ vars.VITE_GOATCOUNTER_SITE }}
+          VITE_GOATCOUNTER_SITE: ${{ secrets.VITE_GOATCOUNTER_SITE }}
 
       - name: Stage frontend build
         run: cp -r frontend/dist static-build/
