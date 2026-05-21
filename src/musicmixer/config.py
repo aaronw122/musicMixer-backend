@@ -33,16 +33,6 @@ class Settings(BaseSettings):
     # Section detection
     section_detection_backend: str = "auto"  # "auto" (try ML, fall back to heuristic) | "ml" | "heuristic"
 
-    # Stem cache
-    stem_cache_enabled: bool = False
-    stem_cache_max_gb: float = 10.0
-    stem_cache_dir: Path = Path("data/stem_cache")
-
-    # Shelf stems cache (pre-computed stems for default shelf songs)
-    # Always enabled for shelf songs, independent of stem_cache_enabled.
-    # Separate directory to avoid LRU eviction.
-    shelf_stems_dir: Path = Path("data/shelf_stems")
-
     # Remix output cache
     remix_cache_enabled: bool = False
     remix_cache_max_gb: float = 5.0
