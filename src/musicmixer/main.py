@@ -11,11 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from musicmixer.api import health, remix, shelf, thumbnail
+from musicmixer.api import health, remix, shelf, stats, thumbnail
 from musicmixer.config import settings
+from musicmixer.logging_config import setup_logging
 from musicmixer.services.cleanup import cleanup_expired_sessions
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 _WORKER_ENV_VARS = ("UVICORN_WORKERS", "WEB_CONCURRENCY")
 
@@ -59,7 +60,7 @@ async def lifespan(app: FastAPI):
     _enforce_distributed_limiter_startup_guard()
 
     # Create data directories
-    for subdir in ("uploads", "stems", "remixes"):
+    for subdir in ("uploads", "stems", "remixes", "logs"):
         (settings.data_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     mix_capacity = settings.max_concurrent_mixes
@@ -130,6 +131,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(remix.router, prefix="/api")
 app.include_router(shelf.router, prefix="/api")
+app.include_router(stats.router, prefix="/api")
 app.include_router(thumbnail.router, prefix="/api")
 
 

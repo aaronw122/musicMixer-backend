@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from musicmixer.models import AnalyzedSongs, LyricsData, SessionState
+from musicmixer.services.pipeline_metrics import PipelineMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -1233,10 +1234,13 @@ def _step_post_stretch_beat_grid(
 ):
     """Step 10: Post-stretch beat grid re-detection.
 
-    Returns post_stretch_beat_frames.
+    Returns (post_stretch_beat_frames, beat_grid_source) where
+    beat_grid_source is "re-detected" or "scaled_fallback".
     """
     import librosa
     import numpy as np
+
+    beat_grid_source = "scaled_fallback"
 
     # Scale the instrumental's original beat grid proportionally as fallback
     beat_scale = inst_meta.bpm / target_bpm if abs(inst_meta.bpm - target_bpm) > 0.001 else 1.0
@@ -1280,12 +1284,14 @@ def _step_post_stretch_beat_grid(
                         # DON'T use new_beat_frames, keep the scaled original grid
                     else:
                         post_stretch_beat_frames = new_beat_frames
+                        beat_grid_source = "re-detected"
                         logger.info(
                             "Session %s: Re-detected %d beats post-stretch (plan needs %d)",
                             session_id, len(new_beat_frames), plan_end_beat,
                         )
                 else:
                     post_stretch_beat_frames = new_beat_frames
+                    beat_grid_source = "re-detected"
                     logger.info(
                         "Session %s: Re-detected %d beats post-stretch",
                         session_id, len(new_beat_frames),
@@ -1301,7 +1307,7 @@ def _step_post_stretch_beat_grid(
             session_id, e,
         )
 
-    return post_stretch_beat_frames
+    return post_stretch_beat_frames, beat_grid_source
 
 
 def _step_compress_and_level_match(
@@ -1310,10 +1316,10 @@ def _step_compress_and_level_match(
     inst_audio: dict,
     sr: int,
     event_queue, session,
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, float]:
     """Steps 11, 11.5, 11.8: Vocal compression, cross-song level matching, pre-limiting.
 
-    Returns updated (vocal_audio, inst_audio).
+    Returns updated (vocal_audio, inst_audio, level_match_gain_db).
     """
     import numpy as np
     from musicmixer.services.processor import (
@@ -1351,8 +1357,14 @@ def _step_compress_and_level_match(
 
     # === STEP 11.5: Cross-song level matching ===
     # Runs AFTER compression so LUFS measurement reflects actual vocal loudness.
+    import pyloudnorm as _pyln_lm
+    _lm_meter = _pyln_lm.Meter(sr)
+    _pre_lm_lufs = None
+    _level_match_gain_db = 0.0
     vocal_audio_main = vocal_audio.get("vocals")
     if vocal_audio_main is not None and inst_audio:
+        _pre_lm_lufs = _lm_meter.integrated_loudness(vocal_audio_main)
+
         # Sum instrumental stems for LUFS measurement
         inst_arrays = list(inst_audio.values())
         inst_sum_for_lufs = inst_arrays[0].copy()
@@ -1363,6 +1375,9 @@ def _step_compress_and_level_match(
         vocal_audio["vocals"] = cross_song_level_match(
             vocal_audio_main, inst_sum_for_lufs, sr,
         )
+
+        _post_lm_lufs = _lm_meter.integrated_loudness(vocal_audio["vocals"])
+        _level_match_gain_db = _post_lm_lufs - _pre_lm_lufs if _pre_lm_lufs > -70 else 0.0
 
     # === STEP 11.8: Pre-limit drum and bass transients ===
     emit_progress(event_queue, {
@@ -1404,7 +1419,7 @@ def _step_compress_and_level_match(
 
     check_cancelled(session)
 
-    return vocal_audio, inst_audio
+    return vocal_audio, inst_audio, _level_match_gain_db
 
 
 def _step_render_and_duck(
@@ -1768,6 +1783,7 @@ def analyze_songs(
     source_quality_b: str | None = None,
     shelf_song_id_a: str | None = None,
     shelf_song_id_b: str | None = None,
+    metrics: PipelineMetrics | None = None,
 ) -> AnalyzedSongs:
     """Analysis phase (steps 1-3.8): separation, audio analysis, structure detection.
 
@@ -1820,6 +1836,29 @@ def analyze_songs(
         session_id, meta_a.bpm, meta_a.key, meta_a.scale,
         meta_b.bpm, meta_b.key, meta_b.scale,
     )
+
+    # --- Structured metrics: input + separation + analysis ---
+    if metrics is not None:
+        metrics.song_a_title = song_a_original_filename
+        metrics.song_b_title = song_b_original_filename
+        metrics.stem_backend = settings.stem_backend
+        metrics.stem_count = len(song_a_stems)
+        metrics.separation_time_a_s = _step_times.get("1+2 separate+analyze", 0.0)
+        metrics.log_input()
+
+        metrics.log_separation()
+
+        metrics.bpm_a = meta_a.bpm
+        metrics.bpm_b = meta_b.bpm
+        metrics.key_a = meta_a.key or ""
+        metrics.scale_a = meta_a.scale or ""
+        metrics.key_b = meta_b.key or ""
+        metrics.scale_b = meta_b.scale or ""
+        metrics.key_confidence_a = meta_a.key_confidence or 0.0
+        metrics.key_confidence_b = meta_b.key_confidence or 0.0
+        metrics.duration_a_s = meta_a.duration_seconds
+        metrics.duration_b_s = meta_b.duration_seconds
+        metrics.log_analysis()
 
     # === STEP 3: Reconcile BPM ===
     _t0 = time.monotonic()
@@ -1883,6 +1922,7 @@ def run_remix(
     source_quality_b: str | None = None,
     force_vocal_source: str | None = None,
     remix_cache_key: str | None = None,
+    metrics: PipelineMetrics | None = None,
 ) -> None:
     """Remix phase (steps 4-16): LLM planning, DSP processing, export.
 
@@ -1918,6 +1958,26 @@ def run_remix(
     )
     _step_times["4 llm_interpret"] = time.monotonic() - _t0
 
+    # --- Structured metrics: LLM plan ---
+    if metrics is not None:
+        metrics.start_time_vocal = plan.start_time_vocal
+        metrics.start_time_instrumental = plan.start_time_instrumental
+        metrics.section_count = len(plan.sections)
+        metrics.vocal_type = vocal_type
+        metrics.llm_plan_failed = plan.used_fallback
+
+        # Build sections summary (e.g., "intro:0-8, verse:8-40, ...")
+        if plan.sections:
+            metrics.sections_summary = ", ".join(
+                f"{s.label}:{s.start_beat}-{s.end_beat}" for s in plan.sections
+            )
+            # intro_beats: beats in the first section if it's labeled "intro"
+            first = plan.sections[0]
+            if first.label.lower() == "intro":
+                metrics.intro_beats = first.end_beat - first.start_beat
+
+        metrics.log_llm_plan()
+
     # === STEPS 5+6: Load and standardize stems ===
     _t0 = time.monotonic()
     vocal_audio, inst_audio, is_lossy_vocal_source, is_lossy_inst_source = (
@@ -1939,6 +1999,32 @@ def run_remix(
     )
     _step_times["7 trim_filter_eq"] = time.monotonic() - _t0
 
+    # --- Structured metrics: stem health ---
+    if metrics is not None:
+        metrics.stems_active = sorted(list(vocal_audio.keys()) + list(inst_audio.keys()))
+        # Determine inactive stems by comparing against full set
+        all_possible = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+        active_set = set(vocal_audio.keys()) | set(inst_audio.keys())
+        metrics.stems_inactive = sorted(all_possible - active_set)
+
+        # Measure per-stem LUFS after trim/filter/EQ
+        import pyloudnorm as _pyln
+        _health_meter = _pyln.Meter(sr)
+        for stem_name, audio in vocal_audio.items():
+            try:
+                metrics.per_stem_lufs[f"vocal/{stem_name}"] = _health_meter.integrated_loudness(audio)
+            except Exception:
+                pass
+        for stem_name, audio in inst_audio.items():
+            try:
+                metrics.per_stem_lufs[f"inst/{stem_name}"] = _health_meter.integrated_loudness(audio)
+            except Exception:
+                pass
+
+        # Check for ghost stems before they get filtered
+        metrics.check_ghost_stems(inst_audio)
+        metrics.log_stem_health()
+
     # === STEPS 8+8.5: Tempo plan + key convergence ===
     _t0 = time.monotonic()
     target_bpm, need_vocal_rb, need_inst_rb, vocal_semitones, inst_semitones = (
@@ -1948,6 +2034,18 @@ def run_remix(
         )
     )
     _step_times["8 tempo_key_plan"] = time.monotonic() - _t0
+
+    # --- Structured metrics: tempo/key ---
+    if metrics is not None:
+        metrics.target_bpm = target_bpm
+        # Compute max stretch % across both songs
+        vocal_stretch = abs(meta_a.bpm - target_bpm) / meta_a.bpm * 100 if meta_a.bpm > 0 else 0
+        inst_stretch = abs(meta_b.bpm - target_bpm) / meta_b.bpm * 100 if meta_b.bpm > 0 else 0
+        metrics.stretch_pct = max(vocal_stretch, inst_stretch)
+        metrics.vocal_semitones = vocal_semitones
+        metrics.inst_semitones = inst_semitones
+        metrics.tempo_key_warnings = list(plan.warnings)
+        metrics.log_tempo_key()
 
     # === STEP 9: Tempo match via rubberband ===
     _t0 = time.monotonic()
@@ -1962,18 +2060,29 @@ def run_remix(
 
     # === STEP 10: Post-stretch beat grid ===
     _t0 = time.monotonic()
-    post_stretch_beat_frames = _step_post_stretch_beat_grid(
+    post_stretch_beat_frames, beat_grid_source = _step_post_stretch_beat_grid(
         session_id, inst_audio, meta_b, target_bpm, plan, sr,
     )
     _step_times["10 beat_grid"] = time.monotonic() - _t0
 
+    # --- Structured metrics: beat grid ---
+    if metrics is not None:
+        metrics.beat_grid_source = beat_grid_source
+        metrics.post_stretch_beat_count = len(post_stretch_beat_frames)
+        metrics.log_beat_grid()
+
     # === STEPS 11-11.8: Compress, level match, pre-limit ===
     _t0 = time.monotonic()
-    vocal_audio, inst_audio = _step_compress_and_level_match(
+    vocal_audio, inst_audio, level_match_gain_db = _step_compress_and_level_match(
         session_id, vocal_audio, inst_audio, sr,
         event_queue, session,
     )
     _step_times["11 compress_level"] = time.monotonic() - _t0
+
+    # --- Structured metrics: processing ---
+    if metrics is not None:
+        metrics.level_match_gain_db = level_match_gain_db
+        metrics.log_processing()
 
     # === STEPS 12+12.5: Render arrangement + spectral ducking ===
     _t0 = time.monotonic()
@@ -1983,6 +2092,14 @@ def run_remix(
         event_queue, session,
     )
     _step_times["12 render_duck"] = time.monotonic() - _t0
+
+    # --- Structured metrics: render ---
+    if metrics is not None:
+        metrics.render_duration_s = vocal_bus.shape[0] / sr
+        # Check duration mismatch
+        if plan.sections and target_bpm > 0:
+            estimated_duration = plan.sections[-1].end_beat * 60 / target_bpm
+            metrics.check_duration_mismatch(estimated_duration)
 
     # === STEPS 13+13.7: Sum buses + auto-leveler ===
     _t0 = time.monotonic()
@@ -2023,6 +2140,28 @@ def run_remix(
         "Session %s: PIPELINE TIMING (remix=%.1fs): %s",
         session_id, _remix_total, _timing_lines,
     )
+
+    # --- Structured metrics: output + completion summary ---
+    if metrics is not None:
+        import pyloudnorm as _pyln_out
+
+        # Final LUFS
+        _out_meter = _pyln_out.Meter(sr)
+        try:
+            metrics.final_lufs = _out_meter.integrated_loudness(mixed)
+        except Exception:
+            pass
+
+        # Output file size
+        if output_path.exists():
+            metrics.output_size_mb = output_path.stat().st_size / (1024 * 1024)
+
+        # Collect all per-step times and warnings
+        metrics.per_step_times = dict(_step_times)
+        metrics.warnings = list(plan.warnings)
+        metrics.log_render()
+        metrics.log_output()
+        metrics.log_completion()
 
 
 def run_pipeline(
@@ -2067,6 +2206,9 @@ def run_pipeline(
     if session.status == "complete":
         return
 
+    # Create pipeline metrics tracker for structured logging
+    metrics = PipelineMetrics(session_id=session_id)
+
     # === ANALYSIS PHASE (steps 1-3.8) ===
     analysis = analyze_songs(
         session_id=session_id,
@@ -2080,6 +2222,7 @@ def run_pipeline(
         source_quality_b=source_quality_b,
         shelf_song_id_a=shelf_song_id_a,
         shelf_song_id_b=shelf_song_id_b,
+        metrics=metrics,
     )
 
     # === REMIX PHASE (steps 4-16) ===
@@ -2093,4 +2236,5 @@ def run_pipeline(
         source_quality_b=source_quality_b,
         force_vocal_source=force_vocal_source,
         remix_cache_key=remix_cache_key,
+        metrics=metrics,
     )
