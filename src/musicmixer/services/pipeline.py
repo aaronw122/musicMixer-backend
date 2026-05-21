@@ -2159,8 +2159,8 @@ def run_remix(
         # Collect all per-step times and warnings
         metrics.per_step_times = dict(_step_times)
         metrics.warnings = list(plan.warnings)
-        metrics.log_output()
         metrics.log_render()
+        metrics.log_output()
         metrics.log_completion()
 
 

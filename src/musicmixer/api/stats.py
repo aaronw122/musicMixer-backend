@@ -130,23 +130,29 @@ def _most_used_songs(completions: list[dict], limit: int = 10) -> list[dict]:
     ]
 
 
+def _red_flags_from_entry(entry: dict) -> list[str]:
+    """Extract red flag tags from a single log entry, avoiding double-counting.
+
+    Completion summaries carry a ``red_flags`` list; individual warning
+    entries carry a scalar ``red_flag``.  When both are present on the
+    same entry (summary row), only the list is used.
+    """
+    flags = entry.get("red_flags")
+    if isinstance(flags, list):
+        return [f for f in flags if isinstance(f, str)]
+
+    single = entry.get("red_flag")
+    if isinstance(single, str):
+        return [single]
+
+    return []
+
+
 def _red_flag_frequency(entries: list[dict]) -> list[dict]:
     """Count red flag tags across all log entries."""
     counter: Counter[str] = Counter()
-
     for entry in entries:
-        # Completion summaries have a red_flags list
-        flags = entry.get("red_flags")
-        if isinstance(flags, list):
-            for flag in flags:
-                if isinstance(flag, str):
-                    counter[flag] += 1
-
-        # Individual red-flag warning entries have a single red_flag field
-        single_flag = entry.get("red_flag")
-        if isinstance(single_flag, str) and not isinstance(flags, list):
-            counter[single_flag] += 1
-
+        counter.update(_red_flags_from_entry(entry))
     return [
         {"flag": flag, "count": count}
         for flag, count in counter.most_common()

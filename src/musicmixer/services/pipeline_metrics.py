@@ -9,6 +9,10 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -245,8 +249,6 @@ class PipelineMetrics:
                 "per_step_times": {k: round(v, 2) for k, v in self.per_step_times.items()},
             },
         )
-        self._check_render_flags()
-
     def log_output(self) -> None:
         """Log output details."""
         logger.info(
@@ -314,7 +316,7 @@ class PipelineMetrics:
 
     def check_ghost_stems(
         self,
-        inst_audio: dict,
+        inst_audio: dict[str, "np.ndarray"],
     ) -> None:
         """Check for ghost stems (guitar/piano with very low RMS).
 
@@ -330,16 +332,6 @@ class PipelineMetrics:
                 if rms < _GHOST_STEM_RMS_THRESHOLD and stem_name in self.stems_active:
                     self._add_flag("ghost_stem")
                     return  # One flag is enough
-
-    def _check_render_flags(self) -> None:
-        """Check render results for red flags."""
-        # duration_mismatch: post-render duration vs estimated > 10%
-        # We compute estimated from section_count * beats / bpm
-        if self.target_bpm > 0 and self.section_count > 0:
-            # Use the per_step_times to get a rough estimate if available,
-            # but the real check is render_duration vs beat-grid estimated duration.
-            # The render_duration_s is the actual output; estimate from sections_summary.
-            pass  # Actual check is done in check_duration_mismatch
 
     def check_duration_mismatch(self, estimated_duration_s: float) -> None:
         """Check if post-render duration differs from estimated by > 10%.
