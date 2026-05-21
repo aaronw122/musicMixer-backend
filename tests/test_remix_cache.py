@@ -48,7 +48,7 @@ class TestGetCacheKey:
         a.write_bytes(_make_wav_bytes(440.0))
         b.write_bytes(_make_wav_bytes(880.0))
 
-        assert get_cache_key(a) \!= get_cache_key(b)
+        assert get_cache_key(a) != get_cache_key(b)
 
     def test_returns_hex_string(self, tmp_path):
         """Key should be a 64-char hex string (SHA-256)."""
