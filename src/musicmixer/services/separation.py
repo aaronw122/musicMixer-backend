@@ -32,7 +32,7 @@ def separate_vocal_song(
     audio_path: Path,
     output_dir: Path,
     progress_callback: Callable | None = None,
-) -> dict[str, Path]:
+) -> dict[str, Path | None]:
     """Separate a vocal-source song into lead vocals, backing vocals, and instrumental.
 
     Used for Song A (vocal source). Uses MelBand Roformer Karaoke on Modal,
@@ -40,7 +40,7 @@ def separate_vocal_song(
     backing_vocals will be None in the local fallback).
 
     Returns mapping of stem name to WAV file path (or None for unavailable stems).
-    Stems: lead_vocals, backing_vocals, instrumental.
+    Stems: lead_vocals, backing_vocals (None on local fallback), instrumental.
     """
     if settings.stem_backend == "modal":
         return _separate_vocal_song_modal(audio_path, output_dir, progress_callback)

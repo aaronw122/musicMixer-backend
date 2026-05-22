@@ -77,8 +77,8 @@ def separate_vocal_song_local(
     """Separate a vocal-source song locally using htdemucs_ft (graceful fallback).
 
     htdemucs_ft only produces vocals + instrumental (no lead/backing split).
-    Maps vocals -> lead_vocals, creates instrumental from non-vocal stems,
-    and sets backing_vocals = None.
+    Maps vocals -> lead_vocals, maps "other" stem as instrumental,
+    and sets backing_vocals = None (no lead/backing split available locally).
 
     Returns dict with keys: lead_vocals, backing_vocals, instrumental.
     """
