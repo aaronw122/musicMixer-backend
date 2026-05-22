@@ -20,6 +20,11 @@ from musicmixer.models import Section
 
 logger = logging.getLogger(__name__)
 
+# Stem names routed to the vocal bus. Includes the legacy "vocals" key
+# (BS-RoFormer output before lead/backing split) and the new MelBand Roformer
+# names so the renderer handles both old cached stems and new separations.
+_VOCAL_BUS_STEMS = frozenset(("vocals", "lead_vocals", "backing_vocals"))
+
 
 def beats_to_samples(
     beat_index: int,
@@ -178,7 +183,8 @@ def render_arrangement(
 
     Args:
         sections: Beat-aligned arrangement sections with per-stem gains.
-        vocal_stems: Dict of vocal stem arrays (typically just {"vocals": array}).
+        vocal_stems: Dict of vocal stem arrays (e.g. {"lead_vocals": ..., "backing_vocals": ...}
+            or legacy {"vocals": ...}).
         instrumental_stems: Dict of instrumental stem arrays
             (e.g. {"drums": ..., "bass": ..., "guitar": ..., "piano": ..., "other": ...}).
         beat_frames: Post-stretch beat grid (frame indices from librosa).
@@ -222,9 +228,10 @@ def render_arrangement(
     for stem_name in all_stem_names:
         curve = gain_curves[stem_name]
 
-        # Get stem audio
-        if stem_name == "vocals":
-            stem_audio = vocal_stems.get("vocals")
+        # Get stem audio — route vocal-family stems from the vocal dict,
+        # everything else from the instrumental dict.
+        if stem_name in _VOCAL_BUS_STEMS:
+            stem_audio = vocal_stems.get(stem_name)
         else:
             stem_audio = instrumental_stems.get(stem_name)
 
@@ -241,7 +248,7 @@ def render_arrangement(
         # Apply gain curve (vectorized multiply)
         gained = stem_audio[:usable_len] * curve[:usable_len, np.newaxis]
 
-        if stem_name == "vocals":
+        if stem_name in _VOCAL_BUS_STEMS:
             vocal_bus[:usable_len] += gained
         else:
             instrumental_bus[:usable_len] += gained

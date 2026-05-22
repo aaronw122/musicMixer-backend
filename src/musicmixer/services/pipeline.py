@@ -16,6 +16,12 @@ from musicmixer.services.pipeline_metrics import PipelineMetrics
 
 logger = logging.getLogger(__name__)
 
+# Stem name constants for the two separation models.
+# Song A (vocal source) uses MelBand Roformer → 3 stems.
+# Song B (instrumental source) uses BS-RoFormer → 6 stems.
+VOCAL_STEM_NAMES = ("lead_vocals", "backing_vocals")
+INSTRUMENTAL_STEM_NAMES = ("drums", "bass", "guitar", "piano", "other")
+
 # Maximum wall-clock time (seconds) for any single DSP step on the enhanced
 # pipeline path.  If a step exceeds this, its output is discarded and
 # processing continues with the pre-step signal state.  This is a post-hoc
@@ -182,7 +188,7 @@ def _step_separate_and_analyze(
     from musicmixer.config import settings
     from musicmixer.services.lyrics import lookup_lyrics_for_song
     from musicmixer.services.analysis import analyze_audio_full
-    from musicmixer.services.separation import separate_stems
+    from musicmixer.services.separation import separate_stems, separate_vocal_song
 
     logger.info("Session %s: [1/17] separating stems + analyzing audio...", session_id)
     emit_progress(event_queue, {
@@ -228,8 +234,9 @@ def _step_separate_and_analyze(
     structure_future_b = None
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
-        # Separation futures
-        sep_future_a = pool.submit(separate_stems, song_a_path, song_a_stems_dir)
+        # Separation futures: Song A uses MelBand Roformer (lead/backing vocals),
+        # Song B uses BS-RoFormer (6-stem instrumental separation).
+        sep_future_a = pool.submit(separate_vocal_song, song_a_path, song_a_stems_dir)
         sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir)
 
         # Analysis futures (overlapped with separation -- no stem dependency)
@@ -406,7 +413,11 @@ def _run_pulsemap_analysis(
     from musicmixer.config import settings
 
     pulsemap_futures: dict[str, Future] = {}
-    vocal_stem_a = song_a_stems_dir / "vocals.wav"
+    # Use lead_vocals as the primary vocal stem for PulseMap analysis.
+    # Fall back to "vocals.wav" for backward compatibility with older cached stems.
+    vocal_stem_a = song_a_stems_dir / "lead_vocals.wav"
+    if not vocal_stem_a.exists():
+        vocal_stem_a = song_a_stems_dir / "vocals.wav"
     drum_stem_b = song_b_stems_dir / "drums.wav"
 
     from musicmixer.services.pulsemap import (
@@ -567,7 +578,7 @@ def _step_analyze_structure(
         ("B", meta_b, song_b_stems_dir, ml_segments_b),
     ]:
         try:
-            stem_paths = {name: s_dir / f"{name}.wav" for name in ["vocals", "drums", "bass", "guitar", "piano", "other"]}
+            stem_paths = {name: s_dir / f"{name}.wav" for name in ["vocals", "lead_vocals", "backing_vocals", "drums", "bass", "guitar", "piano", "other"]}
             # Filter to stems that actually exist
             stem_paths = {k: v for k, v in stem_paths.items() if v.exists()}
             if stem_paths:
@@ -632,8 +643,9 @@ def _step_measure_stem_lufs(
     inst_stem_lufs: dict[str, float] = {}
 
     _lufs_meter_raw = pyln.Meter(44100)
-    # Song A = vocal source stems
-    for stem_name in ["vocals"]:
+    # Song A = vocal source stems (MelBand Roformer: lead_vocals, backing_vocals;
+    # fall back to "vocals" for backward compat with older cached stems)
+    for stem_name in ["lead_vocals", "backing_vocals", "vocals"]:
         stem_path = song_a_stems_dir / f"{stem_name}.wav"
         if stem_path.exists():
             try:
@@ -823,8 +835,9 @@ def _step_load_and_standardize_stems(
     vocal_audio: dict[str, np.ndarray] = {}
     inst_audio: dict[str, np.ndarray] = {}
 
-    # Load vocal stems (just "vocals" for now)
-    for stem_name in ["vocals"]:
+    # Load vocal stems from Song A (MelBand Roformer: lead_vocals, backing_vocals).
+    # Also check for legacy "vocals" key for backward compatibility with old cached stems.
+    for stem_name in ["lead_vocals", "backing_vocals", "vocals"]:
         path = vocal_stems_paths.get(stem_name)
         if path is not None:
             audio, _sr = validate_stem(path)
@@ -925,13 +938,14 @@ def _step_trim_filter_eq(
     # high-frequency separation noise, giving rubberband's R3 engine
     # cleaner input for transient detection. 16kHz preserves vocal
     # air/breathiness.
-    if "vocals" in vocal_audio:
-        vocal_audio["vocals"] = bandpass_filter(
-            vocal_audio["vocals"], sr, low_hz=150.0, high_hz=16000.0,
+    for voc_stem in list(vocal_audio.keys()):
+        vocal_audio[voc_stem] = bandpass_filter(
+            vocal_audio[voc_stem], sr, low_hz=150.0, high_hz=16000.0,
         )
+    if vocal_audio:
         logger.info(
-            "Session %s: Vocal bandpass pre-filter applied (150Hz-16kHz)",
-            session_id,
+            "Session %s: Vocal bandpass pre-filter applied (150Hz-16kHz) to %s",
+            session_id, sorted(vocal_audio.keys()),
         )
 
     # === STEP 7.72: Adaptive spectral analysis ===
@@ -1153,14 +1167,14 @@ def _step_tempo_match(
 
     with ThreadPoolExecutor(max_workers=6) as rb_executor:
         futures = {}
-        if need_vocal_rb and "vocals" in vocal_audio:
-            # Only stretch the vocal stem — other Song A stems are unused
-            # by the renderer, so stretching them wastes CPU.
-            futures[("vocal", "vocals")] = rb_executor.submit(
-                rubberband_process, vocal_audio["vocals"], sr,
-                vocal_meta.bpm, target_bpm,
-                semitones=vocal_semitones, is_vocal=True,
-            )
+        if need_vocal_rb:
+            # Stretch all vocal stems (lead_vocals, backing_vocals, or legacy "vocals").
+            for voc_stem_name in list(vocal_audio.keys()):
+                futures[("vocal", voc_stem_name)] = rb_executor.submit(
+                    rubberband_process, vocal_audio[voc_stem_name], sr,
+                    vocal_meta.bpm, target_bpm,
+                    semitones=vocal_semitones, is_vocal=True,
+                )
         if need_inst_rb:
             for stem_name in list(inst_audio.keys()):
                 # Drums are exempt from pitch shifting — they're unpitched,
@@ -1337,9 +1351,9 @@ def _step_compress_and_level_match(
     }, session=session)
 
     vocal_makeup_db = 3.0
-    if "vocals" in vocal_audio:
-        vocal_audio["vocals"] = compress_dynamic_range(
-            vocal_audio["vocals"],
+    for voc_stem in list(vocal_audio.keys()):
+        vocal_audio[voc_stem] = compress_dynamic_range(
+            vocal_audio[voc_stem],
             sr,
             threshold_db=-20.0,  # Moderate: only compress loud phrases
             ratio=3.0,           # Standard vocal ratio, preserves natural dynamics
@@ -1348,9 +1362,10 @@ def _step_compress_and_level_match(
             makeup_db=vocal_makeup_db,
             gate_floor_db=-50.0, # Low gate: only ignore true silence
         )
+    if vocal_audio:
         logger.info(
-            "Session %s: Vocal compression applied (makeup_db=%.1f)",
-            session_id, vocal_makeup_db,
+            "Session %s: Vocal compression applied (makeup_db=%.1f) to %s",
+            session_id, vocal_makeup_db, sorted(vocal_audio.keys()),
         )
 
     # === STEP 11.5: Cross-song level matching ===
@@ -1359,8 +1374,16 @@ def _step_compress_and_level_match(
     _lm_meter = _pyln_lm.Meter(sr)
     _pre_lm_lufs = None
     _level_match_gain_db = 0.0
-    vocal_audio_main = vocal_audio.get("vocals")
-    if vocal_audio_main is not None and inst_audio:
+
+    # Use the primary vocal stem for level matching: lead_vocals preferred, fall back to vocals.
+    _primary_vocal_key = None
+    for _vk in ("lead_vocals", "vocals"):
+        if _vk in vocal_audio:
+            _primary_vocal_key = _vk
+            break
+
+    if _primary_vocal_key is not None and inst_audio:
+        vocal_audio_main = vocal_audio[_primary_vocal_key]
         _pre_lm_lufs = _lm_meter.integrated_loudness(vocal_audio_main)
 
         # Sum instrumental stems for LUFS measurement
@@ -1370,11 +1393,14 @@ def _step_compress_and_level_match(
             min_len = min(len(inst_sum_for_lufs), len(arr))
             inst_sum_for_lufs = inst_sum_for_lufs[:min_len] + arr[:min_len]
 
-        vocal_audio["vocals"] = cross_song_level_match(
-            vocal_audio_main, inst_sum_for_lufs, sr,
-        )
+        # Apply cross-song level match to ALL vocal stems using the same gain
+        # derived from the primary vocal stem's LUFS vs instrumentals.
+        for _vk_apply in list(vocal_audio.keys()):
+            vocal_audio[_vk_apply] = cross_song_level_match(
+                vocal_audio[_vk_apply], inst_sum_for_lufs, sr,
+            )
 
-        _post_lm_lufs = _lm_meter.integrated_loudness(vocal_audio["vocals"])
+        _post_lm_lufs = _lm_meter.integrated_loudness(vocal_audio[_primary_vocal_key])
         _level_match_gain_db = _post_lm_lufs - _pre_lm_lufs if _pre_lm_lufs > -70 else 0.0
 
     # === STEP 11.8: Pre-limit drum and bass transients ===
@@ -1997,7 +2023,7 @@ def run_remix(
     if metrics is not None:
         metrics.stems_active = sorted(list(vocal_audio.keys()) + list(inst_audio.keys()))
         # Determine inactive stems by comparing against full set
-        all_possible = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+        all_possible = {"vocals", "lead_vocals", "backing_vocals", "drums", "bass", "guitar", "piano", "other"}
         active_set = set(vocal_audio.keys()) | set(inst_audio.keys())
         metrics.stems_inactive = sorted(all_possible - active_set)
 
