@@ -67,3 +67,50 @@ def separate_stems_local(
 
     logger.info(f"Local separation complete: {list(stems.keys())}")
     return stems
+
+
+def separate_vocal_song_local(
+    audio_path: Path,
+    output_dir: Path,
+    progress_callback: Callable | None = None,
+) -> dict[str, Path | None]:
+    """Separate vocal song locally using htdemucs_ft (graceful fallback).
+
+    htdemucs_ft only produces 4 stems (vocals, drums, bass, other) and cannot
+    split lead from backing vocals. As a fallback, we map:
+      - lead_vocals = htdemucs_ft "vocals" stem (contains both lead + backing)
+      - backing_vocals = None (not available without MelBand Roformer)
+      - instrumental = htdemucs_ft "other" stem
+
+    The pipeline should handle backing_vocals=None gracefully (skip it in the mix).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if progress_callback:
+        progress_callback(
+            "Running local vocal separation (htdemucs_ft fallback, "
+            "no lead/backing split available)..."
+        )
+
+    # Run standard htdemucs_ft separation
+    stems = separate_stems_local(audio_path, output_dir, progress_callback=None)
+
+    # Map htdemucs_ft output to vocal-song stem names
+    vocal_stems: dict[str, Path | None] = {
+        "lead_vocals": stems.get("vocals"),
+        "backing_vocals": None,  # Not available in local fallback
+        "instrumental": stems.get("other"),
+    }
+
+    if vocal_stems["lead_vocals"] is None:
+        logger.warning("Local fallback: htdemucs_ft did not produce 'vocals' stem")
+    if vocal_stems["instrumental"] is None:
+        logger.warning("Local fallback: htdemucs_ft did not produce 'other' stem")
+
+    logger.info(
+        "Local vocal-song separation complete (fallback): "
+        f"lead_vocals={'present' if vocal_stems['lead_vocals'] else 'missing'}, "
+        f"backing_vocals=unavailable, "
+        f"instrumental={'present' if vocal_stems['instrumental'] else 'missing'}"
+    )
+    return vocal_stems
