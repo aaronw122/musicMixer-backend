@@ -17,6 +17,9 @@ import logging
 import math
 
 from musicmixer.models import (
+    ALL_STEMS as _MODEL_ALL_STEMS,
+    INSTRUMENTAL_STEMS as _MODEL_INSTRUMENTAL_STEMS,
+    VOCAL_BUS_STEMS,
     VOCAL_SOURCE,
     IntentPlan,
     IntentSection,
@@ -32,8 +35,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-ALL_STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
-INSTRUMENTAL_STEMS = ["drums", "bass", "guitar", "piano", "other"]
+ALL_STEMS = _MODEL_ALL_STEMS
+INSTRUMENTAL_STEMS = _MODEL_INSTRUMENTAL_STEMS
 
 # Step A: base role-to-gain mapping
 # NOTE: support/background/texture raised in energy-budget-tuning so that
@@ -135,7 +138,7 @@ def _compute_section_gains(
         # Step C: LUFS adjustment (skip silent stems)
         if role != "silent":
             lufs_data = None
-            if stem_name == "vocals" and vocal_stem_lufs is not None:
+            if stem_name in VOCAL_BUS_STEMS and vocal_stem_lufs is not None:
                 lufs_data = vocal_stem_lufs.get(stem_name)
             elif stem_name in INSTRUMENTAL_STEMS and inst_stem_lufs is not None:
                 lufs_data = inst_stem_lufs.get(stem_name)

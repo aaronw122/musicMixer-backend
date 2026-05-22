@@ -19,7 +19,7 @@ import hashlib
 import logging
 from collections import Counter
 
-from musicmixer.models import AudioMetadata, RemixPlan, Section
+from musicmixer.models import ALL_STEMS as _MODEL_ALL_STEMS, AudioMetadata, RemixPlan, Section
 from musicmixer.services.tempo import estimate_material_budget, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-ALL_STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
+ALL_STEMS = _MODEL_ALL_STEMS
 
 # Target remix duration in seconds -- matches interpreter.py constant.
 TARGET_REMIX_DURATION_SECONDS = 210  # 3.5 minutes
@@ -43,21 +43,21 @@ TRANSITION_STYLES = ["cut", "crossfade", "filter_sweep", "silence_gap"]
 # Gain presets (dB offsets from baseline, converted to linear multipliers).
 # These represent vocal/instrumental gain deltas as linear gain values.
 GAIN_PRESETS = {
-    "quiet_vocal": {"vocals": 0.5, "drums": 0.8, "bass": 0.8, "guitar": 0.6, "piano": 0.5, "other": 0.6},
-    "balanced": {"vocals": 0.8, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5},
-    "vocal_forward": {"vocals": 1.0, "drums": 0.6, "bass": 0.6, "guitar": 0.4, "piano": 0.3, "other": 0.4},
-    "loud_vocal": {"vocals": 1.0, "drums": 0.5, "bass": 0.5, "guitar": 0.3, "piano": 0.3, "other": 0.3},
+    "quiet_vocal": {"lead_vocals": 0.5, "backing_vocals": 0.0, "drums": 0.8, "bass": 0.8, "guitar": 0.6, "piano": 0.5, "other": 0.6},
+    "balanced": {"lead_vocals": 0.8, "backing_vocals": 0.3, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5},
+    "vocal_forward": {"lead_vocals": 1.0, "backing_vocals": 0.4, "drums": 0.6, "bass": 0.6, "guitar": 0.4, "piano": 0.3, "other": 0.4},
+    "loud_vocal": {"lead_vocals": 1.0, "backing_vocals": 0.5, "drums": 0.5, "bass": 0.5, "guitar": 0.3, "piano": 0.3, "other": 0.3},
 }
 
 # Section-type gain templates.
-INTRO_GAINS = {"vocals": 0.0, "drums": 0.6, "bass": 0.5, "guitar": 0.3, "piano": 0.2, "other": 0.3}
-OUTRO_GAINS = {"vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.3, "piano": 0.3, "other": 0.4}
-BREAKDOWN_GAINS = {"vocals": 0.3, "drums": 0.1, "bass": 0.4, "guitar": 0.6, "piano": 0.7, "other": 0.5}
-BUILD_GAINS = {"vocals": 0.5, "drums": 0.5, "bass": 0.6, "guitar": 0.4, "piano": 0.3, "other": 0.4}
-MAIN_GAINS = {"vocals": 1.0, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
-PEAK_GAINS = {"vocals": 1.0, "drums": 0.8, "bass": 0.8, "guitar": 0.6, "piano": 0.5, "other": 0.6}
-HOOK_GAINS = {"vocals": 1.0, "drums": 0.6, "bass": 0.6, "guitar": 0.3, "piano": 0.3, "other": 0.3}
-VERSE_GAINS = {"vocals": 0.9, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
+INTRO_GAINS = {"lead_vocals": 0.0, "backing_vocals": 0.0, "drums": 0.6, "bass": 0.5, "guitar": 0.3, "piano": 0.2, "other": 0.3}
+OUTRO_GAINS = {"lead_vocals": 0.0, "backing_vocals": 0.0, "drums": 0.5, "bass": 0.5, "guitar": 0.3, "piano": 0.3, "other": 0.4}
+BREAKDOWN_GAINS = {"lead_vocals": 0.3, "backing_vocals": 0.0, "drums": 0.1, "bass": 0.4, "guitar": 0.6, "piano": 0.7, "other": 0.5}
+BUILD_GAINS = {"lead_vocals": 0.5, "backing_vocals": 0.0, "drums": 0.5, "bass": 0.6, "guitar": 0.4, "piano": 0.3, "other": 0.4}
+MAIN_GAINS = {"lead_vocals": 1.0, "backing_vocals": 0.3, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
+PEAK_GAINS = {"lead_vocals": 1.0, "backing_vocals": 0.5, "drums": 0.8, "bass": 0.8, "guitar": 0.6, "piano": 0.5, "other": 0.6}
+HOOK_GAINS = {"lead_vocals": 1.0, "backing_vocals": 0.4, "drums": 0.6, "bass": 0.6, "guitar": 0.3, "piano": 0.3, "other": 0.3}
+VERSE_GAINS = {"lead_vocals": 0.9, "backing_vocals": 0.3, "drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
 
 
 # ---------------------------------------------------------------------------
@@ -145,12 +145,13 @@ def _apply_gain_delta(base_gains: dict[str, float], delta_db: float) -> dict[str
 
     Positive delta_db makes vocals louder relative to instrumentals.
     """
+    from musicmixer.models import VOCAL_BUS_STEMS
     import math
     vocal_mult = 10 ** (delta_db / 20)
     inst_mult = 10 ** (-delta_db / 40)  # Half the inverse for instrumentals
     result = {}
     for stem, gain in base_gains.items():
-        if stem == "vocals":
+        if stem in VOCAL_BUS_STEMS:
             result[stem] = min(1.0, max(0.0, gain * vocal_mult))
         else:
             result[stem] = min(1.0, max(0.0, gain * inst_mult))
