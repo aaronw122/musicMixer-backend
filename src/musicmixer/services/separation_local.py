@@ -67,3 +67,39 @@ def separate_stems_local(
 
     logger.info(f"Local separation complete: {list(stems.keys())}")
     return stems
+
+
+def separate_vocal_song_local(
+    audio_path: Path,
+    output_dir: Path,
+    progress_callback: Callable | None = None,
+) -> dict[str, Path | None]:
+    """Separate a vocal-source song locally using htdemucs_ft (graceful fallback).
+
+    htdemucs_ft only produces vocals + instrumental (no lead/backing split).
+    Maps vocals -> lead_vocals, creates instrumental from non-vocal stems,
+    and sets backing_vocals = None.
+
+    Returns dict with keys: lead_vocals, backing_vocals, instrumental.
+    """
+    if progress_callback:
+        progress_callback("Running local vocal separation (htdemucs_ft fallback)...")
+
+    stems = separate_stems_local(audio_path, output_dir, progress_callback)
+
+    # Map htdemucs_ft output to vocal-song stem names
+    result: dict[str, Path | None] = {
+        "lead_vocals": stems.get("vocals"),
+        "backing_vocals": None,  # htdemucs_ft cannot split lead/backing
+        "instrumental": stems.get("other"),
+    }
+
+    # Rename vocals.wav -> lead_vocals.wav if it exists
+    vocals_path = stems.get("vocals")
+    if vocals_path and vocals_path.exists():
+        lead_path = vocals_path.parent / "lead_vocals.wav"
+        vocals_path.rename(lead_path)
+        result["lead_vocals"] = lead_path
+
+    logger.info("Local vocal separation complete (backing_vocals unavailable)")
+    return result
