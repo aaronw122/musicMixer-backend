@@ -202,9 +202,9 @@ class TestRendererVocalBusRouting:
 class TestSeparateVocalSongDispatcher:
     """Test that separate_vocal_song dispatches correctly."""
 
-    @patch("musicmixer.services.separation._separate_vocal_modal")
+    @patch("musicmixer.services.separation._separate_vocal_song_modal")
     def test_dispatches_to_modal(self, mock_vocal_modal, tmp_path):
-        """stem_backend='modal' should call _separate_vocal_modal."""
+        """stem_backend='modal' should call _separate_vocal_song_modal."""
         from musicmixer.services.separation import separate_vocal_song
 
         mock_vocal_modal.return_value = {
@@ -221,21 +221,16 @@ class TestSeparateVocalSongDispatcher:
         assert "lead_vocals" in result
         assert "backing_vocals" in result
 
-    @patch("musicmixer.services.separation._separate_local")
+    @patch("musicmixer.services.separation._separate_vocal_song_local")
     def test_dispatches_to_local_with_remap(self, mock_local, tmp_path):
-        """stem_backend='local' should call _separate_local and remap vocals."""
+        """stem_backend='local' should call _separate_vocal_song_local."""
         from musicmixer.services.separation import separate_vocal_song
 
-        # Local produces old-style stems
-        vocals_path = tmp_path / "out" / "vocals.wav"
-        vocals_path.parent.mkdir(parents=True, exist_ok=True)
-        _make_test_wav(vocals_path)
-
+        # Local fallback returns already-remapped stems
         mock_local.return_value = {
-            "vocals": vocals_path,
-            "drums": tmp_path / "out" / "drums.wav",
-            "bass": tmp_path / "out" / "bass.wav",
-            "other": tmp_path / "out" / "other.wav",
+            "lead_vocals": tmp_path / "out" / "lead_vocals.wav",
+            "backing_vocals": None,
+            "instrumental": tmp_path / "out" / "other.wav",
         }
 
         with patch("musicmixer.services.separation.settings") as mock_settings:
@@ -243,18 +238,16 @@ class TestSeparateVocalSongDispatcher:
             result = separate_vocal_song(tmp_path / "input.wav", tmp_path / "out")
 
         mock_local.assert_called_once()
-        # Should have remapped vocals -> lead_vocals
         assert "lead_vocals" in result
-        # Should NOT have the original "vocals" key
-        assert "vocals" not in result
+        assert result["backing_vocals"] is None
 
 
 class TestSeparateVocalModalValidation:
-    """Test _separate_vocal_modal stem validation."""
+    """Test _separate_vocal_song_modal stem validation."""
 
     def test_raises_on_missing_stems(self, tmp_path):
         """Should raise RuntimeError if Modal returns fewer than 3 expected stems."""
-        from musicmixer.services.separation import _separate_vocal_modal
+        from musicmixer.services.separation import _separate_vocal_song_modal
 
         incomplete = {
             "lead_vocals": _make_float32_wav_bytes(440),
@@ -269,11 +262,11 @@ class TestSeparateVocalModalValidation:
 
         with patch("modal.Function.from_name", return_value=mock_remote):
             with pytest.raises(RuntimeError, match="Expected 3 stems"):
-                _separate_vocal_modal(input_path, tmp_path / "out")
+                _separate_vocal_song_modal(input_path, tmp_path / "out")
 
     def test_accepts_complete_3_stems(self, tmp_path):
         """Should accept and save all 3 stems without error."""
-        from musicmixer.services.separation import _separate_vocal_modal
+        from musicmixer.services.separation import _separate_vocal_song_modal
 
         complete = {
             "lead_vocals": _make_float32_wav_bytes(440),
@@ -288,7 +281,7 @@ class TestSeparateVocalModalValidation:
         input_path.write_bytes(_make_float32_wav_bytes())
 
         with patch("modal.Function.from_name", return_value=mock_remote):
-            result = _separate_vocal_modal(input_path, tmp_path / "out")
+            result = _separate_vocal_song_modal(input_path, tmp_path / "out")
 
         assert set(result.keys()) == {"lead_vocals", "backing_vocals", "instrumental"}
         for stem_name, stem_path in result.items():
