@@ -23,6 +23,33 @@ import numpy as np
 VOCAL_SOURCE: str = "song_a"
 
 # ---------------------------------------------------------------------------
+# Stem vocabulary
+#
+# Song A uses MelBand Roformer Karaoke (3 stems: lead_vocals, backing_vocals,
+# instrumental).  Song B uses BS-RoFormer (6 stems: vocals, drums, bass,
+# guitar, piano, other).
+#
+# ALL_STEMS is the union -- every stem name the LLM / gain mapper / renderer
+# may encounter.  Per-song subsets are provided for callers that need them.
+# ---------------------------------------------------------------------------
+SONG_A_STEMS: list[str] = ["lead_vocals", "backing_vocals", "instrumental"]
+SONG_B_STEMS: list[str] = ["vocals", "drums", "bass", "guitar", "piano", "other"]
+
+# Stems that ride the vocal bus in the renderer (looked up from vocal_stems dict).
+VOCAL_BUS_STEMS: set[str] = {"vocals", "lead_vocals", "backing_vocals"}
+
+# The flat 7-stem list used by the LLM tool schema, gain mapper, and
+# candidate planner.  Replaces the old 6-stem list (vocals retired in favour
+# of lead_vocals + backing_vocals; Song B instrumental stems unchanged).
+ALL_STEMS: list[str] = [
+    "lead_vocals", "backing_vocals",
+    "drums", "bass", "guitar", "piano", "other",
+]
+
+# Instrumental-only subset (Song B stems that are never vocal).
+INSTRUMENTAL_STEMS: list[str] = ["drums", "bass", "guitar", "piano", "other"]
+
+# ---------------------------------------------------------------------------
 # Session management (Step 1)
 # ---------------------------------------------------------------------------
 

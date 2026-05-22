@@ -22,7 +22,20 @@ from pathlib import Path
 import anthropic
 
 from musicmixer.config import settings
-from musicmixer.models import VOCAL_SOURCE, AudioMetadata, IntentPlan, IntentSection, LyricsData, RemixPlan, Section, WordAlignment, WordEvent
+from musicmixer.models import (
+    ALL_STEMS as _MODEL_ALL_STEMS,
+    INSTRUMENTAL_STEMS as _MODEL_INSTRUMENTAL_STEMS,
+    VOCAL_BUS_STEMS,
+    VOCAL_SOURCE,
+    AudioMetadata,
+    IntentPlan,
+    IntentSection,
+    LyricsData,
+    RemixPlan,
+    Section,
+    WordAlignment,
+    WordEvent,
+)
 from musicmixer.services.tempo import compute_stretch_pct, estimate_material_budget, estimate_target_bpm
 
 logger = logging.getLogger(__name__)
@@ -32,7 +45,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-ALL_STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
+ALL_STEMS = _MODEL_ALL_STEMS
 
 # Target remix duration in seconds. Controls beat budget, LLM guidance, and fallback plans.
 TARGET_REMIX_DURATION_SECONDS = 210  # 3.5 minutes
@@ -124,10 +137,11 @@ REMIX_PLAN_TOOL: dict = {
                         },
                         "stem_roles": {
                             "type": "object",
-                            "required": ["vocals", "drums", "bass", "guitar", "piano", "other"],
-                            "description": "Role for each stem: lead, support, background, texture, or silent.",
+                            "required": ["lead_vocals", "backing_vocals", "drums", "bass", "guitar", "piano", "other"],
+                            "description": "Role for each stem: lead, support, background, texture, or silent. lead_vocals = Song A primary vocal. backing_vocals = Song A harmonies/backing (optional, include for choruses/hooks).",
                             "properties": {
-                                "vocals": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"], "description": "lead=primary, support=audible contributor, background=fullness, texture=atmospheric, silent=absent"},
+                                "lead_vocals": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"], "description": "Song A primary vocal. Use 'lead' when vocals are the focus."},
+                                "backing_vocals": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"], "description": "Song A harmonies/backing. Optional — include for choruses/hooks, exclude for verses or when polyphony would cause mud."},
                                 "drums": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"], "description": "lead=primary, support=audible contributor, background=fullness, texture=atmospheric, silent=absent"},
                                 "bass": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"], "description": "lead=primary, support=audible contributor, background=fullness, texture=atmospheric, silent=absent"},
                                 "guitar": {"type": "string", "enum": ["lead", "support", "background", "texture", "silent"], "description": "lead=primary, support=audible contributor, background=fullness, texture=atmospheric, silent=absent"},
@@ -185,9 +199,10 @@ def _build_system_prompt_block() -> dict:
     metadata, tempo, templates) is built separately by _build_dynamic_context()
     and injected into the user message.
     """
-    # 6-stem separation (Modal / BS-RoFormer) -- hardcoded post Phase 1
-    stem_list = "vocals, drums, bass, guitar, piano, other"
-    stem_count = 6
+    # 7-stem vocabulary: Song A provides lead_vocals + backing_vocals,
+    # Song B provides drums, bass, guitar, piano, other.
+    stem_list = "lead_vocals, backing_vocals, drums, bass, guitar, piano, other"
+    stem_count = 7
 
     # Section 1: Role and MVP Constraints
     section_1 = f"""You are an expert music mashup artist with impeccable taste. You think like a jazz musician — every choice is intentional, every silence is earned, every transition serves the groove. You plan how to combine two songs into a mashup remix that sounds like it was always meant to exist.
@@ -210,20 +225,24 @@ CAPABILITIES:
     # Section 7: Critical Mixing Rules (failure mode guards)
     section_7 = """CRITICAL MIXING RULES (violations produce bad audio):
 1. INSTRUMENTAL SECTIONS: Prefer sections with no vocals (vox:--, labeled GOOD INSTRUMENTAL SOURCE). For instrumental breakdowns, assign at least one stem as "lead".
-2. VOCAL-INSTRUMENTAL BALANCE: When vocals are active, assign them "lead" and ensure at least 2-3 instrumental stems are "support" or "background". A mashup should sound like a FULL BAND, not a vocal solo.
-3. VOCAL BLEED AWARENESS: Song A's vocal stem may contain faint drums/bass from the original mix. In low-energy sections where Song B's drums are quiet or silent, this ghost rhythm can become audible and clash. Keep Song B drums, bass, or other active stems at "support" or higher when vocals are active — they mask the bleed. The concern is sections where ALL Song B stems are quiet or "texture" while vocals play — that's where ghost rhythm becomes audible.
+2. VOCAL-INSTRUMENTAL BALANCE: When lead_vocals are active, assign them "lead" and ensure at least 2-3 instrumental stems are "support" or "background". A mashup should sound like a FULL BAND, not a vocal solo.
+3. VOCAL BLEED AWARENESS: Song A's vocal stems may contain faint drums/bass from the original mix. In low-energy sections where Song B's drums are quiet or silent, this ghost rhythm can become audible and clash. Keep Song B drums, bass, or other active stems at "support" or higher when vocals are active — they mask the bleed. The concern is sections where ALL Song B stems are quiet or "texture" while vocals play — that's where ghost rhythm becomes audible.
 4. ENERGY MATCHING: Match vocal energy to instrumental energy level. Exception: quiet vocal over minimal beat is acceptable as an intentional artistic choice.
 5. DYNAMIC RANGE: The remix MUST have at least 1 contrast moment (e.g., breakdown -> drop) and use a minimum of 3 different energy levels across sections.
 6. ENDING: End with 4-8 bars of reduced energy or a natural outro. NEVER cut the remix at full energy -- it sounds broken.
-7. ROLE VARIATION: Vary stem roles across sections. Strip down to drums+bass+vocals for contrast, then promote more stems to "support" for impact. Flat roles across all sections produces a lifeless mix.
+7. ROLE VARIATION: Vary stem roles across sections. Strip down to drums+bass+lead_vocals for contrast, then promote more stems to "support" for impact. Flat roles across all sections produces a lifeless mix.
 8. LYRIC-AWARE CUTS: When lyrics are available, prefer placing section boundaries at natural lyric breaks (end of line/verse). Cross-reference Layer 5 lyrics and word timing with Layer 2 section boundaries. If lyrics show a hook or repeated phrase, that's a prime candidate for the "drop" section.
 9. VOCAL PRESENCE: Both songs carry musical identity. If Song B's instrumentals are only audible during intros and outros, the mashup is karaoke — Song B becomes wallpaper. Give Song B at least one section of 8-16 bars where it stands on its own: a breakdown, a drop, or an instrumental bridge in the middle of the arrangement. This lets the listener hear both songs as participants. If a stretch advisory is present in the dynamic context, defer to its vocal budget. Override freely when the source material or user prompt calls for vocal-forward treatment.
-10. VOCAL INTRO LIMIT: An instrumental intro is fine for building tension, but vocals must appear within the first ~30-40 seconds of the remix. Longer than that and the listener loses interest — they came to hear both songs together. Set start_time_vocal to 0 unless there's a specific reason to skip the beginning of the vocal track."""
+10. VOCAL INTRO LIMIT: An instrumental intro is fine for building tension, but lead_vocals must appear within the first ~30-40 seconds of the remix. Longer than that and the listener loses interest — they came to hear both songs together. Set start_time_vocal to 0 unless there's a specific reason to skip the beginning of the vocal track."""
 
     # Section 5: Stem Role Guidelines (roles, frequency awareness, energy arc, mixing advisory, phrase alignment)
     section_5 = """STEM ROLE GUIDELINES:
-- Vocal sections: vocals as "lead", at least 2-3 instrumental stems as "support" or "background"
-- Instrumental sections (breakdowns, intros): at least one "lead" instrumental
+- Song A provides two separate vocal stems: lead_vocals (primary vocal) and backing_vocals (harmonies, ad-libs, backing).
+- Use lead_vocals for the primary vocal arrangement. backing_vocals are optional — include for choruses and hooks to add richness, exclude for verses or when polyphony would cause mud.
+- Vocal sections: lead_vocals as "lead", backing_vocals as "background" or "silent", at least 2-3 instrumental stems as "support" or "background"
+- Chorus/hook sections: consider promoting backing_vocals to "support" or "background" for fullness
+- Verse sections: typically set backing_vocals to "silent" for a cleaner, more intimate feel
+- Instrumental sections (breakdowns, intros): both vocal stems as "silent", at least one "lead" instrumental
 - Drum-bass pair: typically "support" or higher in any rhythmic section
 - Vary roles across sections for dynamics: verse guitar as "background", chorus promotes it to "support"
 - A mashup should sound like a full band. Err toward "background" over "silent" — use "silent" SPARINGLY
@@ -860,17 +879,17 @@ def _build_few_shot_messages() -> list[dict]:
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 210.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 32, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "intro", "start_beat": 32, "end_beat": 64, "energy": "medium", "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 64, "end_beat": 128, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "chorus", "start_beat": 128, "end_beat": 192, "energy": "high", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "breakdown", "start_beat": 192, "end_beat": 224, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 224, "end_beat": 288, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "chorus", "start_beat": 288, "end_beat": 368, "energy": "peak", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 368, "end_beat": 416, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "energy": "low", "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "intro", "start_beat": 32, "end_beat": 64, "energy": "medium", "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 64, "end_beat": 128, "energy": "medium", "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "chorus", "start_beat": 128, "end_beat": 192, "energy": "high", "stem_roles": {"lead_vocals": "lead", "backing_vocals": "background", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "breakdown", "start_beat": 192, "end_beat": 224, "energy": "low", "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 224, "end_beat": 288, "energy": "medium", "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "chorus", "start_beat": 288, "end_beat": 368, "energy": "peak", "stem_roles": {"lead_vocals": "lead", "backing_vocals": "support", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 368, "end_beat": 416, "energy": "low", "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "vocal_type": "sung",
-                        "explanation": "Night Ride's vocals over City Groove's beat with a warm, building arrangement. The hook ('Roll with me') lands at the first chorus for impact, and the second verse promotes guitar from background to support for variety.",
+                        "explanation": "Night Ride's vocals over City Groove's beat with a warm, building arrangement. The hook ('Roll with me') lands at the first chorus with backing vocals for fullness, and the second verse promotes guitar from background to support for variety.",
                         "warnings": [],
                     },
                 }
@@ -922,15 +941,15 @@ def _build_few_shot_messages() -> list[dict]:
                         "start_time_instrumental": 0.0,
                         "end_time_instrumental": 210.0,
                         "sections": [
-                            {"label": "intro", "start_beat": 0, "end_beat": 32, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "fade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 32, "end_beat": 96, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "bridge", "start_beat": 96, "end_beat": 128, "energy": "medium", "stem_roles": {"vocals": "background", "drums": "support", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "verse", "start_beat": 128, "end_beat": 192, "energy": "medium", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
-                            {"label": "chorus", "start_beat": 192, "end_beat": 264, "energy": "high", "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
-                            {"label": "outro", "start_beat": 264, "end_beat": 312, "energy": "low", "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 8},
+                            {"label": "intro", "start_beat": 0, "end_beat": 32, "energy": "low", "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "fade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 32, "end_beat": 96, "energy": "medium", "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "bridge", "start_beat": 96, "end_beat": 128, "energy": "medium", "stem_roles": {"lead_vocals": "background", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "verse", "start_beat": 128, "end_beat": 192, "energy": "medium", "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 4},
+                            {"label": "chorus", "start_beat": 192, "end_beat": 264, "energy": "high", "stem_roles": {"lead_vocals": "lead", "backing_vocals": "support", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "transition_in": "cut", "transition_beats": 0},
+                            {"label": "outro", "start_beat": 264, "end_beat": 312, "energy": "low", "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "texture", "other": "texture"}, "transition_in": "crossfade", "transition_beats": 8},
                         ],
                         "vocal_type": "sung",
-                        "explanation": "Slow Jam's vocals sit over Upbeat Track's instrumental, keeping a relaxed feel. The bridge section uses guitar as lead for contrast before the final vocal chorus.",
+                        "explanation": "Slow Jam's vocals sit over Upbeat Track's instrumental, keeping a relaxed feel. Backing vocals come in for the final chorus to add warmth. The bridge section uses guitar as lead for contrast.",
                         "warnings": [],
                     },
                 }
@@ -1046,7 +1065,7 @@ def _validate_intent_plan(
             clamped_fields.append(f"transition_beats_{s.label}")
 
     # 6. stem_roles keys (add missing with default "texture", remove unknown)
-    valid_stems = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+    valid_stems = set(ALL_STEMS)
     valid_roles = {"lead", "support", "background", "texture", "silent"}
     for s in sections:
         for stem in valid_stems:
@@ -1067,7 +1086,7 @@ def _validate_intent_plan(
         half = (half // 4) * 4
         if half < 4:
             half = 4
-        intro_roles = {**sections[0].stem_roles, "vocals": "silent"}
+        intro_roles = {**sections[0].stem_roles, "lead_vocals": "silent", "backing_vocals": "silent"}
         intro = IntentSection("intro", 0, half, "low", intro_roles, "fade", 4)
         main = sections[0]
         main.start_beat = half
@@ -1193,9 +1212,10 @@ def _warn_vocal_stretch_limits(plan: IntentPlan, stretch_pct: float) -> None:
         max_bars = 4
 
     for section in plan.sections:
-        # Check sections with active vocals (any role other than "silent")
-        vocal_role = section.stem_roles.get("vocals", "silent")
-        if vocal_role == "silent":
+        # Check sections with active vocals (any vocal stem role other than "silent")
+        lead_role = section.stem_roles.get("lead_vocals", "silent")
+        backing_role = section.stem_roles.get("backing_vocals", "silent")
+        if lead_role == "silent" and backing_role == "silent":
             continue
 
         section_beats = section.end_beat - section.start_beat
@@ -1590,6 +1610,10 @@ def default_arrangement(total_beats: int) -> list[Section]:
     inst_breakdown = {"drums": 0.1, "bass": 0.4, "guitar": 0.6, "piano": 0.7, "other": 0.5}
     inst_outro =     {"drums": 0.5, "bass": 0.5, "guitar": 0.3, "piano": 0.3, "other": 0.4}
 
+    def _vox(lead: float, backing: float = 0.0) -> dict[str, float]:
+        """Build the vocal portion of a stem_gains dict."""
+        return {"lead_vocals": lead, "backing_vocals": backing}
+
     # 8-section extended: intro -> verse -> chorus -> breakdown -> verse -> chorus -> drop -> outro
     if total_beats >= 192:
         # Proportions: intro(~8%) verse(~15%) chorus(~12%) breakdown(~8%) verse(~15%) chorus(~12%) drop(~12%) outro(~8%)
@@ -1617,28 +1641,28 @@ def default_arrangement(total_beats: int) -> list[Section]:
 
         return [
             Section(label="intro", start_beat=0, end_beat=b1,
-                    stem_gains={"vocals": 0.0, **inst_intro},
+                    stem_gains={**_vox(0.0), **inst_intro},
                     transition_in="fade", transition_beats=4),
             Section(label="verse", start_beat=b1, end_beat=b2,
-                    stem_gains={"vocals": 0.9, **inst_body},
+                    stem_gains={**_vox(0.9), **inst_body},
                     transition_in="crossfade", transition_beats=min(8, (b2 - b1) // 3)),
             Section(label="drop", start_beat=b2, end_beat=b3,
-                    stem_gains={"vocals": 1.0, **inst_body},
+                    stem_gains={**_vox(1.0, 0.4), **inst_body},
                     transition_in="crossfade", transition_beats=4),
             Section(label="breakdown", start_beat=b3, end_beat=b4,
-                    stem_gains={"vocals": 0.3, **inst_breakdown},
+                    stem_gains={**_vox(0.3), **inst_breakdown},
                     transition_in="crossfade", transition_beats=min(8, (b4 - b3) // 3)),
             Section(label="verse", start_beat=b4, end_beat=b5,
-                    stem_gains={"vocals": 0.9, **inst_body},
+                    stem_gains={**_vox(0.9), **inst_body},
                     transition_in="crossfade", transition_beats=4),
             Section(label="drop", start_beat=b5, end_beat=b6,
-                    stem_gains={"vocals": 1.0, **inst_body},
+                    stem_gains={**_vox(1.0, 0.4), **inst_body},
                     transition_in="crossfade", transition_beats=4),
             Section(label="breakdown", start_beat=b6, end_beat=b7,
-                    stem_gains={"vocals": 0.5, **inst_bridge},
+                    stem_gains={**_vox(0.5), **inst_bridge},
                     transition_in="crossfade", transition_beats=min(8, (b7 - b6) // 3)),
             Section(label="outro", start_beat=b7, end_beat=total_beats,
-                    stem_gains={"vocals": 0.0, **inst_outro},
+                    stem_gains={**_vox(0.0), **inst_outro},
                     transition_in="crossfade", transition_beats=min(8, (total_beats - b7) // 2)),
         ]
 
@@ -1659,40 +1683,40 @@ def default_arrangement(total_beats: int) -> list[Section]:
 
         return [
             Section(label="intro", start_beat=0, end_beat=eighth,
-                    stem_gains={"vocals": 0.0, **inst_intro},
+                    stem_gains={**_vox(0.0), **inst_intro},
                     transition_in="fade", transition_beats=4),
             Section(label="build", start_beat=eighth, end_beat=quarter,
-                    stem_gains={"vocals": 0.5, **inst_body},
+                    stem_gains={**_vox(0.5), **inst_body},
                     transition_in="crossfade", transition_beats=min(8, (quarter - eighth) // 3)),
             Section(label="main", start_beat=quarter, end_beat=five_eighth,
-                    stem_gains={"vocals": 1.0, **inst_body},
+                    stem_gains={**_vox(1.0, 0.3), **inst_body},
                     transition_in="crossfade", transition_beats=4),
             Section(label="breakdown", start_beat=five_eighth, end_beat=drop_start,
-                    stem_gains={"vocals": 0.4, **inst_breakdown},
+                    stem_gains={**_vox(0.4), **inst_breakdown},
                     transition_in="crossfade", transition_beats=min(8, (drop_start - five_eighth) // 3)),
             Section(label="drop", start_beat=drop_start, end_beat=drop_end,
-                    stem_gains={"vocals": 0.8, **inst_body},
+                    stem_gains={**_vox(0.8, 0.3), **inst_body},
                     transition_in="crossfade", transition_beats=2),
             Section(label="outro", start_beat=outro_start, end_beat=total_beats,
-                    stem_gains={"vocals": 0.0, **inst_outro},
+                    stem_gains={**_vox(0.0), **inst_outro},
                     transition_in="crossfade", transition_beats=min(8, (total_beats - outro_start) // 2)),
         ]
 
     # 5-section fallback (not enough beats for drop section)
     return [
         Section(label="intro", start_beat=0, end_beat=eighth,
-                stem_gains={"vocals": 0.0, **inst_intro},
+                stem_gains={**_vox(0.0), **inst_intro},
                 transition_in="fade", transition_beats=4),
         Section(label="build", start_beat=eighth, end_beat=quarter,
-                stem_gains={"vocals": 0.5, **inst_body},
+                stem_gains={**_vox(0.5), **inst_body},
                 transition_in="crossfade", transition_beats=4),
         Section(label="main", start_beat=quarter, end_beat=three_quarter,
-                stem_gains={"vocals": 1.0, **inst_body},
+                stem_gains={**_vox(1.0, 0.3), **inst_body},
                 transition_in="crossfade", transition_beats=4),
         Section(label="breakdown", start_beat=three_quarter, end_beat=seven_eighth,
-                stem_gains={"vocals": 0.4, **inst_breakdown},
+                stem_gains={**_vox(0.4), **inst_breakdown},
                 transition_in="crossfade", transition_beats=4),
         Section(label="outro", start_beat=seven_eighth, end_beat=total_beats,
-                stem_gains={"vocals": 0.0, **inst_outro},
+                stem_gains={**_vox(0.0), **inst_outro},
                 transition_in="crossfade", transition_beats=4),
     ]
