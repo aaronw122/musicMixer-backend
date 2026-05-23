@@ -359,34 +359,38 @@ def check_contrast_requirement(plan: RemixPlan) -> list[ConstraintViolation]:
 
 
 def check_no_dual_lead_vocals(plan: RemixPlan) -> list[ConstraintViolation]:
-    """Constraint 12: No dual lead vocals.
+    """Constraint 12: No cross-song vocal overlap.
 
-    Only one lead vocal at a time. In the MVP, vocals come from a single
-    source (vocal_source), so this checks that no section has more than one
-    vocal-type stem active (gain > 0). The relevant stem name is "vocals".
+    Song A provides lead_vocals and backing_vocals.  Song B provides vocals
+    (merged lead+backing from BS-RoFormer).  Same-song layering (lead_vocals
+    + backing_vocals from Song A) is intentional and allowed -- this is the
+    headline use case for the lead/backing vocal separation feature.
 
-    Since MVP uses a single vocal source, dual lead vocals would require
-    both song_a and song_b vocals active. We check that no section has
-    stem_gains entries for multiple vocal-like stems with non-zero gain.
+    The constraint fires only when vocals from BOTH songs are active in the
+    same section (e.g. Song A lead_vocals + Song B vocals).
     """
     violations: list[ConstraintViolation] = []
 
-    # In the current stem schema, only "vocals" is a vocal stem.
-    # This constraint is forward-looking: if we ever add "vocals_a" and
-    # "vocals_b" as separate stems, this would catch overlaps.
-    vocal_stems = {"vocals", "vocals_a", "vocals_b", "lead_vocals", "backing_vocals"}
+    # Song A vocal stems (MelBand Roformer output)
+    song_a_vocal_stems = {"lead_vocals", "backing_vocals"}
+    # Song B vocal stem (BS-RoFormer output)
+    song_b_vocal_stems = {"vocals"}
 
     for i, sec in enumerate(plan.sections):
-        active_vocal_count = sum(
-            1 for stem, gain in sec.stem_gains.items()
-            if stem in vocal_stems and gain > 0
+        song_a_active = any(
+            sec.stem_gains.get(stem, 0.0) > 0
+            for stem in song_a_vocal_stems
         )
-        if active_vocal_count > 1:
+        song_b_active = any(
+            sec.stem_gains.get(stem, 0.0) > 0
+            for stem in song_b_vocal_stems
+        )
+        if song_a_active and song_b_active:
             violations.append(ConstraintViolation(
                 code=ConstraintCode.DUAL_LEAD_VOCALS,
                 message=(
-                    f"Section {i} ({sec.label}): {active_vocal_count} "
-                    f"vocal stems active simultaneously"
+                    f"Section {i} ({sec.label}): vocals from both Song A "
+                    f"and Song B are active simultaneously"
                 ),
                 section_index=i,
             ))
@@ -564,9 +568,19 @@ def check_stem_quality_gate(
     if stem_quality >= 0.7:
         return violations
 
+    # Any of these stem sets count as "solo vocal"
+    solo_vocal_patterns = [
+        ["vocals"],
+        ["lead_vocals"],
+        ["lead_vocals", "backing_vocals"],
+        ["backing_vocals", "lead_vocals"],
+    ]
+
     for i, sec in enumerate(plan.sections):
-        active_stems = [stem for stem, gain in sec.stem_gains.items() if gain > 0]
-        if active_stems == ["vocals"]:
+        active_stems = sorted(
+            stem for stem, gain in sec.stem_gains.items() if gain > 0
+        )
+        if active_stems in solo_vocal_patterns:
             violations.append(ConstraintViolation(
                 code=ConstraintCode.STEM_QUALITY_GATE,
                 message=(

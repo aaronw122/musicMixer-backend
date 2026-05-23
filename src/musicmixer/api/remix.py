@@ -329,10 +329,11 @@ def _youtube_pipeline_wrapper(
             )
 
             if stems_restored:
-                # Build stem path dicts
-                stem_names = ["vocals", "drums", "bass", "guitar", "piano", "other"]
-                song_a_stems = {n: song_a_stems_dir / f"{n}.wav" for n in stem_names if (song_a_stems_dir / f"{n}.wav").exists()}
-                song_b_stems = {n: song_b_stems_dir / f"{n}.wav" for n in stem_names if (song_b_stems_dir / f"{n}.wav").exists()}
+                # Build stem path dicts dynamically from whatever WAVs exist on disk.
+                # Song A may have 3 stems (lead_vocals, backing_vocals, instrumental)
+                # or 6 legacy stems; Song B always has 6.
+                song_a_stems = {f.stem: f for f in song_a_stems_dir.glob("*.wav")}
+                song_b_stems = {f.stem: f for f in song_b_stems_dir.glob("*.wav")}
 
                 # Measure LUFS from restored stems
                 vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(
@@ -1258,7 +1259,7 @@ async def get_audio(session_id: str):
 
 
 VALID_SONGS = {"song_a", "song_b"}
-VALID_STEMS = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+VALID_STEMS = {"vocals", "lead_vocals", "backing_vocals", "drums", "bass", "guitar", "piano", "other"}
 
 
 @router.get("/remix/{session_id}/stems")
