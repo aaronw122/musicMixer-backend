@@ -261,7 +261,7 @@ class TestSeparateVocalModalValidation:
         input_path.write_bytes(_make_float32_wav_bytes())
 
         with patch("modal.Function.from_name", return_value=mock_remote):
-            with pytest.raises(RuntimeError, match="Expected 3 stems"):
+            with pytest.raises(RuntimeError, match="Expected vocal-song stems"):
                 _separate_vocal_song_modal(input_path, tmp_path / "out")
 
     def test_accepts_complete_3_stems(self, tmp_path):
