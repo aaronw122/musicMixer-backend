@@ -323,9 +323,10 @@ def _youtube_pipeline_wrapper(
             stems_dir = settings.data_dir / "stems" / session_id
             song_a_stems_dir = stems_dir / "song_a"
             song_b_stems_dir = stems_dir / "song_b"
+            from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
             stems_restored = (
-                get_cached_stems(cached_song_a.video_id, "vocal", song_a_stems_dir)
-                and get_cached_stems(cached_song_b.video_id, "instrumental", song_b_stems_dir)
+                get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
+                and get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
             )
 
             if stems_restored:
@@ -515,20 +516,45 @@ def _youtube_pipeline_wrapper(
 
         # Cache analysis results to Redis for future cache hits
         from musicmixer.api.shelf import _extract_video_id
-        from musicmixer.services.song_cache import cache_song_metadata, cache_song_stems
+        from musicmixer.services.song_cache import (
+            ROLE_VOCAL, ROLE_INSTRUMENTAL,
+            cache_song_metadata, cache_song_stems,
+        )
         from pathlib import Path
 
         # Song A (vocal source)
         vid_a = _extract_video_id(url_a)
         if vid_a is not None:
-            cache_song_metadata(vid_a, "vocal", result_a.title, "", analysis.meta_a, analysis.lyrics_a)
-            cache_song_stems(vid_a, "vocal", Path(analysis.song_a_stems_dir))
+            cache_song_metadata(
+                video_id=vid_a,
+                role=ROLE_VOCAL,
+                title=result_a.title,
+                artist="",
+                meta=analysis.meta_a,
+                lyrics=analysis.lyrics_a,
+            )
+            cache_song_stems(
+                video_id=vid_a,
+                role=ROLE_VOCAL,
+                stems_dir=Path(analysis.song_a_stems_dir),
+            )
 
         # Song B (instrumental source)
         vid_b = _extract_video_id(url_b)
         if vid_b is not None:
-            cache_song_metadata(vid_b, "instrumental", result_b.title, "", analysis.meta_b, analysis.lyrics_b)
-            cache_song_stems(vid_b, "instrumental", Path(analysis.song_b_stems_dir))
+            cache_song_metadata(
+                video_id=vid_b,
+                role=ROLE_INSTRUMENTAL,
+                title=result_b.title,
+                artist="",
+                meta=analysis.meta_b,
+                lyrics=analysis.lyrics_b,
+            )
+            cache_song_stems(
+                video_id=vid_b,
+                role=ROLE_INSTRUMENTAL,
+                stems_dir=Path(analysis.song_b_stems_dir),
+            )
 
         run_remix(
             session_id=session_id,
@@ -785,12 +811,12 @@ def create_youtube_remix(
 
     # Check Redis song cache for each URL
     from musicmixer.api.shelf import _extract_video_id
-    from musicmixer.services.song_cache import get_cached_song
+    from musicmixer.services.song_cache import get_cached_song, ROLE_VOCAL, ROLE_INSTRUMENTAL
 
     video_id_a = _extract_video_id(body.url_a)
     video_id_b = _extract_video_id(body.url_b)
-    cached_a = get_cached_song(video_id_a, role="vocal") if video_id_a else None
-    cached_b = get_cached_song(video_id_b, role="instrumental") if video_id_b else None
+    cached_a = get_cached_song(video_id_a, role=ROLE_VOCAL) if video_id_a else None
+    cached_b = get_cached_song(video_id_b, role=ROLE_INSTRUMENTAL) if video_id_b else None
     if cached_a:
         logger.info("Song cache HIT for URL A (video_id=%s, has_stems=%s)", video_id_a, cached_a.has_stems)
     if cached_b:

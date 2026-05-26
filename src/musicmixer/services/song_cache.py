@@ -20,7 +20,7 @@ import shutil
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import redis
@@ -50,7 +50,11 @@ logger = logging.getLogger(__name__)
 # Role-aware stem count thresholds
 # ---------------------------------------------------------------------------
 
-_VALID_ROLES = ("vocal", "instrumental")
+SongRole = Literal["vocal", "instrumental"]
+ROLE_VOCAL: SongRole = "vocal"
+ROLE_INSTRUMENTAL: SongRole = "instrumental"
+
+_VALID_ROLES: tuple[SongRole, ...] = (ROLE_VOCAL, ROLE_INSTRUMENTAL)
 _MIN_VOCAL_STEMS = 3        # lead_vocals, backing_vocals, instrumental
 _MIN_INSTRUMENTAL_STEMS = 4  # vocals, drums, bass, guitar, piano, other (at least 4)
 
@@ -78,15 +82,19 @@ def _get_redis() -> redis.Redis:
 # Cache key
 # ---------------------------------------------------------------------------
 
-def _song_key(video_id: str, role: str) -> str:
+def _song_key(video_id: str, role: SongRole) -> str:
     if role not in _VALID_ROLES:
         raise ValueError(f"Invalid role {role!r}, must be one of {_VALID_ROLES}")
     return f"song:{video_id}:{role}"
 
 
-def _min_stems_for_role(role: str) -> int:
+def _min_stems_for_role(role: SongRole) -> int:
     """Return the minimum stem file count for a given role."""
-    return _MIN_VOCAL_STEMS if role == "vocal" else _MIN_INSTRUMENTAL_STEMS
+    if role == ROLE_VOCAL:
+        return _MIN_VOCAL_STEMS
+    if role == ROLE_INSTRUMENTAL:
+        return _MIN_INSTRUMENTAL_STEMS
+    raise ValueError(f"Invalid role {role!r}, must be one of {_VALID_ROLES}")
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +219,7 @@ def _deserialize_lyrics(json_str: str) -> LyricsData:
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_cached_song(video_id: str, role: str) -> CachedSong | None:
+def get_cached_song(video_id: str, role: SongRole) -> CachedSong | None:
     """Look up a song in Redis by video ID and role. Returns None on miss or error."""
     try:
         r = _get_redis()
@@ -250,7 +258,7 @@ def get_cached_song(video_id: str, role: str) -> CachedSong | None:
 
 def cache_song_metadata(
     video_id: str,
-    role: str,
+    role: SongRole,
     title: str,
     artist: str,
     meta: AudioMetadata,
@@ -274,7 +282,7 @@ def cache_song_metadata(
         logger.warning("Redis unavailable, skipping cache write", exc_info=True)
 
 
-def cache_song_stems(video_id: str, role: str, stems_dir: Path) -> None:
+def cache_song_stems(video_id: str, role: SongRole, stems_dir: Path) -> None:
     """Copy stems to a role-qualified cache directory and update Redis."""
     cache_dir = settings.song_cache_dir / video_id / role
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -292,7 +300,7 @@ def cache_song_stems(video_id: str, role: str, stems_dir: Path) -> None:
         logger.warning("Redis unavailable, stems cached to disk only", exc_info=True)
 
 
-def get_cached_stems(video_id: str, role: str, output_dir: Path) -> bool:
+def get_cached_stems(video_id: str, role: SongRole, output_dir: Path) -> bool:
     """Copy cached stems to output_dir. Returns True if stems were found.
 
     Uses role-aware stem count validation: vocal needs >= 3, instrumental >= 4.
