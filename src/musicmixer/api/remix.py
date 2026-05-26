@@ -527,7 +527,6 @@ def _youtube_pipeline_wrapper(
         if vid_a is not None:
             cache_song_metadata(
                 video_id=vid_a,
-                role=ROLE_VOCAL,
                 title=result_a.title,
                 artist="",
                 meta=analysis.meta_a,
@@ -544,7 +543,6 @@ def _youtube_pipeline_wrapper(
         if vid_b is not None:
             cache_song_metadata(
                 video_id=vid_b,
-                role=ROLE_INSTRUMENTAL,
                 title=result_b.title,
                 artist="",
                 meta=analysis.meta_b,

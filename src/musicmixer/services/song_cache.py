@@ -1,4 +1,4 @@
-"""Redis-backed per-song cache keyed by YouTube video ID and role.
+"""Redis-backed per-song cache keyed by YouTube video ID.
 
 Caches AudioMetadata (including stem_analysis, song_structure, PulseMap),
 LyricsData, and stem file paths. On cache hit, the pipeline skips download,
@@ -7,9 +7,12 @@ separation, and analysis — jumping straight to LLM + DSP.
 Redis stores small data (~40-80KB per song). Stems (~480MB per song) live
 on the filesystem at data/song_cache/{video_id}/{role}/.
 
-Cache keys are `song:{video_id}:{role}` where role is "vocal" or
-"instrumental". The same video cached under different roles produces
-separate Redis entries and separate filesystem directories.
+Two Redis key patterns:
+- `song:{video_id}:meta` — metadata hash (shared across roles)
+- `song:{video_id}:{role}:stems` — stems_path as a plain string (role-specific)
+
+Metadata is role-independent (BPM, key, energy describe the original song).
+Only stem separation is role-dependent, so stems get their own role-qualified key.
 """
 
 from __future__ import annotations
@@ -82,10 +85,16 @@ def _get_redis() -> redis.Redis:
 # Cache key
 # ---------------------------------------------------------------------------
 
-def _song_key(video_id: str, role: SongRole) -> str:
+def _meta_key(video_id: str) -> str:
+    """Redis key for shared metadata hash: song:{video_id}:meta"""
+    return f"song:{video_id}:meta"
+
+
+def _stems_key(video_id: str, role: SongRole) -> str:
+    """Redis key for role-specific stems path: song:{video_id}:{role}:stems"""
     if role not in _VALID_ROLES:
         raise ValueError(f"Invalid role {role!r}, must be one of {_VALID_ROLES}")
-    return f"song:{video_id}:{role}"
+    return f"song:{video_id}:{role}:stems"
 
 
 def _min_stems_for_role(role: SongRole) -> int:
@@ -220,10 +229,18 @@ def _deserialize_lyrics(json_str: str) -> LyricsData:
 # ---------------------------------------------------------------------------
 
 def get_cached_song(video_id: str, role: SongRole) -> CachedSong | None:
-    """Look up a song in Redis by video ID and role. Returns None on miss or error."""
+    """Look up a song in Redis by video ID and role. Returns None on miss or error.
+
+    Two-step lookup:
+    1. Metadata from song:{video_id}:meta (shared across roles)
+    2. Stems path from song:{video_id}:{role}:stems (role-specific)
+
+    Returns None if metadata is missing. Returns CachedSong with has_stems=False
+    if metadata exists but stems are missing or invalid for the requested role.
+    """
     try:
         r = _get_redis()
-        data: dict[str, str] = r.hgetall(_song_key(video_id, role))  # type: ignore[assignment]
+        data: dict[str, str] = r.hgetall(_meta_key(video_id))  # type: ignore[assignment]
     except redis.RedisError:
         logger.warning("Redis unavailable, skipping cache lookup", exc_info=True)
         return None
@@ -234,7 +251,13 @@ def get_cached_song(video_id: str, role: SongRole) -> CachedSong | None:
     try:
         meta = _deserialize_audio_metadata(data["meta"])
         lyrics = _deserialize_lyrics(data["lyrics"]) if data.get("lyrics") else None
-        stems_path = data.get("stems_path")
+
+        # Step 2: look up role-specific stems path
+        stems_path: str | None = None
+        try:
+            stems_path = r.get(_stems_key(video_id, role))  # type: ignore[assignment]
+        except redis.RedisError:
+            logger.warning("Redis unavailable for stems lookup", exc_info=True)
 
         # Validate stems still exist on disk (role-aware threshold)
         has_stems = False
@@ -258,13 +281,16 @@ def get_cached_song(video_id: str, role: SongRole) -> CachedSong | None:
 
 def cache_song_metadata(
     video_id: str,
-    role: SongRole,
     title: str,
     artist: str,
     meta: AudioMetadata,
     lyrics: LyricsData | None,
 ) -> None:
-    """Write song analysis results to Redis under a role-qualified key."""
+    """Write song analysis results to the shared metadata key in Redis.
+
+    Writes to song:{video_id}:meta (no role — metadata is role-independent).
+    Always does a full overwrite of the hash to ensure consistency.
+    """
     try:
         r = _get_redis()
         mapping: dict[str, str] = {
@@ -276,14 +302,17 @@ def cache_song_metadata(
         if lyrics is not None:
             mapping["lyrics"] = _serialize_lyrics(lyrics)
 
-        r.hset(_song_key(video_id, role), mapping=mapping)
-        logger.info("Cached metadata for video %s (role=%s)", video_id, role)
+        r.hset(_meta_key(video_id), mapping=mapping)
+        logger.info("Cached metadata for video %s", video_id)
     except redis.RedisError:
         logger.warning("Redis unavailable, skipping cache write", exc_info=True)
 
 
 def cache_song_stems(video_id: str, role: SongRole, stems_dir: Path) -> None:
-    """Copy stems to a role-qualified cache directory and update Redis."""
+    """Copy stems to a role-qualified cache directory and update Redis.
+
+    Writes stems_path to song:{video_id}:{role}:stems as a plain Redis string.
+    """
     cache_dir = settings.song_cache_dir / video_id / role
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -291,10 +320,10 @@ def cache_song_stems(video_id: str, role: SongRole, stems_dir: Path) -> None:
     for wav_file in stems_dir.glob("*.wav"):
         shutil.copy2(wav_file, cache_dir / wav_file.name)
 
-    # Update Redis with the path
+    # Update Redis with the path (plain string, not a hash field)
     try:
         r = _get_redis()
-        r.hset(_song_key(video_id, role), "stems_path", str(cache_dir))
+        r.set(_stems_key(video_id, role), str(cache_dir))
         logger.info("Cached stems for video %s (role=%s) at %s", video_id, role, cache_dir)
     except redis.RedisError:
         logger.warning("Redis unavailable, stems cached to disk only", exc_info=True)
