@@ -25,8 +25,8 @@ from musicmixer.models import (
 from musicmixer.services.song_cache import (
     ROLE_INSTRUMENTAL,
     ROLE_VOCAL,
-    _MIN_INSTRUMENTAL_STEMS,
-    _MIN_VOCAL_STEMS,
+    SongRole,
+    _MIN_STEMS_BY_ROLE,
     _deserialize_audio_metadata,
     _deserialize_lyrics,
     _get_redis,
@@ -72,6 +72,15 @@ def _make_vocal_stem_dir(base: Path) -> Path:
     for name in VOCAL_STEM_NAMES:
         _make_wav(base / f"{name}.wav")
     return base
+
+
+def _make_role_stem_dir(base: Path, role: SongRole) -> Path:
+    """Create a complete stem directory for a cache role."""
+    if role == ROLE_VOCAL:
+        return _make_vocal_stem_dir(base)
+    if role == ROLE_INSTRUMENTAL:
+        return _make_stem_dir(base)
+    raise ValueError(f"Invalid role {role!r}")
 
 
 def _make_audio_metadata() -> AudioMetadata:
@@ -157,6 +166,31 @@ def _make_lyrics_data() -> LyricsData:
         raw_text="Hello world\nGoodbye world",
         lookup_duration_ms=123.4,
     )
+
+
+def _cache_test_metadata(
+    video_id: str,
+    title: str = "Song",
+    artist: str = "",
+    lyrics: LyricsData | None = None,
+) -> AudioMetadata:
+    """Cache standard test metadata and return it for assertions."""
+    meta = _make_audio_metadata()
+    cache_song_metadata(
+        video_id=video_id,
+        title=title,
+        artist=artist,
+        meta=meta,
+        lyrics=lyrics,
+    )
+    return meta
+
+
+def _cache_test_stems(video_id: str, role: SongRole, tmp_path: Path) -> Path:
+    """Cache a complete role-specific stem directory and return its source path."""
+    stems_dir = _make_role_stem_dir(tmp_path / f"{video_id}_{role}_stems", role)
+    cache_song_stems(video_id, role, stems_dir)
+    return stems_dir
 
 
 # ---------------------------------------------------------------------------
@@ -433,35 +467,17 @@ class TestRoleAwareCache:
     def test_same_video_different_roles_shares_metadata(self, clean_redis, tmp_path):
         """Same video cached under vocal and instrumental shares ONE metadata key
         but has TWO separate stems keys."""
-        meta = _make_audio_metadata()
+        _cache_test_metadata("test_vid_dual", title="Song Title")
+        _cache_test_stems("test_vid_dual", ROLE_VOCAL, tmp_path)
+        _cache_test_stems("test_vid_dual", ROLE_INSTRUMENTAL, tmp_path)
 
-        # Cache metadata once (shared)
-        cache_song_metadata(
-            video_id="test_vid_dual",
-            title="Song Title",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
-
-        # Cache stems for both roles
-        vocal_stems = _make_vocal_stem_dir(tmp_path / "vocal_stems")
-        cache_song_stems("test_vid_dual", ROLE_VOCAL, vocal_stems)
-
-        inst_stems = _make_stem_dir(tmp_path / "inst_stems")
-        cache_song_stems("test_vid_dual", ROLE_INSTRUMENTAL, inst_stems)
-
-        # Verify ONE shared metadata key
         r = clean_redis
-        assert r.exists("song:test_vid_dual:meta") == 1
+        assert r.exists(_meta_key("test_vid_dual")) == 1
+        assert r.exists(_stems_key("test_vid_dual", ROLE_VOCAL)) == 1
+        assert r.exists(_stems_key("test_vid_dual", ROLE_INSTRUMENTAL)) == 1
+        assert r.type(_stems_key("test_vid_dual", ROLE_VOCAL)) == "string"
+        assert r.type(_stems_key("test_vid_dual", ROLE_INSTRUMENTAL)) == "string"
 
-        # Verify TWO separate stems keys (plain strings, not hashes)
-        assert r.exists("song:test_vid_dual:vocal:stems") == 1
-        assert r.exists("song:test_vid_dual:instrumental:stems") == 1
-        assert r.type("song:test_vid_dual:vocal:stems") == "string"
-        assert r.type("song:test_vid_dual:instrumental:stems") == "string"
-
-        # Both roles return the same metadata (title) but different stems paths
         vocal_result = get_cached_song("test_vid_dual", ROLE_VOCAL)
         inst_result = get_cached_song("test_vid_dual", ROLE_INSTRUMENTAL)
         assert vocal_result is not None
@@ -469,25 +485,17 @@ class TestRoleAwareCache:
         assert vocal_result.title == "Song Title"
         assert inst_result.title == "Song Title"
 
-        # Verify separate filesystem directories
         assert vocal_result.stems_path != inst_result.stems_path
-        assert "vocal" in vocal_result.stems_path
-        assert "instrumental" in inst_result.stems_path
+        assert vocal_result.stems_path is not None
+        assert inst_result.stems_path is not None
+        assert Path(vocal_result.stems_path).name == ROLE_VOCAL
+        assert Path(inst_result.stems_path).name == ROLE_INSTRUMENTAL
 
     def test_cache_miss_for_wrong_role_returns_metadata_no_stems(self, clean_redis, tmp_path):
         """Caching as vocal, querying as instrumental returns metadata but has_stems=False."""
-        meta = _make_audio_metadata()
-        vocal_stems = _make_vocal_stem_dir(tmp_path / "vocal_stems")
-        cache_song_metadata(
-            video_id="test_vid_role_miss",
-            title="Song",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
-        cache_song_stems("test_vid_role_miss", ROLE_VOCAL, vocal_stems)
+        _cache_test_metadata("test_vid_role_miss")
+        _cache_test_stems("test_vid_role_miss", ROLE_VOCAL, tmp_path)
 
-        # Querying as instrumental: metadata IS found (shared), but stems are not
         result = get_cached_song("test_vid_role_miss", ROLE_INSTRUMENTAL)
         assert result is not None
         assert result.title == "Song"
@@ -497,14 +505,7 @@ class TestRoleAwareCache:
 
     def test_metadata_only_no_stems(self, clean_redis):
         """Cache metadata only (no stems) returns CachedSong with has_stems=False."""
-        meta = _make_audio_metadata()
-        cache_song_metadata(
-            video_id="test_vid_meta_only",
-            title="Meta Only Song",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
+        _cache_test_metadata("test_vid_meta_only", title="Meta Only Song")
 
         result = get_cached_song("test_vid_meta_only", ROLE_VOCAL)
         assert result is not None
@@ -512,30 +513,19 @@ class TestRoleAwareCache:
         assert result.has_stems is False
         assert result.stems_path is None
 
-        # Same for instrumental
         result_inst = get_cached_song("test_vid_meta_only", ROLE_INSTRUMENTAL)
         assert result_inst is not None
         assert result_inst.has_stems is False
 
     def test_metadata_shared_vocal_stems_query_instrumental(self, clean_redis, tmp_path):
         """Cache metadata + vocal stems, query as instrumental: metadata present, has_stems=False."""
-        meta = _make_audio_metadata()
-        vocal_stems = _make_vocal_stem_dir(tmp_path / "vocal_stems")
-        cache_song_metadata(
-            video_id="test_vid_cross_role",
-            title="Cross Role Song",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
-        cache_song_stems("test_vid_cross_role", ROLE_VOCAL, vocal_stems)
+        _cache_test_metadata("test_vid_cross_role", title="Cross Role Song")
+        _cache_test_stems("test_vid_cross_role", ROLE_VOCAL, tmp_path)
 
-        # Vocal query: full hit
         vocal_result = get_cached_song("test_vid_cross_role", ROLE_VOCAL)
         assert vocal_result is not None
         assert vocal_result.has_stems is True
 
-        # Instrumental query: metadata hit, stems miss
         inst_result = get_cached_song("test_vid_cross_role", ROLE_INSTRUMENTAL)
         assert inst_result is not None
         assert inst_result.title == "Cross Role Song"
@@ -543,20 +533,9 @@ class TestRoleAwareCache:
 
     def test_both_roles_have_stems(self, clean_redis, tmp_path):
         """Cache metadata + vocal stems + instrumental stems: both roles return has_stems=True."""
-        meta = _make_audio_metadata()
-        cache_song_metadata(
-            video_id="test_vid_both_roles",
-            title="Both Roles Song",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
-
-        vocal_stems = _make_vocal_stem_dir(tmp_path / "vocal_stems")
-        cache_song_stems("test_vid_both_roles", ROLE_VOCAL, vocal_stems)
-
-        inst_stems = _make_stem_dir(tmp_path / "inst_stems")
-        cache_song_stems("test_vid_both_roles", ROLE_INSTRUMENTAL, inst_stems)
+        _cache_test_metadata("test_vid_both_roles", title="Both Roles Song")
+        _cache_test_stems("test_vid_both_roles", ROLE_VOCAL, tmp_path)
+        _cache_test_stems("test_vid_both_roles", ROLE_INSTRUMENTAL, tmp_path)
 
         vocal_result = get_cached_song("test_vid_both_roles", ROLE_VOCAL)
         inst_result = get_cached_song("test_vid_both_roles", ROLE_INSTRUMENTAL)
@@ -568,16 +547,8 @@ class TestRoleAwareCache:
 
     def test_vocal_role_stem_validation(self, clean_redis, tmp_path):
         """Vocal role requires >= 3 stems to set has_stems=True."""
-        meta = _make_audio_metadata()
-        vocal_stems = _make_vocal_stem_dir(tmp_path / "vocal_stems")
-        cache_song_metadata(
-            video_id="test_vid_voc_valid",
-            title="Song",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
-        cache_song_stems("test_vid_voc_valid", ROLE_VOCAL, vocal_stems)
+        _cache_test_metadata("test_vid_voc_valid")
+        _cache_test_stems("test_vid_voc_valid", ROLE_VOCAL, tmp_path)
 
         result = get_cached_song("test_vid_voc_valid", ROLE_VOCAL)
         assert result is not None
@@ -585,19 +556,11 @@ class TestRoleAwareCache:
 
     def test_vocal_role_insufficient_stems(self, clean_redis, tmp_path):
         """Vocal role with < 3 stems sets has_stems=False."""
-        meta = _make_audio_metadata()
         sparse_dir = tmp_path / "sparse_stems"
         sparse_dir.mkdir(parents=True, exist_ok=True)
         _make_wav(sparse_dir / "lead_vocals.wav")
         _make_wav(sparse_dir / "backing_vocals.wav")
-        # Only 2 stems — below _MIN_VOCAL_STEMS threshold
-        cache_song_metadata(
-            video_id="test_vid_voc_sparse",
-            title="Song",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
+        _cache_test_metadata("test_vid_voc_sparse")
         cache_song_stems("test_vid_voc_sparse", ROLE_VOCAL, sparse_dir)
 
         result = get_cached_song("test_vid_voc_sparse", ROLE_VOCAL)
@@ -606,14 +569,7 @@ class TestRoleAwareCache:
 
     def test_instrumental_role_stem_validation(self, clean_redis, tmp_stems):
         """Instrumental role requires >= 4 stems to set has_stems=True."""
-        meta = _make_audio_metadata()
-        cache_song_metadata(
-            video_id="test_vid_inst_valid",
-            title="Song",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
+        _cache_test_metadata("test_vid_inst_valid")
         cache_song_stems("test_vid_inst_valid", ROLE_INSTRUMENTAL, tmp_stems)
 
         result = get_cached_song("test_vid_inst_valid", ROLE_INSTRUMENTAL)
@@ -622,20 +578,12 @@ class TestRoleAwareCache:
 
     def test_instrumental_role_insufficient_stems(self, clean_redis, tmp_path):
         """Instrumental role with < 4 stems sets has_stems=False."""
-        meta = _make_audio_metadata()
         sparse_dir = tmp_path / "sparse_inst"
         sparse_dir.mkdir(parents=True, exist_ok=True)
         _make_wav(sparse_dir / "vocals.wav")
         _make_wav(sparse_dir / "drums.wav")
         _make_wav(sparse_dir / "bass.wav")
-        # Only 3 stems — below _MIN_INSTRUMENTAL_STEMS threshold
-        cache_song_metadata(
-            video_id="test_vid_inst_sparse",
-            title="Song",
-            artist="",
-            meta=meta,
-            lyrics=None,
-        )
+        _cache_test_metadata("test_vid_inst_sparse")
         cache_song_stems("test_vid_inst_sparse", ROLE_INSTRUMENTAL, sparse_dir)
 
         result = get_cached_song("test_vid_inst_sparse", ROLE_INSTRUMENTAL)
@@ -645,7 +593,6 @@ class TestRoleAwareCache:
     def test_backward_compatibility_old_key_is_miss(self, clean_redis):
         """Old-format song:{video_id}:{role} key in Redis returns None (no :meta suffix)."""
         r = clean_redis
-        # Simulate old-format entries (pre-split keys)
         r.hset("song:test_vid_old_format:vocal", mapping={"title": "Old Song", "meta": "{}"})
 
         result_vocal = get_cached_song("test_vid_old_format", ROLE_VOCAL)
@@ -653,7 +600,6 @@ class TestRoleAwareCache:
         assert result_vocal is None
         assert result_inst is None
 
-        # Clean up old-format key
         r.delete("song:test_vid_old_format:vocal")
 
     def test_get_cached_stems_vocal_role(self, clean_redis, tmp_path):
@@ -683,26 +629,23 @@ class TestRoleAwareCache:
         lyrics = _make_lyrics_data()
 
         cache_song_metadata("test_vid_stale", "Song With Lyrics", "Artist A", meta, lyrics)
-
-        # Overwrite same video, no lyrics this time
         cache_song_metadata("test_vid_stale", "Song Without Lyrics", "Artist B", meta, None)
 
-        result = get_cached_song("test_vid_stale", role="vocal")
+        result = get_cached_song("test_vid_stale", role=ROLE_VOCAL)
         assert result is not None
         assert result.title == "Song Without Lyrics"
         assert result.artist == "Artist B"
-        assert result.lyrics is None  # must NOT have stale lyrics from first call
+        assert result.lyrics is None
 
     def test_stems_without_metadata_returns_none(self, clean_redis, tmp_path):
         """Stems key without metadata key returns None (metadata is required)."""
         r = clean_redis
-        # Write a stems key directly without metadata
-        r.set(_stems_key("test_vid_orphan", "vocal"), str(tmp_path))
+        r.set(_stems_key("test_vid_orphan", ROLE_VOCAL), str(tmp_path))
 
-        result = get_cached_song("test_vid_orphan", role="vocal")
+        result = get_cached_song("test_vid_orphan", role=ROLE_VOCAL)
         assert result is None
 
     def test_constants_values(self):
         """Verify module-level constants have expected values."""
-        assert _MIN_VOCAL_STEMS == 3
-        assert _MIN_INSTRUMENTAL_STEMS == 4
+        assert _MIN_STEMS_BY_ROLE[ROLE_VOCAL] == 3
+        assert _MIN_STEMS_BY_ROLE[ROLE_INSTRUMENTAL] == 4

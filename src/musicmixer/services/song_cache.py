@@ -50,16 +50,17 @@ from musicmixer.models import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Role-aware stem count thresholds
+# Song roles and stem thresholds
 # ---------------------------------------------------------------------------
 
 SongRole = Literal["vocal", "instrumental"]
 ROLE_VOCAL: SongRole = "vocal"
 ROLE_INSTRUMENTAL: SongRole = "instrumental"
 
-_VALID_ROLES: tuple[SongRole, ...] = (ROLE_VOCAL, ROLE_INSTRUMENTAL)
-_MIN_VOCAL_STEMS = 3        # lead_vocals, backing_vocals, instrumental
-_MIN_INSTRUMENTAL_STEMS = 4  # vocals, drums, bass, guitar, piano, other (at least 4)
+_MIN_STEMS_BY_ROLE: dict[SongRole, int] = {
+    ROLE_VOCAL: 3,         # lead_vocals, backing_vocals, instrumental
+    ROLE_INSTRUMENTAL: 4,  # vocals, drums, bass, guitar, piano, other (at least 4)
+}
 
 # ---------------------------------------------------------------------------
 # Redis connection
@@ -92,18 +93,17 @@ def _meta_key(video_id: str) -> str:
 
 def _stems_key(video_id: str, role: SongRole) -> str:
     """Redis key for role-specific stems path: song:{video_id}:{role}:stems"""
-    if role not in _VALID_ROLES:
-        raise ValueError(f"Invalid role {role!r}, must be one of {_VALID_ROLES}")
+    if role not in _MIN_STEMS_BY_ROLE:
+        raise ValueError(f"Invalid role {role!r}, must be one of {tuple(_MIN_STEMS_BY_ROLE)}")
     return f"song:{video_id}:{role}:stems"
 
 
 def _min_stems_for_role(role: SongRole) -> int:
     """Return the minimum stem file count for a given role."""
-    if role == ROLE_VOCAL:
-        return _MIN_VOCAL_STEMS
-    if role == ROLE_INSTRUMENTAL:
-        return _MIN_INSTRUMENTAL_STEMS
-    raise ValueError(f"Invalid role {role!r}, must be one of {_VALID_ROLES}")
+    try:
+        return _MIN_STEMS_BY_ROLE[role]
+    except KeyError:
+        raise ValueError(f"Invalid role {role!r}, must be one of {tuple(_MIN_STEMS_BY_ROLE)}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +224,30 @@ def _deserialize_lyrics(json_str: str) -> LyricsData:
     )
 
 
+def _resolve_stems_path(r: redis.Redis, video_id: str, role: SongRole) -> tuple[str | None, bool]:
+    """Look up stems path from Redis and validate on disk.
+
+    Returns (stems_path, has_stems).
+    """
+    try:
+        stems_path = r.get(_stems_key(video_id, role))
+    except redis.RedisError:
+        logger.warning("Redis unavailable for stems lookup", exc_info=True)
+        return None, False
+
+    if isinstance(stems_path, bytes):
+        stems_path = stems_path.decode()
+    if not stems_path:
+        return None, False
+
+    cached_stems_dir = Path(stems_path)
+    if not cached_stems_dir.is_dir():
+        return stems_path, False
+
+    wav_files = list(cached_stems_dir.glob("*.wav"))
+    return stems_path, len(wav_files) >= _min_stems_for_role(role)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -251,19 +275,7 @@ def get_cached_song(video_id: str, role: SongRole) -> CachedSong | None:
     try:
         meta = _deserialize_audio_metadata(data["meta"])
         lyrics = _deserialize_lyrics(data["lyrics"]) if data.get("lyrics") else None
-
-        # Step 2: look up role-specific stems path
-        stems_path: str | None = None
-        try:
-            stems_path = r.get(_stems_key(video_id, role))  # type: ignore[assignment]
-        except redis.RedisError:
-            logger.warning("Redis unavailable for stems lookup", exc_info=True)
-
-        # Validate stems still exist on disk (role-aware threshold)
-        has_stems = False
-        if stems_path and Path(stems_path).is_dir():
-            wav_files = list(Path(stems_path).glob("*.wav"))
-            has_stems = len(wav_files) >= _min_stems_for_role(role)
+        stems_path, has_stems = _resolve_stems_path(r, video_id, role)
 
         return CachedSong(
             video_id=video_id,
@@ -319,11 +331,9 @@ def cache_song_stems(video_id: str, role: SongRole, stems_dir: Path) -> None:
     cache_dir = settings.song_cache_dir / video_id / role
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy each WAV file
     for wav_file in stems_dir.glob("*.wav"):
         shutil.copy2(wav_file, cache_dir / wav_file.name)
 
-    # Update Redis with the path (plain string, not a hash field)
     try:
         r = _get_redis()
         r.set(_stems_key(video_id, role), str(cache_dir))
