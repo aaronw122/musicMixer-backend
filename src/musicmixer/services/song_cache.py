@@ -1,11 +1,15 @@
-"""Redis-backed per-song cache keyed by YouTube video ID.
+"""Redis-backed per-song cache keyed by YouTube video ID and role.
 
 Caches AudioMetadata (including stem_analysis, song_structure, PulseMap),
 LyricsData, and stem file paths. On cache hit, the pipeline skips download,
 separation, and analysis — jumping straight to LLM + DSP.
 
 Redis stores small data (~40-80KB per song). Stems (~480MB per song) live
-on the filesystem at data/song_cache/{video_id}/.
+on the filesystem at data/song_cache/{video_id}/{role}/.
+
+Cache keys are `song:{video_id}:{role}` where role is "vocal" or
+"instrumental". The same video cached under different roles produces
+separate Redis entries and separate filesystem directories.
 """
 
 from __future__ import annotations
@@ -43,6 +47,14 @@ from musicmixer.models import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Role-aware stem count thresholds
+# ---------------------------------------------------------------------------
+
+_VALID_ROLES = ("vocal", "instrumental")
+_MIN_VOCAL_STEMS = 3        # lead_vocals, backing_vocals, instrumental
+_MIN_INSTRUMENTAL_STEMS = 4  # vocals, drums, bass, guitar, piano, other (at least 4)
+
+# ---------------------------------------------------------------------------
 # Redis connection
 # ---------------------------------------------------------------------------
 
@@ -66,8 +78,15 @@ def _get_redis() -> redis.Redis:
 # Cache key
 # ---------------------------------------------------------------------------
 
-def _song_key(video_id: str) -> str:
-    return f"song:{video_id}"
+def _song_key(video_id: str, role: str) -> str:
+    if role not in _VALID_ROLES:
+        raise ValueError(f"Invalid role {role!r}, must be one of {_VALID_ROLES}")
+    return f"song:{video_id}:{role}"
+
+
+def _min_stems_for_role(role: str) -> int:
+    """Return the minimum stem file count for a given role."""
+    return _MIN_VOCAL_STEMS if role == "vocal" else _MIN_INSTRUMENTAL_STEMS
 
 
 # ---------------------------------------------------------------------------
@@ -192,11 +211,11 @@ def _deserialize_lyrics(json_str: str) -> LyricsData:
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_cached_song(video_id: str) -> CachedSong | None:
-    """Look up a song in Redis by video ID. Returns None on miss or error."""
+def get_cached_song(video_id: str, role: str) -> CachedSong | None:
+    """Look up a song in Redis by video ID and role. Returns None on miss or error."""
     try:
         r = _get_redis()
-        data: dict[str, str] = r.hgetall(_song_key(video_id))  # type: ignore[assignment]
+        data: dict[str, str] = r.hgetall(_song_key(video_id, role))  # type: ignore[assignment]
     except redis.RedisError:
         logger.warning("Redis unavailable, skipping cache lookup", exc_info=True)
         return None
@@ -209,11 +228,11 @@ def get_cached_song(video_id: str) -> CachedSong | None:
         lyrics = _deserialize_lyrics(data["lyrics"]) if data.get("lyrics") else None
         stems_path = data.get("stems_path")
 
-        # Validate stems still exist on disk
+        # Validate stems still exist on disk (role-aware threshold)
         has_stems = False
         if stems_path and Path(stems_path).is_dir():
             wav_files = list(Path(stems_path).glob("*.wav"))
-            has_stems = len(wav_files) >= 4  # at least 4 stems present
+            has_stems = len(wav_files) >= _min_stems_for_role(role)
 
         return CachedSong(
             video_id=video_id,
@@ -225,18 +244,19 @@ def get_cached_song(video_id: str) -> CachedSong | None:
             has_stems=has_stems,
         )
     except Exception:
-        logger.warning("Failed to deserialize cached song %s", video_id, exc_info=True)
+        logger.warning("Failed to deserialize cached song %s (role=%s)", video_id, role, exc_info=True)
         return None
 
 
 def cache_song_metadata(
     video_id: str,
+    role: str,
     title: str,
     artist: str,
     meta: AudioMetadata,
     lyrics: LyricsData | None,
 ) -> None:
-    """Write song analysis results to Redis."""
+    """Write song analysis results to Redis under a role-qualified key."""
     try:
         r = _get_redis()
         mapping: dict[str, str] = {
@@ -248,15 +268,15 @@ def cache_song_metadata(
         if lyrics is not None:
             mapping["lyrics"] = _serialize_lyrics(lyrics)
 
-        r.hset(_song_key(video_id), mapping=mapping)
-        logger.info("Cached metadata for video %s", video_id)
+        r.hset(_song_key(video_id, role), mapping=mapping)
+        logger.info("Cached metadata for video %s (role=%s)", video_id, role)
     except redis.RedisError:
         logger.warning("Redis unavailable, skipping cache write", exc_info=True)
 
 
-def cache_song_stems(video_id: str, stems_dir: Path) -> None:
-    """Copy stems to the song cache directory and update Redis."""
-    cache_dir = settings.song_cache_dir / video_id
+def cache_song_stems(video_id: str, role: str, stems_dir: Path) -> None:
+    """Copy stems to a role-qualified cache directory and update Redis."""
+    cache_dir = settings.song_cache_dir / video_id / role
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy each WAV file
@@ -266,25 +286,28 @@ def cache_song_stems(video_id: str, stems_dir: Path) -> None:
     # Update Redis with the path
     try:
         r = _get_redis()
-        r.hset(_song_key(video_id), "stems_path", str(cache_dir))
-        logger.info("Cached stems for video %s at %s", video_id, cache_dir)
+        r.hset(_song_key(video_id, role), "stems_path", str(cache_dir))
+        logger.info("Cached stems for video %s (role=%s) at %s", video_id, role, cache_dir)
     except redis.RedisError:
         logger.warning("Redis unavailable, stems cached to disk only", exc_info=True)
 
 
-def get_cached_stems(video_id: str, output_dir: Path) -> bool:
-    """Copy cached stems to output_dir. Returns True if stems were found."""
-    cache_dir = settings.song_cache_dir / video_id
+def get_cached_stems(video_id: str, role: str, output_dir: Path) -> bool:
+    """Copy cached stems to output_dir. Returns True if stems were found.
+
+    Uses role-aware stem count validation: vocal needs >= 3, instrumental >= 4.
+    """
+    cache_dir = settings.song_cache_dir / video_id / role
     if not cache_dir.is_dir():
         return False
 
     wav_files = list(cache_dir.glob("*.wav"))
-    if len(wav_files) < 4:
+    if len(wav_files) < _min_stems_for_role(role):
         return False
 
     output_dir.mkdir(parents=True, exist_ok=True)
     for wav_file in wav_files:
         shutil.copy2(wav_file, output_dir / wav_file.name)
 
-    logger.info("Restored cached stems for video %s (%d files)", video_id, len(wav_files))
+    logger.info("Restored cached stems for video %s (role=%s, %d files)", video_id, role, len(wav_files))
     return True

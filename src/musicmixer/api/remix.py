@@ -324,8 +324,8 @@ def _youtube_pipeline_wrapper(
             song_a_stems_dir = stems_dir / "song_a"
             song_b_stems_dir = stems_dir / "song_b"
             stems_restored = (
-                get_cached_stems(cached_song_a.video_id, song_a_stems_dir)
-                and get_cached_stems(cached_song_b.video_id, song_b_stems_dir)
+                get_cached_stems(cached_song_a.video_id, "vocal", song_a_stems_dir)
+                and get_cached_stems(cached_song_b.video_id, "instrumental", song_b_stems_dir)
             )
 
             if stems_restored:
@@ -518,14 +518,17 @@ def _youtube_pipeline_wrapper(
         from musicmixer.services.song_cache import cache_song_metadata, cache_song_stems
         from pathlib import Path
 
-        for url, title, meta, lyrics, stems_dir in [
-            (url_a, result_a.title, analysis.meta_a, analysis.lyrics_a, analysis.song_a_stems_dir),
-            (url_b, result_b.title, analysis.meta_b, analysis.lyrics_b, analysis.song_b_stems_dir),
-        ]:
-            vid = _extract_video_id(url)
-            if vid is not None:
-                cache_song_metadata(vid, title, "", meta, lyrics)
-                cache_song_stems(vid, Path(stems_dir))
+        # Song A (vocal source)
+        vid_a = _extract_video_id(url_a)
+        if vid_a is not None:
+            cache_song_metadata(vid_a, "vocal", result_a.title, "", analysis.meta_a, analysis.lyrics_a)
+            cache_song_stems(vid_a, "vocal", Path(analysis.song_a_stems_dir))
+
+        # Song B (instrumental source)
+        vid_b = _extract_video_id(url_b)
+        if vid_b is not None:
+            cache_song_metadata(vid_b, "instrumental", result_b.title, "", analysis.meta_b, analysis.lyrics_b)
+            cache_song_stems(vid_b, "instrumental", Path(analysis.song_b_stems_dir))
 
         run_remix(
             session_id=session_id,
@@ -786,8 +789,8 @@ def create_youtube_remix(
 
     video_id_a = _extract_video_id(body.url_a)
     video_id_b = _extract_video_id(body.url_b)
-    cached_a = get_cached_song(video_id_a) if video_id_a else None
-    cached_b = get_cached_song(video_id_b) if video_id_b else None
+    cached_a = get_cached_song(video_id_a, role="vocal") if video_id_a else None
+    cached_b = get_cached_song(video_id_b, role="instrumental") if video_id_b else None
     if cached_a:
         logger.info("Song cache HIT for URL A (video_id=%s, has_stems=%s)", video_id_a, cached_a.has_stems)
     if cached_b:
