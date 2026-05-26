@@ -302,7 +302,10 @@ def cache_song_metadata(
         if lyrics is not None:
             mapping["lyrics"] = _serialize_lyrics(lyrics)
 
-        r.hset(_meta_key(video_id), mapping=mapping)
+        pipe = r.pipeline()
+        pipe.delete(_meta_key(video_id))
+        pipe.hset(_meta_key(video_id), mapping=mapping)
+        pipe.execute()
         logger.info("Cached metadata for video %s", video_id)
     except redis.RedisError:
         logger.warning("Redis unavailable, skipping cache write", exc_info=True)

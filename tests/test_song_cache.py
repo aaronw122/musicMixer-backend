@@ -677,6 +677,31 @@ class TestRoleAwareCache:
         success = get_cached_stems("test_vid_stems_role", ROLE_INSTRUMENTAL, output_dir)
         assert success is False
 
+    def test_overwrite_clears_stale_lyrics(self, clean_redis):
+        """Overwriting metadata without lyrics clears previously cached lyrics."""
+        meta = _make_audio_metadata()
+        lyrics = _make_lyrics_data()
+
+        cache_song_metadata("test_vid_stale", "Song With Lyrics", "Artist A", meta, lyrics)
+
+        # Overwrite same video, no lyrics this time
+        cache_song_metadata("test_vid_stale", "Song Without Lyrics", "Artist B", meta, None)
+
+        result = get_cached_song("test_vid_stale", role="vocal")
+        assert result is not None
+        assert result.title == "Song Without Lyrics"
+        assert result.artist == "Artist B"
+        assert result.lyrics is None  # must NOT have stale lyrics from first call
+
+    def test_stems_without_metadata_returns_none(self, clean_redis, tmp_path):
+        """Stems key without metadata key returns None (metadata is required)."""
+        r = clean_redis
+        # Write a stems key directly without metadata
+        r.set(_stems_key("test_vid_orphan", "vocal"), str(tmp_path))
+
+        result = get_cached_song("test_vid_orphan", role="vocal")
+        assert result is None
+
     def test_constants_values(self):
         """Verify module-level constants have expected values."""
         assert _MIN_VOCAL_STEMS == 3
