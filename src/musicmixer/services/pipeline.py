@@ -233,14 +233,14 @@ def _step_separate_and_analyze(
 
     # Count pool workers: separation always runs, analysis/lyrics/structure
     # are skipped per-song when cached metadata is available.
-    _need_analysis_a = cached_meta_a is None
-    _need_analysis_b = cached_meta_b is None
+    _need_fresh_a = cached_meta_a is None
+    _need_fresh_b = cached_meta_b is None
     pool_workers = 2  # 2 separation (always)
-    pool_workers += int(_need_analysis_a) + int(_need_analysis_b)  # 0-2 analysis
+    pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 analysis
     if settings.lyrics_lookup_enabled:
-        pool_workers += int(_need_analysis_a) + int(_need_analysis_b)  # 0-2 lyrics
+        pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 lyrics
     if structure_ml_enabled:
-        pool_workers += int(_need_analysis_a) + int(_need_analysis_b)  # 0-2 ML structure
+        pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 ML structure
 
     structure_future_a = None
     structure_future_b = None
@@ -254,33 +254,37 @@ def _step_separate_and_analyze(
         sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir)
 
         # Analysis futures (skip when cached metadata is available)
-        if _need_analysis_a:
+        if _need_fresh_a:
             analysis_future_a = pool.submit(analyze_audio_full, song_a_path)
-        if _need_analysis_b:
+        if _need_fresh_b:
             analysis_future_b = pool.submit(analyze_audio_full, song_b_path)
 
         # ML structure futures (skip when cached metadata is available)
         if structure_ml_enabled:
-            if _need_analysis_a:
+            if _need_fresh_a:
                 structure_future_a = pool.submit(analyze_structure_ml, song_a_path)
-            if _need_analysis_b:
+            if _need_fresh_b:
                 structure_future_b = pool.submit(analyze_structure_ml, song_b_path)
 
         # Lyrics futures (skip when cached metadata is available)
         if settings.lyrics_lookup_enabled:
             try:
-                if _need_analysis_a:
+                if _need_fresh_a:
                     lyrics_future_a = pool.submit(
                         lookup_lyrics_for_song, song_a_path, song_a_original_filename,
                     )
-                if _need_analysis_b:
+                if _need_fresh_b:
                     lyrics_future_b = pool.submit(
                         lookup_lyrics_for_song, song_b_path, song_b_original_filename,
                     )
-                if _need_analysis_a or _need_analysis_b:
-                    logger.info("Session %s: Lyrics lookup submitted for %s", session_id,
-                                "both songs" if _need_analysis_a and _need_analysis_b
-                                else ("Song A" if _need_analysis_a else "Song B"))
+                if _need_fresh_a or _need_fresh_b:
+                    if _need_fresh_a and _need_fresh_b:
+                        lyrics_scope = "both songs"
+                    elif _need_fresh_a:
+                        lyrics_scope = "Song A only"
+                    else:
+                        lyrics_scope = "Song B only"
+                    logger.info("Session %s: Lyrics lookup submitted for %s", session_id, lyrics_scope)
             except Exception:
                 logger.warning("Session %s: Failed to submit lyrics lookups", session_id, exc_info=True)
 
@@ -562,8 +566,8 @@ def _step_analyze_structure(
     song_a_path=None,
     song_b_path=None,
     lyrics_a_data=None,
-    skip_a: bool = False,
-    skip_b: bool = False,
+    has_cached_meta_a: bool = False,
+    has_cached_meta_b: bool = False,
 ):
     """Step 3.5: Analyze song structure (key, sections, cross-song relationships).
 
@@ -571,8 +575,8 @@ def _step_analyze_structure(
     and PulseMap analysis fields: chord_progression, polyphony_info,
     drum_pattern, word_alignment).
 
-    When skip_a/skip_b are True, stem analysis and PulseMap are skipped for
-    that song (cached metadata already has those fields).
+    When has_cached_meta_a/has_cached_meta_b are True, stem analysis and
+    PulseMap are skipped for that song (cached metadata already has those fields).
     """
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
@@ -587,7 +591,7 @@ def _step_analyze_structure(
     }, session=session)
 
     # When both songs are cached, skip everything in this step
-    if skip_a and skip_b:
+    if has_cached_meta_a and has_cached_meta_b:
         logger.info("Session %s: [3.5/17] skipping structure + PulseMap (both songs cached)", session_id)
         emit_progress(event_queue, {
             "step": "analyzing",
@@ -608,11 +612,11 @@ def _step_analyze_structure(
 
     # Stem-level structure analysis for both songs (depends on stem output)
     # Skip for songs with cached metadata (already has stem_analysis, song_structure)
-    for label, meta, s_dir, ml_segs, skip in [
-        ("A", meta_a, song_a_stems_dir, ml_segments_a, skip_a),
-        ("B", meta_b, song_b_stems_dir, ml_segments_b, skip_b),
+    for label, meta, s_dir, ml_segs, has_cached_meta in [
+        ("A", meta_a, song_a_stems_dir, ml_segments_a, has_cached_meta_a),
+        ("B", meta_b, song_b_stems_dir, ml_segments_b, has_cached_meta_b),
     ]:
-        if skip:
+        if has_cached_meta:
             logger.info("Session %s: Song %s structure: skipped (cached)", session_id, label)
             continue
         try:
@@ -640,7 +644,7 @@ def _step_analyze_structure(
 
     # Cross-song relationships (output is logged then discarded — skip when
     # either song is cached to avoid unnecessary compute)
-    if not skip_a and not skip_b:
+    if not has_cached_meta_a and not has_cached_meta_b:
         try:
             relationships = compute_relationships(meta_a, meta_b)
             logger.info(
@@ -653,21 +657,21 @@ def _step_analyze_structure(
 
     # --- PulseMap analysis (parallel) ---
     # Skip for songs with cached metadata (already has PulseMap fields)
-    if not skip_a and not skip_b:
+    if not has_cached_meta_a and not has_cached_meta_b:
         _run_pulsemap_analysis(
             meta_a, meta_b,
             song_a_path, song_b_path,
             song_a_stems_dir, song_b_stems_dir,
             lyrics_a_data, session_id,
         )
-    elif not skip_a or not skip_b:
+    elif not has_cached_meta_a or not has_cached_meta_b:
         # One song cached, one not — PulseMap only operates on specific
         # per-song fields, so we can still run it and the cached song's
         # fields won't be overwritten (they're already set).
         _run_pulsemap_analysis(
             meta_a, meta_b,
-            song_a_path if not skip_a else None,
-            song_b_path if not skip_b else None,
+            song_a_path if not has_cached_meta_a else None,
+            song_b_path if not has_cached_meta_b else None,
             song_a_stems_dir, song_b_stems_dir,
             lyrics_a_data, session_id,
         )
@@ -1945,8 +1949,8 @@ def analyze_songs(
         song_a_path=_song_a,
         song_b_path=_song_b,
         lyrics_a_data=lyrics_a_data,
-        skip_a=cached_meta_a is not None,
-        skip_b=cached_meta_b is not None,
+        has_cached_meta_a=cached_meta_a is not None,
+        has_cached_meta_b=cached_meta_b is not None,
     )
     _step_times["3.5 structure+pulsemap"] = time.monotonic() - _t0
 
