@@ -48,7 +48,8 @@ def _make_intent_section(
     """Create a synthetic IntentSection for testing."""
     if stem_roles is None:
         stem_roles = {
-            "vocals": "lead",
+            "lead_vocals": "lead",
+            "backing_vocals": "background",
             "drums": "support",
             "bass": "support",
             "guitar": "background",
@@ -102,17 +103,17 @@ class TestRoleToGainMapping:
     def test_lead_is_highest(self):
         gains = _compute_section_gains(
             _make_intent_section(energy="high", stem_roles={
-                "vocals": "lead", "drums": "silent", "bass": "silent",
+                "lead_vocals": "lead", "backing_vocals": "silent", "drums": "silent", "bass": "silent",
                 "guitar": "silent", "piano": "silent", "other": "silent",
             }),
             None, None,
         )
-        assert gains["vocals"] == pytest.approx(0.92, abs=0.01)
+        assert gains["lead_vocals"] == pytest.approx(0.92, abs=0.01)
 
     def test_support_mid_range(self):
         gains = _compute_section_gains(
             _make_intent_section(energy="high", stem_roles={
-                "vocals": "silent", "drums": "support", "bass": "silent",
+                "lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "silent",
                 "guitar": "silent", "piano": "silent", "other": "silent",
             }),
             None, None,
@@ -152,7 +153,8 @@ class TestRoleToGainMapping:
         section = _make_intent_section(
             energy="high",
             stem_roles={
-                "vocals": "lead",
+                "lead_vocals": "lead",
+                "backing_vocals": "silent",
                 "drums": "support",
                 "bass": "background",
                 "guitar": "texture",
@@ -161,7 +163,7 @@ class TestRoleToGainMapping:
             },
         )
         gains = _compute_section_gains(section, None, None)
-        assert gains["vocals"] > gains["drums"] > gains["bass"] > gains["guitar"]
+        assert gains["lead_vocals"] > gains["drums"] > gains["bass"] > gains["guitar"]
         assert gains["piano"] == 0.0
 
 
@@ -197,7 +199,7 @@ class TestEnergyScaling:
     def test_gains_clamped_at_one(self):
         """Even peak energy shouldn't push any gain above 1.0."""
         section = _make_intent_section(energy="peak", stem_roles={
-            "vocals": "lead", "drums": "lead", "bass": "lead",
+            "lead_vocals": "lead", "backing_vocals": "lead", "drums": "lead", "bass": "lead",
             "guitar": "lead", "piano": "lead", "other": "lead",
         })
         gains = _compute_section_gains(section, None, None)
@@ -234,22 +236,22 @@ class TestLufsAdjustment:
         assert factor == 1.0
 
     def test_lufs_applied_to_vocal_stem(self):
-        """Vocal LUFS data should affect vocals gain."""
+        """Vocal LUFS data should affect lead_vocals gain."""
         section = _make_intent_section(energy="high", stem_roles={
-            "vocals": "lead", "drums": "silent", "bass": "silent",
+            "lead_vocals": "lead", "backing_vocals": "silent", "drums": "silent", "bass": "silent",
             "guitar": "silent", "piano": "silent", "other": "silent",
         })
         # Quiet vocal stem should get boosted
         gains_boosted = _compute_section_gains(
-            section, vocal_stem_lufs={"vocals": -35.0}, inst_stem_lufs=None,
+            section, vocal_stem_lufs={"lead_vocals": -35.0}, inst_stem_lufs=None,
         )
         gains_neutral = _compute_section_gains(section, None, None)
-        assert gains_boosted["vocals"] > gains_neutral["vocals"]
+        assert gains_boosted["lead_vocals"] > gains_neutral["lead_vocals"]
 
     def test_lufs_applied_to_instrumental_stem(self):
         """Instrumental LUFS data should affect instrumental stems."""
         section = _make_intent_section(energy="high", stem_roles={
-            "vocals": "silent", "drums": "lead", "bass": "silent",
+            "lead_vocals": "silent", "backing_vocals": "silent", "drums": "lead", "bass": "silent",
             "guitar": "silent", "piano": "silent", "other": "silent",
         })
         # Loud drums should get attenuated
@@ -280,7 +282,8 @@ class TestConstraintMinActiveStems:
         section = _make_intent_section(
             label="verse", energy="medium",
             stem_roles={
-                "vocals": "lead",
+                "lead_vocals": "lead",
+                "backing_vocals": "silent",
                 "drums": "support",
                 "bass": "silent",
                 "guitar": "silent",
@@ -333,7 +336,8 @@ class TestConstraintMinActiveStems:
         section = _make_intent_section(
             label="chorus", energy="high",
             stem_roles={
-                "vocals": "lead",
+                "lead_vocals": "lead",
+                "backing_vocals": "silent",
                 "drums": "support",
                 "bass": "support",
                 "guitar": "background",
@@ -359,11 +363,11 @@ class TestConstraintNoGloballyMuted:
         """Piano set to silent in all sections gets 0.30 in highest-energy section."""
         sections = [
             _make_intent_section("verse", 0, 32, "medium", stem_roles={
-                "vocals": "lead", "drums": "support", "bass": "support",
+                "lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support",
                 "guitar": "background", "piano": "silent", "other": "background",
             }),
             _make_intent_section("chorus", 32, 64, "high", stem_roles={
-                "vocals": "lead", "drums": "support", "bass": "support",
+                "lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support",
                 "guitar": "background", "piano": "silent", "other": "background",
             }),
         ]
@@ -382,11 +386,11 @@ class TestConstraintNoGloballyMuted:
         """Stem active in at least one section should not be modified."""
         sections = [
             _make_intent_section("verse", 0, 32, "medium", stem_roles={
-                "vocals": "lead", "drums": "support", "bass": "support",
+                "lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support",
                 "guitar": "background", "piano": "texture", "other": "background",
             }),
             _make_intent_section("chorus", 32, 64, "high", stem_roles={
-                "vocals": "lead", "drums": "support", "bass": "support",
+                "lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support",
                 "guitar": "background", "piano": "silent", "other": "background",
             }),
         ]
@@ -411,7 +415,7 @@ class TestConstraintMutingBudget:
         """Create a plan with many silent instrumentals and verify correction."""
         # 4 sections, each with 3 silent instrumentals = 12 zeros out of 20 entries = 60%
         roles_heavy_muting = {
-            "vocals": "lead", "drums": "support", "bass": "support",
+            "lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support",
             "guitar": "silent", "piano": "silent", "other": "silent",
         }
         sections = [
@@ -460,7 +464,7 @@ class TestGainFloors:
     def test_support_floor_at_low_energy(self):
         """Even at low energy, support should not drop below 0.60."""
         section = _make_intent_section(energy="low", stem_roles={
-            "vocals": "silent", "drums": "support", "bass": "silent",
+            "lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "silent",
             "guitar": "silent", "piano": "silent", "other": "silent",
         })
         gains = _compute_section_gains(section, None, None)
@@ -469,7 +473,7 @@ class TestGainFloors:
     def test_background_floor_at_low_energy(self):
         """Background should not drop below 0.40."""
         section = _make_intent_section(energy="low", stem_roles={
-            "vocals": "silent", "drums": "silent", "bass": "background",
+            "lead_vocals": "silent", "backing_vocals": "silent", "drums": "silent", "bass": "background",
             "guitar": "silent", "piano": "silent", "other": "silent",
         })
         gains = _compute_section_gains(section, None, None)
@@ -478,7 +482,7 @@ class TestGainFloors:
     def test_texture_floor_at_low_energy(self):
         """Texture should not drop below 0.20."""
         section = _make_intent_section(energy="low", stem_roles={
-            "vocals": "silent", "drums": "silent", "bass": "silent",
+            "lead_vocals": "silent", "backing_vocals": "silent", "drums": "silent", "bass": "silent",
             "guitar": "silent", "piano": "texture", "other": "silent",
         })
         gains = _compute_section_gains(section, None, None)
@@ -487,7 +491,7 @@ class TestGainFloors:
     def test_silent_not_floored(self):
         """Silent stems should stay at 0.0 regardless of floors."""
         section = _make_intent_section(energy="low", stem_roles={
-            "vocals": "silent", "drums": "silent", "bass": "silent",
+            "lead_vocals": "silent", "backing_vocals": "silent", "drums": "silent", "bass": "silent",
             "guitar": "silent", "piano": "silent", "other": "silent",
         })
         gains = _compute_section_gains(section, None, None)
@@ -592,7 +596,7 @@ class TestNullLufs:
         """Only some stems have LUFS — others get neutral adjustment."""
         plan = map_intent_to_gains(
             _make_intent_plan(),
-            vocal_stem_lufs={"vocals": -20.0},  # neutral
+            vocal_stem_lufs={"lead_vocals": -20.0},  # neutral
             inst_stem_lufs={"drums": -35.0},     # quiet, should boost
         )
         assert isinstance(plan, RemixPlan)
@@ -601,7 +605,7 @@ class TestNullLufs:
         """NaN LUFS values should be treated as neutral."""
         plan_nan = map_intent_to_gains(
             _make_intent_plan(),
-            vocal_stem_lufs={"vocals": float("nan")},
+            vocal_stem_lufs={"lead_vocals": float("nan")},
             inst_stem_lufs={"drums": float("nan")},
         )
         plan_none = map_intent_to_gains(_make_intent_plan(), None, None)
@@ -631,7 +635,8 @@ class TestEndToEnd:
                 IntentSection(
                     label="intro", start_beat=0, end_beat=16, energy="low",
                     stem_roles={
-                        "vocals": "silent", "drums": "texture",
+                        "lead_vocals": "silent", "backing_vocals": "silent",
+                        "drums": "texture",
                         "bass": "background", "guitar": "lead",
                         "piano": "texture", "other": "silent",
                     },
@@ -640,7 +645,8 @@ class TestEndToEnd:
                 IntentSection(
                     label="verse", start_beat=16, end_beat=48, energy="medium",
                     stem_roles={
-                        "vocals": "lead", "drums": "support",
+                        "lead_vocals": "lead", "backing_vocals": "silent",
+                        "drums": "support",
                         "bass": "support", "guitar": "background",
                         "piano": "texture", "other": "texture",
                     },
@@ -649,7 +655,8 @@ class TestEndToEnd:
                 IntentSection(
                     label="chorus", start_beat=48, end_beat=80, energy="high",
                     stem_roles={
-                        "vocals": "lead", "drums": "support",
+                        "lead_vocals": "lead", "backing_vocals": "background",
+                        "drums": "support",
                         "bass": "support", "guitar": "support",
                         "piano": "background", "other": "background",
                     },
@@ -658,7 +665,8 @@ class TestEndToEnd:
                 IntentSection(
                     label="breakdown", start_beat=80, end_beat=96, energy="low",
                     stem_roles={
-                        "vocals": "background", "drums": "silent",
+                        "lead_vocals": "background", "backing_vocals": "silent",
+                        "drums": "silent",
                         "bass": "texture", "guitar": "lead",
                         "piano": "support", "other": "texture",
                     },
@@ -667,7 +675,8 @@ class TestEndToEnd:
                 IntentSection(
                     label="drop", start_beat=96, end_beat=128, energy="peak",
                     stem_roles={
-                        "vocals": "lead", "drums": "lead",
+                        "lead_vocals": "lead", "backing_vocals": "support",
+                        "drums": "lead",
                         "bass": "support", "guitar": "support",
                         "piano": "background", "other": "support",
                     },
@@ -676,7 +685,8 @@ class TestEndToEnd:
                 IntentSection(
                     label="outro", start_beat=128, end_beat=144, energy="low",
                     stem_roles={
-                        "vocals": "texture", "drums": "silent",
+                        "lead_vocals": "texture", "backing_vocals": "silent",
+                        "drums": "silent",
                         "bass": "texture", "guitar": "background",
                         "piano": "lead", "other": "silent",
                     },
@@ -743,7 +753,7 @@ class TestEndToEnd:
         intent = self._realistic_plan()
         plan = map_intent_to_gains(
             intent,
-            vocal_stem_lufs={"vocals": -22.0},
+            vocal_stem_lufs={"lead_vocals": -22.0},
             inst_stem_lufs={
                 "drums": -18.0,  # slightly loud
                 "bass": -25.0,   # slightly quiet
@@ -792,7 +802,7 @@ class TestEnergyBudgetAutoCorrect:
         section = _make_intent_section(
             label="chorus", energy="high",
             stem_roles={
-                "vocals": "texture", "drums": "texture", "bass": "texture",
+                "lead_vocals": "texture", "backing_vocals": "silent", "drums": "texture", "bass": "texture",
                 "guitar": "texture", "piano": "silent", "other": "silent",
             },
         )
@@ -813,14 +823,14 @@ class TestEnergyBudgetAutoCorrect:
         section = _make_intent_section(
             label="verse", energy="low",
             stem_roles={
-                "vocals": "lead", "drums": "support", "bass": "background",
+                "lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "background",
                 "guitar": "texture", "piano": "texture", "other": "silent",
             },
         )
         gains = [_compute_section_gains(section, None, None)]
         _validate_energy_budgets(gains, ["verse"])
 
-        assert gains[0]["vocals"] >= gains[0]["drums"]
+        assert gains[0]["lead_vocals"] >= gains[0]["drums"]
         assert gains[0]["drums"] >= gains[0]["bass"]
         assert gains[0]["bass"] >= gains[0]["guitar"]
         assert gains[0]["other"] == 0.0  # silent stays silent
@@ -831,7 +841,7 @@ class TestEnergyBudgetAutoCorrect:
         section = _make_intent_section(
             label="chorus", energy="low",
             stem_roles={
-                "vocals": "texture", "drums": "silent", "bass": "silent",
+                "lead_vocals": "texture", "backing_vocals": "silent", "drums": "silent", "bass": "silent",
                 "guitar": "silent", "piano": "silent", "other": "silent",
             },
         )
@@ -843,10 +853,10 @@ class TestEnergyBudgetAutoCorrect:
 
     def test_above_target_no_modification(self):
         """Section above energy budget is not modified (no downward correction)."""
-        # Intro with all stems at lead + peak energy — will be way above intro target
+        # Intro with all stems at lead + peak energy -- will be way above intro target
         section = _make_intent_section(
             label="intro", energy="peak",
-            stem_roles={s: "lead" for s in ALL_STEMS},
+            stem_roles={s: "lead" for s in ALL_STEMS},  # ALL_STEMS is the new 7-stem list
         )
         gains = [_compute_section_gains(section, None, None)]
         original = dict(gains[0])
@@ -875,7 +885,7 @@ class TestEnergyBudgetAutoCorrect:
 
     def test_all_silent_below_target_no_modification(self):
         """All-silent section below budget doesn't modify gains."""
-        gains = [{"vocals": 0.0, "drums": 0.0, "bass": 0.0,
+        gains = [{"lead_vocals": 0.0, "backing_vocals": 0.0, "drums": 0.0, "bass": 0.0,
                   "guitar": 0.0, "piano": 0.0, "other": 0.0}]
         _validate_energy_budgets(gains, ["chorus"])
         # All gains should still be zero (nothing to scale)
@@ -901,7 +911,7 @@ class TestIntentSectionToSection:
     def test_with_lufs(self):
         result = intent_section_to_section(
             _make_intent_section(),
-            vocal_lufs={"vocals": -20.0},
+            vocal_lufs={"lead_vocals": -20.0},
             inst_lufs={"drums": -20.0},
         )
         assert isinstance(result, Section)

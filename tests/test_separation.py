@@ -342,3 +342,328 @@ class TestStemNameMatching:
                     )
 
         assert any("matched multiple stems" in record.message for record in caplog.records)
+
+
+class TestSeparateVocalSongDispatcher:
+    """Test that separate_vocal_song dispatches to correct backend."""
+
+    @patch("musicmixer.services.separation._separate_vocal_song_modal")
+    def test_dispatches_to_modal(self, mock_modal, tmp_path):
+        """stem_backend='modal' should call _separate_vocal_song_modal."""
+        from musicmixer.services.separation import separate_vocal_song
+
+        mock_modal.return_value = {
+            "lead_vocals": tmp_path / "lead_vocals.wav",
+            "backing_vocals": tmp_path / "backing_vocals.wav",
+            "instrumental": tmp_path / "instrumental.wav",
+        }
+
+        with patch("musicmixer.services.separation.settings") as mock_settings:
+            mock_settings.stem_backend = "modal"
+            result = separate_vocal_song(tmp_path / "input.wav", tmp_path / "out")
+
+        mock_modal.assert_called_once()
+        assert "lead_vocals" in result
+        assert "backing_vocals" in result
+        assert "instrumental" in result
+
+    @patch("musicmixer.services.separation._separate_vocal_song_local")
+    def test_dispatches_to_local(self, mock_local, tmp_path):
+        """stem_backend='local' should call _separate_vocal_song_local."""
+        from musicmixer.services.separation import separate_vocal_song
+
+        mock_local.return_value = {
+            "lead_vocals": tmp_path / "lead_vocals.wav",
+            "backing_vocals": None,
+            "instrumental": tmp_path / "instrumental.wav",
+        }
+
+        with patch("musicmixer.services.separation.settings") as mock_settings:
+            mock_settings.stem_backend = "local"
+            result = separate_vocal_song(tmp_path / "input.wav", tmp_path / "out")
+
+        mock_local.assert_called_once()
+        assert "lead_vocals" in result
+        assert result["backing_vocals"] is None
+
+
+class TestSeparateVocalSongModalValidation:
+    """Test _separate_vocal_song_modal stem validation."""
+
+    def test_raises_on_missing_stems(self, tmp_path):
+        """Should raise RuntimeError if Modal returns incomplete vocal stems."""
+        from musicmixer.services.separation import _separate_vocal_song_modal
+
+        # Only return 2 of 3 expected stems
+        incomplete_stems = {
+            "lead_vocals": _make_float32_wav_bytes(440),
+            "instrumental": _make_float32_wav_bytes(330),
+        }
+
+        mock_remote = MagicMock()
+        mock_remote.remote.return_value = incomplete_stems
+
+        input_path = tmp_path / "input.wav"
+        input_path.write_bytes(_make_float32_wav_bytes())
+
+        with patch("modal.Function.from_name", return_value=mock_remote):
+            with pytest.raises(RuntimeError, match="Expected vocal-song stems"):
+                _separate_vocal_song_modal(input_path, tmp_path / "out")
+
+    def test_accepts_complete_3_stems(self, tmp_path):
+        """Should accept and save all 3 vocal-song stems without error."""
+        from musicmixer.services.separation import _separate_vocal_song_modal
+
+        complete_stems = {
+            "lead_vocals": _make_float32_wav_bytes(440),
+            "backing_vocals": _make_float32_wav_bytes(220),
+            "instrumental": _make_float32_wav_bytes(110),
+        }
+
+        mock_remote = MagicMock()
+        mock_remote.remote.return_value = complete_stems
+
+        input_path = tmp_path / "input.wav"
+        input_path.write_bytes(_make_float32_wav_bytes())
+
+        output_dir = tmp_path / "out"
+
+        with patch("modal.Function.from_name", return_value=mock_remote):
+            result = _separate_vocal_song_modal(input_path, output_dir)
+
+        assert set(result.keys()) == {"lead_vocals", "backing_vocals", "instrumental"}
+        for stem_name, stem_path in result.items():
+            assert stem_path.exists()
+            assert stem_path.stat().st_size > 0
+
+    def test_float32_validation_warns_on_non_float(self, tmp_path, caplog):
+        """Should log a warning if vocal stems are not float32."""
+        from musicmixer.services.separation import _separate_vocal_song_modal
+
+        # Create a PCM16 WAV
+        sr = 44100
+        t = np.linspace(0, 0.5, int(sr * 0.5), endpoint=False)
+        mono = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        stereo = np.column_stack([mono, mono])
+        buf = io.BytesIO()
+        sf.write(buf, stereo, sr, format="WAV", subtype="PCM_16")
+        pcm16_bytes = buf.getvalue()
+
+        complete_stems = {
+            "lead_vocals": pcm16_bytes,  # PCM_16
+            "backing_vocals": _make_float32_wav_bytes(220),
+            "instrumental": _make_float32_wav_bytes(110),
+        }
+
+        mock_remote = MagicMock()
+        mock_remote.remote.return_value = complete_stems
+
+        input_path = tmp_path / "input.wav"
+        input_path.write_bytes(_make_float32_wav_bytes())
+
+        with patch("modal.Function.from_name", return_value=mock_remote):
+            with caplog.at_level(logging.WARNING, logger="musicmixer.services.separation"):
+                result = _separate_vocal_song_modal(input_path, tmp_path / "out")
+
+        assert "lead_vocals" in result
+        assert any("PCM_16" in record.message for record in caplog.records)
+
+    def test_raises_on_extra_stems(self, tmp_path):
+        """Should raise RuntimeError if Modal returns unexpected extra stems."""
+        from musicmixer.services.separation import _separate_vocal_song_modal
+
+        extra_stems = {
+            "lead_vocals": _make_float32_wav_bytes(440),
+            "backing_vocals": _make_float32_wav_bytes(220),
+            "instrumental": _make_float32_wav_bytes(110),
+            "karaoke": _make_float32_wav_bytes(330),  # unexpected extra
+        }
+
+        mock_remote = MagicMock()
+        mock_remote.remote.return_value = extra_stems
+
+        input_path = tmp_path / "input.wav"
+        input_path.write_bytes(_make_float32_wav_bytes())
+
+        with patch("modal.Function.from_name", return_value=mock_remote):
+            with pytest.raises(RuntimeError, match="Expected vocal-song stems"):
+                _separate_vocal_song_modal(input_path, tmp_path / "out")
+
+
+class TestSeparateVocalSongLocal:
+    """Test local fallback for vocal-song separation."""
+
+    def _mock_stems_local(self, output_dir):
+        """Create a mock for separate_stems_local that returns pre-created files."""
+        vocals_path = output_dir / "vocals.wav"
+        other_path = output_dir / "other.wav"
+        return {
+            "vocals": vocals_path,
+            "drums": output_dir / "drums.wav",
+            "bass": output_dir / "bass.wav",
+            "other": other_path,
+            "guitar": None,
+            "piano": None,
+        }
+
+    def test_maps_vocals_to_lead_vocals(self, tmp_path):
+        """Local fallback should map htdemucs_ft 'vocals' -> 'lead_vocals'."""
+        from musicmixer.services.separation_local import separate_vocal_song_local
+
+        output_dir = tmp_path / "stems"
+        output_dir.mkdir(parents=True)
+
+        sr = 44100
+        t = np.linspace(0, 0.1, int(sr * 0.1), endpoint=False)
+        mono = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        stereo = np.column_stack([mono, mono])
+
+        for name in ["vocals", "drums", "bass", "other"]:
+            sf.write(str(output_dir / f"{name}.wav"), stereo, sr, format="WAV", subtype="FLOAT")
+
+        mock_result = self._mock_stems_local(output_dir)
+
+        with patch(
+            "musicmixer.services.separation_local.separate_stems_local",
+            return_value=mock_result,
+        ):
+            result = separate_vocal_song_local(tmp_path / "input.wav", output_dir)
+
+        assert result["lead_vocals"] is not None
+        assert result["backing_vocals"] is None
+        assert result["instrumental"] is not None
+
+    def test_backing_vocals_always_none(self, tmp_path):
+        """Local fallback cannot split lead/backing, so backing_vocals is always None."""
+        from musicmixer.services.separation_local import separate_vocal_song_local
+
+        output_dir = tmp_path / "stems"
+        output_dir.mkdir(parents=True)
+
+        sr = 44100
+        t = np.linspace(0, 0.1, int(sr * 0.1), endpoint=False)
+        mono = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        stereo = np.column_stack([mono, mono])
+
+        for name in ["vocals", "drums", "bass", "other"]:
+            sf.write(str(output_dir / f"{name}.wav"), stereo, sr, format="WAV", subtype="FLOAT")
+
+        mock_result = self._mock_stems_local(output_dir)
+
+        with patch(
+            "musicmixer.services.separation_local.separate_stems_local",
+            return_value=mock_result,
+        ):
+            result = separate_vocal_song_local(tmp_path / "input.wav", output_dir)
+
+        assert result["backing_vocals"] is None
+
+    def test_progress_callback_called(self, tmp_path):
+        """Progress callback should be invoked during local vocal separation."""
+        from musicmixer.services.separation_local import separate_vocal_song_local
+
+        output_dir = tmp_path / "stems"
+        output_dir.mkdir(parents=True)
+
+        sr = 44100
+        t = np.linspace(0, 0.1, int(sr * 0.1), endpoint=False)
+        mono = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        stereo = np.column_stack([mono, mono])
+
+        for name in ["vocals", "drums", "bass", "other"]:
+            sf.write(str(output_dir / f"{name}.wav"), stereo, sr, format="WAV", subtype="FLOAT")
+
+        callback = MagicMock()
+        mock_result = self._mock_stems_local(output_dir)
+
+        with patch(
+            "musicmixer.services.separation_local.separate_stems_local",
+            return_value=mock_result,
+        ):
+            separate_vocal_song_local(tmp_path / "input.wav", output_dir, callback)
+
+        callback.assert_called()
+
+
+class TestSaveStemBytes:
+    """Test the shared _save_stem_bytes helper."""
+
+    def test_saves_stems_to_disk(self, tmp_path):
+        """Should save all stems as WAV files and return correct paths."""
+        from musicmixer.services.separation import _save_stem_bytes
+
+        stem_bytes = {
+            "lead_vocals": _make_float32_wav_bytes(440),
+            "backing_vocals": _make_float32_wav_bytes(220),
+            "instrumental": _make_float32_wav_bytes(110),
+        }
+
+        output_dir = tmp_path / "out"
+        result = _save_stem_bytes(stem_bytes, output_dir)
+
+        assert set(result.keys()) == {"lead_vocals", "backing_vocals", "instrumental"}
+        for stem_name, stem_path in result.items():
+            assert stem_path.exists()
+            assert stem_path.name == f"{stem_name}.wav"
+            assert stem_path.stat().st_size > 0
+
+    def test_creates_output_dir(self, tmp_path):
+        """Should create the output directory if it doesn't exist."""
+        from musicmixer.services.separation import _save_stem_bytes
+
+        stem_bytes = {"test": _make_float32_wav_bytes()}
+        output_dir = tmp_path / "deeply" / "nested" / "out"
+
+        assert not output_dir.exists()
+        _save_stem_bytes(stem_bytes, output_dir)
+        assert output_dir.exists()
+
+
+class TestVocalSongStemsConstant:
+    """Test the VOCAL_SONG_STEMS constant."""
+
+    def test_contains_expected_stems(self):
+        """VOCAL_SONG_STEMS should have exactly the 3 expected stem names."""
+        from musicmixer.services.separation import VOCAL_SONG_STEMS
+
+        assert VOCAL_SONG_STEMS == {"lead_vocals", "backing_vocals", "instrumental"}
+
+    def test_no_overlap_with_bs_roformer_stems(self):
+        """Vocal-song stems should not overlap with BS-RoFormer instrumental stems."""
+        from musicmixer.services.separation import VOCAL_SONG_STEMS
+
+        bs_roformer_stems = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+        overlap = VOCAL_SONG_STEMS & bs_roformer_stems
+        assert overlap == set(), f"Unexpected overlap: {overlap}"
+
+
+class TestModalConstants:
+    """Test Modal module constants for model checkpoints."""
+
+    def test_karaoke_model_checkpoint_defined(self):
+        """Karaoke model checkpoint constant should be defined."""
+        from musicmixer.services.separation_modal import MELBAND_KARAOKE_CKPT
+
+        assert MELBAND_KARAOKE_CKPT.endswith(".ckpt")
+
+    def test_vocals_model_checkpoint_defined(self):
+        """Vocals model checkpoint constant should be defined."""
+        from musicmixer.services.separation_modal import MELBAND_VOCALS_CKPT
+
+        assert MELBAND_VOCALS_CKPT.endswith(".ckpt")
+
+    def test_bs_roformer_checkpoint_unchanged(self):
+        """Existing BS-RoFormer checkpoint constant should be preserved."""
+        from musicmixer.services.separation_modal import MODEL_CKPT
+
+        assert MODEL_CKPT == "BS-Roformer-SW.ckpt"
+
+    def test_no_msst_references(self):
+        """No MSST-related constants should remain after the rewrite."""
+        import musicmixer.services.separation_modal as mod
+
+        assert not hasattr(mod, "MSST_WEIGHTS_DIR")
+        assert not hasattr(mod, "MELBAND_KARAOKE_CONFIG")
+        assert not hasattr(mod, "MELBAND_KARAOKE_HF_REPO")
+        assert not hasattr(mod, "MELBAND_VOCALS_CONFIG")
+        assert not hasattr(mod, "MELBAND_VOCALS_HF_REPO")

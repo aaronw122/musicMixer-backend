@@ -197,13 +197,15 @@ class TestDefaultArrangement:
         """Intro section has vocal gain of 0.0."""
         sections = default_arrangement(200)
         intro = sections[0]
-        assert intro.stem_gains["vocals"] == 0.0
+        assert intro.stem_gains["lead_vocals"] == 0.0
+        assert intro.stem_gains["backing_vocals"] == 0.0
 
     def test_default_arrangement_outro_low_vocals(self):
         """Outro section keeps vocals non-negative and bounded."""
         sections = default_arrangement(200)
         outro = sections[-1]
-        assert 0.0 <= outro.stem_gains["vocals"] <= 0.5
+        assert 0.0 <= outro.stem_gains["lead_vocals"] <= 0.5
+        assert 0.0 <= outro.stem_gains["backing_vocals"] <= 0.5
 
     def test_default_arrangement_breakdown_low_drums(self):
         """Breakdown section has reduced but non-zero drum gain (avoids 'song stopped' feel)."""
@@ -418,10 +420,10 @@ class TestFewShotMessagesCaching:
         last_content_block = last_msg["content"][-1]
         assert last_content_block["cache_control"] == {"type": "ephemeral"}
 
-    def test_few_shot_messages_always_6stem(self):
-        """All 6 stems present in every section's stem_roles in the few-shot examples."""
+    def test_few_shot_messages_always_7stem(self):
+        """All 7 stems present in every section's stem_roles in the few-shot examples."""
         messages = _build_few_shot_messages()
-        expected_stems = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+        expected_stems = {"lead_vocals", "backing_vocals", "drums", "bass", "guitar", "piano", "other"}
         valid_roles = {"lead", "support", "background", "texture", "silent"}
         for msg in messages:
             if msg["role"] == "assistant" and isinstance(msg["content"], list):
@@ -476,23 +478,23 @@ class TestInterpretPromptCaching:
             "sections": [
                 {"label": "intro", "start_beat": 0, "end_beat": 32,
                  "energy": "low",
-                 "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"},
+                 "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "fade", "transition_beats": 4},
                 {"label": "verse", "start_beat": 32, "end_beat": 128,
                  "energy": "medium",
-                 "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"},
+                 "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 4},
                 {"label": "breakdown", "start_beat": 128, "end_beat": 192,
                  "energy": "low",
-                 "stem_roles": {"vocals": "background", "drums": "background", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"},
+                 "stem_roles": {"lead_vocals": "background", "backing_vocals": "silent", "drums": "background", "bass": "support", "guitar": "lead", "piano": "background", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 4},
                 {"label": "drop", "start_beat": 192, "end_beat": 352,
                  "energy": "peak",
-                 "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"},
+                 "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"},
                  "transition_in": "cut", "transition_beats": 0},
                 {"label": "outro", "start_beat": 352, "end_beat": 416,
                  "energy": "low",
-                 "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"},
+                 "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 8},
             ],
             "vocal_type": "sung",
@@ -552,19 +554,19 @@ class TestInterpretPromptCaching:
             "sections": [
                 {"label": "intro", "start_beat": 0, "end_beat": 32,
                  "energy": "low",
-                 "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"},
+                 "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "fade", "transition_beats": 4},
                 {"label": "verse", "start_beat": 32, "end_beat": 128,
                  "energy": "medium",
-                 "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"},
+                 "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "texture", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 4},
                 {"label": "drop", "start_beat": 128, "end_beat": 352,
                  "energy": "peak",
-                 "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"},
+                 "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"},
                  "transition_in": "cut", "transition_beats": 0},
                 {"label": "outro", "start_beat": 352, "end_beat": 416,
                  "energy": "low",
-                 "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"},
+                 "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"},
                  "transition_in": "crossfade", "transition_beats": 8},
             ],
             "vocal_type": "sung",
@@ -659,7 +661,7 @@ class TestPromptIntentText:
                                 )
 
     def test_few_shot_verse_roles_follow_guidance(self):
-        """Verse sections in few-shot examples have vocals as lead and drums/bass as support."""
+        """Verse sections in few-shot examples have lead_vocals as lead and drums/bass as support."""
         messages = _build_few_shot_messages()
         for msg in messages:
             if msg["role"] == "assistant" and isinstance(msg["content"], list):
@@ -668,9 +670,9 @@ class TestPromptIntentText:
                         for section in block["input"].get("sections", []):
                             if section["label"] == "verse":
                                 roles = section["stem_roles"]
-                                if roles["vocals"] != "silent":
-                                    assert roles["vocals"] == "lead", (
-                                        f"Verse vocals should be 'lead', got '{roles['vocals']}'"
+                                if roles["lead_vocals"] != "silent":
+                                    assert roles["lead_vocals"] == "lead", (
+                                        f"Verse lead_vocals should be 'lead', got '{roles['lead_vocals']}'"
                                     )
                                     assert roles["drums"] in ("lead", "support"), (
                                         f"Verse drums should be 'lead' or 'support', got '{roles['drums']}'"
@@ -705,10 +707,10 @@ class TestIntentValidation:
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
-            IntentSection("verse", 32, 128, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
-            IntentSection("drop", 128, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+            IntentSection("intro", 0, 32, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("verse", 32, 128, "medium", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("drop", 128, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
         plan = _make_intent_plan_with_sections(sections)
         result = _validate_intent_plan(plan, meta_a, meta_b)
@@ -722,11 +724,11 @@ class TestIntentValidation:
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("intro", 0, 32, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
             # Gap: 32-40 missing
-            IntentSection("verse", 40, 128, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
-            IntentSection("drop", 128, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+            IntentSection("verse", 40, 128, "medium", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("drop", 128, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
         plan = _make_intent_plan_with_sections(sections)
         result = _validate_intent_plan(plan, meta_a, meta_b)
@@ -740,11 +742,11 @@ class TestIntentValidation:
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            IntentSection("intro", 0, 40, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("intro", 0, 40, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
             # Overlap: verse starts at 32 but intro ends at 40
-            IntentSection("verse", 32, 128, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
-            IntentSection("drop", 128, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+            IntentSection("verse", 32, 128, "medium", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("drop", 128, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
         plan = _make_intent_plan_with_sections(sections)
         result = _validate_intent_plan(plan, meta_a, meta_b)
@@ -760,15 +762,15 @@ class TestIntentValidation:
 
         # Section missing 'piano' and 'other' keys
         sections = [
-            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background"}, "fade", 4),
-            IntentSection("drop", 32, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+            IntentSection("intro", 0, 32, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background"}, "fade", 4),
+            IntentSection("drop", 32, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
         plan = _make_intent_plan_with_sections(sections)
         result = _validate_intent_plan(plan, meta_a, meta_b)
 
-        # All 6 stems should be present in every section
-        expected_stems = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+        # All 7 stems should be present in every section
+        expected_stems = {"lead_vocals", "backing_vocals", "drums", "bass", "guitar", "piano", "other"}
         for section in result.sections:
             assert set(section.stem_roles.keys()) == expected_stems
             # Missing ones should be filled with "texture"
@@ -782,9 +784,9 @@ class TestIntentValidation:
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "INVALID_ROLE", "piano": "background", "other": "texture"}, "fade", 4),
-            IntentSection("drop", 32, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+            IntentSection("intro", 0, 32, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "INVALID_ROLE", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("drop", 32, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
         plan = _make_intent_plan_with_sections(sections)
         result = _validate_intent_plan(plan, meta_a, meta_b)
@@ -798,14 +800,15 @@ class TestIntentValidation:
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            IntentSection("drop", 0, 416, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("drop", 0, 416, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
         ]
         plan = _make_intent_plan_with_sections(sections)
         result = _validate_intent_plan(plan, meta_a, meta_b)
 
         assert len(result.sections) >= 2
         assert result.sections[0].label == "intro"
-        assert result.sections[0].stem_roles["vocals"] == "silent"
+        assert result.sections[0].stem_roles["lead_vocals"] == "silent"
+        assert result.sections[0].stem_roles["backing_vocals"] == "silent"
 
     def test_time_range_clamped(self):
         """Time ranges beyond song duration are clamped."""
@@ -813,9 +816,9 @@ class TestIntentValidation:
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
-            IntentSection("drop", 32, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+            IntentSection("intro", 0, 32, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("drop", 32, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
         plan = _make_intent_plan_with_sections(sections)
         plan.end_time_vocal = 999.0  # Way beyond song duration
@@ -833,8 +836,8 @@ class TestIntentValidation:
 
         # All sections are < 4 beats — should trigger early return
         sections = [
-            IntentSection("intro", 0, 2, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 0),
-            IntentSection("verse", 2, 5, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 0),
+            IntentSection("intro", 0, 2, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 0),
+            IntentSection("verse", 2, 5, "medium", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 0),
         ]
         plan = _make_intent_plan_with_sections(sections)
         result = _validate_intent_plan(plan, meta_a, meta_b)
@@ -849,10 +852,10 @@ class TestIntentValidation:
         meta_b = _make_metadata(bpm=118.0, duration=210.0)
 
         sections = [
-            IntentSection("intro", 0, 2, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 0),
-            IntentSection("verse", 2, 128, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 0),
-            IntentSection("drop", 128, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("intro", 0, 2, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 0),
+            IntentSection("verse", 2, 128, "medium", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 0),
+            IntentSection("drop", 128, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
         ]
         plan = _make_intent_plan_with_sections(sections)
         result = _validate_intent_plan(plan, meta_a, meta_b)
@@ -875,10 +878,10 @@ class TestIntentDurationValidation:
         # Create sections where the last one spans the max_beats boundary
         # Section C starts before max_beats but ends after it
         sections = [
-            IntentSection("intro", 0, 100, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
-            IntentSection("verse", 100, 400, "medium", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
-            IntentSection("drop", 400, 600, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 600, 800, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+            IntentSection("intro", 0, 100, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("verse", 100, 400, "medium", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 4),
+            IntentSection("drop", 400, 600, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 600, 800, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
         plan = _make_intent_plan_with_sections(sections)
 
@@ -899,7 +902,7 @@ class TestIntentDurationValidation:
 
         # All sections start beyond max_beats — need total to exceed max_duration
         sections = [
-            IntentSection("drop", max_beats + 10, max_beats + 100, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("drop", max_beats + 10, max_beats + 100, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
         ]
         plan = _make_intent_plan_with_sections(sections)
 
@@ -912,9 +915,9 @@ class TestIntentDurationValidation:
         """Sections within duration limits pass through unchanged."""
         target_bpm = 120.0
         sections = [
-            IntentSection("intro", 0, 32, "low", {"vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
-            IntentSection("drop", 32, 352, "peak", {"vocals": "lead", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
-            IntentSection("outro", 352, 416, "low", {"vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+            IntentSection("intro", 0, 32, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("drop", 32, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
         ]
         plan = _make_intent_plan_with_sections(sections)
 
@@ -940,27 +943,27 @@ def _valid_plan_input(total_end_beat: int = 416) -> dict:
         "sections": [
             {"label": "intro", "start_beat": 0, "end_beat": 32,
              "energy": "low",
-             "stem_roles": {"vocals": "silent", "drums": "support", "bass": "support",
+             "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support",
                             "guitar": "background", "piano": "background", "other": "texture"},
              "transition_in": "fade", "transition_beats": 4},
             {"label": "verse", "start_beat": 32, "end_beat": 128,
              "energy": "medium",
-             "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support",
+             "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support",
                             "guitar": "background", "piano": "texture", "other": "texture"},
              "transition_in": "crossfade", "transition_beats": 4},
             {"label": "breakdown", "start_beat": 128, "end_beat": 192,
              "energy": "low",
-             "stem_roles": {"vocals": "background", "drums": "background", "bass": "support",
+             "stem_roles": {"lead_vocals": "background", "backing_vocals": "silent", "drums": "background", "bass": "support",
                             "guitar": "lead", "piano": "background", "other": "texture"},
              "transition_in": "crossfade", "transition_beats": 4},
             {"label": "drop", "start_beat": 192, "end_beat": total_end_beat - 64,
              "energy": "peak",
-             "stem_roles": {"vocals": "lead", "drums": "support", "bass": "support",
+             "stem_roles": {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support",
                             "guitar": "support", "piano": "background", "other": "background"},
              "transition_in": "cut", "transition_beats": 0},
             {"label": "outro", "start_beat": total_end_beat - 64, "end_beat": total_end_beat,
              "energy": "low",
-             "stem_roles": {"vocals": "silent", "drums": "background", "bass": "background",
+             "stem_roles": {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background",
                             "guitar": "background", "piano": "background", "other": "texture"},
              "transition_in": "crossfade", "transition_beats": 8},
         ],

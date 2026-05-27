@@ -627,14 +627,14 @@ class TestNoDualLeadVocals:
         violations = check_no_dual_lead_vocals(plan)
         assert violations == []
 
-    def test_dual_vocals_fails(self):
-        """Two vocal stems active should fail."""
+    def test_cross_song_vocals_fails(self):
+        """Song A lead_vocals + Song B vocals active should fail."""
         sections = [
             _make_section("intro", 0, 16,
-                          {"vocals": 1.0, "vocals_b": 0.8, "drums": 0.5},
+                          {"lead_vocals": 1.0, "vocals": 0.8, "drums": 0.5},
                           transition_beats=4),
             _make_section("outro", 16, 32,
-                          {"vocals": 0.0, "drums": 0.2, "bass": 0.1},
+                          {"lead_vocals": 0.0, "drums": 0.2, "bass": 0.1},
                           transition_beats=4),
         ]
         plan = _make_valid_plan(sections=sections)
@@ -643,14 +643,28 @@ class TestNoDualLeadVocals:
         assert violations[0].code == ConstraintCode.DUAL_LEAD_VOCALS
         assert violations[0].section_index == 0
 
+    def test_same_song_vocal_layering_allowed(self):
+        """Song A lead_vocals + backing_vocals active together is allowed."""
+        sections = [
+            _make_section("chorus", 0, 16,
+                          {"lead_vocals": 1.0, "backing_vocals": 0.6, "drums": 0.5},
+                          transition_beats=4),
+            _make_section("outro", 16, 32,
+                          {"lead_vocals": 0.0, "drums": 0.2, "bass": 0.1},
+                          transition_beats=4),
+        ]
+        plan = _make_valid_plan(sections=sections)
+        violations = check_no_dual_lead_vocals(plan)
+        assert violations == []
+
     def test_zero_gain_vocal_ignored(self):
         """A vocal stem with gain=0 should not count as active."""
         sections = [
             _make_section("intro", 0, 16,
-                          {"vocals": 1.0, "vocals_b": 0.0, "drums": 0.5},
+                          {"lead_vocals": 1.0, "vocals": 0.0, "drums": 0.5},
                           transition_beats=4),
             _make_section("outro", 16, 32,
-                          {"vocals": 0.0, "drums": 0.2, "bass": 0.1},
+                          {"lead_vocals": 0.0, "drums": 0.2, "bass": 0.1},
                           transition_beats=4),
         ]
         plan = _make_valid_plan(sections=sections)

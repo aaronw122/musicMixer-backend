@@ -49,7 +49,7 @@ def make_mock_stems(stems_dir: Path, stem_names: list[str], duration: float = 10
     """Create a set of mock stem WAV files and return the path dict."""
     stems_dir.mkdir(parents=True, exist_ok=True)
     result = {}
-    freqs = {"vocals": 220.0, "drums": 100.0, "bass": 80.0, "guitar": 330.0, "piano": 440.0, "other": 550.0}
+    freqs = {"vocals": 220.0, "lead_vocals": 220.0, "backing_vocals": 260.0, "drums": 100.0, "bass": 80.0, "guitar": 330.0, "piano": 440.0, "other": 550.0}
     for name in stem_names:
         path = stems_dir / f"{name}.wav"
         make_test_wav(path, duration=duration, freq=freqs.get(name, 440.0))
@@ -69,7 +69,7 @@ def pipeline_tmp(tmp_path):
     # Pre-create mock stem directories
     song_a_stems = make_mock_stems(
         tmp_path / "stems" / "test-session" / "song_a",
-        ["vocals", "drums", "bass", "other"],
+        ["lead_vocals", "backing_vocals", "drums", "bass", "other"],
         duration=15.0,
     )
     song_b_stems = make_mock_stems(
@@ -110,9 +110,14 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
         else:
             return pipeline_tmp["song_b_stems"]
 
+    def mock_separate_vocal(audio_path, output_dir, progress_callback=None):
+        """Return Song A stems for vocal separation."""
+        return pipeline_tmp["song_a_stems"]
+
     with (
         patch("musicmixer.config.settings") as mock_settings,
         patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate),
+        patch("musicmixer.services.separation.separate_vocal_song", side_effect=mock_separate_vocal),
     ):
         mock_settings.data_dir = tmp_path
 
@@ -275,6 +280,7 @@ class TestPipelineHandlesSeparationError:
         with (
             patch("musicmixer.config.settings") as mock_settings,
             patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate_raises),
+            patch("musicmixer.services.separation.separate_vocal_song", side_effect=mock_separate_raises),
         ):
             mock_settings.data_dir = tmp_path
 
