@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from musicmixer.models import AnalyzedSongs, LyricsData, SessionState
+from musicmixer.models import AnalyzedSongs, AudioMetadata, LyricsData, SessionState
 from musicmixer.services.pipeline_metrics import PipelineMetrics
 
 logger = logging.getLogger(__name__)
@@ -176,8 +176,15 @@ def _step_separate_and_analyze(
     song_b_original_filename: str,
     event_queue: queue.Queue,
     session: SessionState,
+    cached_meta_a: AudioMetadata | None = None,
+    cached_meta_b: AudioMetadata | None = None,
+    cached_lyrics_a: LyricsData | None = None,
+    cached_lyrics_b: LyricsData | None = None,
 ) -> tuple:
     """Steps 1+2: Separation + analysis (overlapped).
+
+    When cached metadata is provided for a song, analysis/lyrics/structure-ML
+    are skipped for that song (medium cache path).  Separation always runs.
 
     Returns (song_a_stems, song_b_stems, meta_a, meta_b,
              lyrics_a_data, lyrics_b_data, ml_segments_a, ml_segments_b,
@@ -200,10 +207,16 @@ def _step_separate_and_analyze(
     song_a_stems_dir = stems_dir / "song_a"
     song_b_stems_dir = stems_dir / "song_b"
 
+    # --- Medium cache path: log which songs use cached metadata ---
+    if cached_meta_a is not None:
+        logger.info("Session %s: Using cached metadata for song A (skipping analysis/lyrics/structure-ML)", session_id)
+    if cached_meta_b is not None:
+        logger.info("Session %s: Using cached metadata for song B (skipping analysis/lyrics/structure-ML)", session_id)
+
     # --- Submit all concurrent work into a single pool ---
-    # Workers: 2 separation + 2 analysis + (optionally) 2 lyrics = up to 6
-    lyrics_a_data: LyricsData | None = None
-    lyrics_b_data: LyricsData | None = None
+    # Workers: 2 separation + (0-2) analysis + (optionally 0-2) lyrics = up to 8
+    lyrics_a_data: LyricsData | None = cached_lyrics_a
+    lyrics_b_data: LyricsData | None = cached_lyrics_b
     lyrics_future_a = None
     lyrics_future_b = None
 
@@ -224,46 +237,66 @@ def _step_separate_and_analyze(
     else:
         logger.info("Session %s: ML structure detection skipped (backend=heuristic)", session_id)
 
-    pool_workers = 4  # 2 separation + 2 analysis
+    # Count pool workers: separation always runs, analysis/lyrics/structure
+    # are skipped per-song when cached metadata is available.
+    _need_fresh_a = cached_meta_a is None
+    _need_fresh_b = cached_meta_b is None
+    pool_workers = 2  # 2 separation (always)
+    pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 analysis
     if settings.lyrics_lookup_enabled:
-        pool_workers += 2
+        pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 lyrics
     if structure_ml_enabled:
-        pool_workers += 2
+        pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 ML structure
 
     structure_future_a = None
     structure_future_b = None
+    analysis_future_a = None
+    analysis_future_b = None
 
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
-        # Separation futures: Song A uses MelBand Roformer (lead/backing vocals),
-        # Song B uses BS-RoFormer (6-stem instrumental separation).
-        sep_future_a = pool.submit(separate_vocal_song, song_a_path, song_a_stems_dir)
+        # Separation futures: ALWAYS run (even with cached metadata, stems
+        # must be separated for the new role).
+        sep_future_a = pool.submit(separate_stems, song_a_path, song_a_stems_dir)
         sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir)
 
-        # Analysis futures (overlapped with separation -- no stem dependency)
-        analysis_future_a = pool.submit(analyze_audio_full, song_a_path)
-        analysis_future_b = pool.submit(analyze_audio_full, song_b_path)
+        # Analysis futures (skip when cached metadata is available)
+        if _need_fresh_a:
+            analysis_future_a = pool.submit(analyze_audio_full, song_a_path)
+        if _need_fresh_b:
+            analysis_future_b = pool.submit(analyze_audio_full, song_b_path)
 
-        # ML structure futures (overlapped -- operates on original mix, no stems needed)
+        # ML structure futures (skip when cached metadata is available)
         if structure_ml_enabled:
-            structure_future_a = pool.submit(analyze_structure_ml, song_a_path)
-            structure_future_b = pool.submit(analyze_structure_ml, song_b_path)
+            if _need_fresh_a:
+                structure_future_a = pool.submit(analyze_structure_ml, song_a_path)
+            if _need_fresh_b:
+                structure_future_b = pool.submit(analyze_structure_ml, song_b_path)
 
-        # Lyrics futures (optional, also overlapped)
+        # Lyrics futures (skip when cached metadata is available)
         if settings.lyrics_lookup_enabled:
             try:
-                lyrics_future_a = pool.submit(
-                    lookup_lyrics_for_song, song_a_path, song_a_original_filename,
-                )
-                lyrics_future_b = pool.submit(
-                    lookup_lyrics_for_song, song_b_path, song_b_original_filename,
-                )
-                logger.info("Session %s: Lyrics lookup submitted for both songs", session_id)
+                if _need_fresh_a:
+                    lyrics_future_a = pool.submit(
+                        lookup_lyrics_for_song, song_a_path, song_a_original_filename,
+                    )
+                if _need_fresh_b:
+                    lyrics_future_b = pool.submit(
+                        lookup_lyrics_for_song, song_b_path, song_b_original_filename,
+                    )
+                if _need_fresh_a or _need_fresh_b:
+                    if _need_fresh_a and _need_fresh_b:
+                        lyrics_scope = "both songs"
+                    elif _need_fresh_a:
+                        lyrics_scope = "Song A only"
+                    else:
+                        lyrics_scope = "Song B only"
+                    logger.info("Session %s: Lyrics lookup submitted for %s", session_id, lyrics_scope)
             except Exception:
                 logger.warning("Session %s: Failed to submit lyrics lookups", session_id, exc_info=True)
 
-        # --- Collect analysis results (typically finishes before separation) ---
-        meta_a = analysis_future_a.result(timeout=120)
-        meta_b = analysis_future_b.result(timeout=120)
+        # --- Collect analysis results (use cached values when available) ---
+        meta_a = cached_meta_a if cached_meta_a is not None else analysis_future_a.result(timeout=120)
+        meta_b = cached_meta_b if cached_meta_b is not None else analysis_future_b.result(timeout=120)
 
         logger.info("Session %s: [2/17] analysis done (A=%.1f BPM, B=%.1f BPM)", session_id, meta_a.bpm, meta_b.bpm)
 
@@ -543,12 +576,17 @@ def _step_analyze_structure(
     song_a_path=None,
     song_b_path=None,
     lyrics_a_data=None,
+    has_cached_meta_a: bool = False,
+    has_cached_meta_b: bool = False,
 ):
     """Step 3.5: Analyze song structure (key, sections, cross-song relationships).
 
     Mutates meta_a and meta_b in place (adds stem_analysis, song_structure,
     and PulseMap analysis fields: chord_progression, polyphony_info,
     drum_pattern, word_alignment).
+
+    When has_cached_meta_a/has_cached_meta_b are True, stem analysis and
+    PulseMap are skipped for that song (cached metadata already has those fields).
     """
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
@@ -562,6 +600,16 @@ def _step_analyze_structure(
         "progress": 0.50,
     }, session=session)
 
+    # When both songs are cached, skip everything in this step
+    if has_cached_meta_a and has_cached_meta_b:
+        logger.info("Session %s: [3.5/17] skipping structure + PulseMap (both songs cached)", session_id)
+        emit_progress(event_queue, {
+            "step": "analyzing",
+            "detail": "Got the blueprint!",
+            "progress": 0.57,
+        }, session=session)
+        return
+
     # Log key detection results (already populated by analyze_audio_full)
     for label, meta in [("A", meta_a), ("B", meta_b)]:
         if meta.key is not None:
@@ -573,10 +621,14 @@ def _step_analyze_structure(
             )
 
     # Stem-level structure analysis for both songs (depends on stem output)
-    for label, meta, s_dir, ml_segs in [
-        ("A", meta_a, song_a_stems_dir, ml_segments_a),
-        ("B", meta_b, song_b_stems_dir, ml_segments_b),
+    # Skip for songs with cached metadata (already has stem_analysis, song_structure)
+    for label, meta, s_dir, ml_segs, has_cached_meta in [
+        ("A", meta_a, song_a_stems_dir, ml_segments_a, has_cached_meta_a),
+        ("B", meta_b, song_b_stems_dir, ml_segments_b, has_cached_meta_b),
     ]:
+        if has_cached_meta:
+            logger.info("Session %s: Song %s structure: skipped (cached)", session_id, label)
+            continue
         try:
             stem_paths = {name: s_dir / f"{name}.wav" for name in ["vocals", "lead_vocals", "backing_vocals", "drums", "bass", "guitar", "piano", "other"]}
             # Filter to stems that actually exist
@@ -600,24 +652,39 @@ def _step_analyze_structure(
         except Exception as e:
             logger.warning("Session %s: Structure analysis failed for Song %s: %s", session_id, label, e)
 
-    # Cross-song relationships
-    try:
-        relationships = compute_relationships(meta_a, meta_b)
-        logger.info(
-            "Session %s: Cross-song: loudness_diff=%.1fdB, vocal_source=%s, stretch=%.1f%%",
-            session_id, relationships.loudness_diff_db,
-            relationships.vocal_source, relationships.stretch_pct,
-        )
-    except Exception as e:
-        logger.warning("Session %s: Cross-song relationship analysis failed: %s", session_id, e)
+    # Cross-song relationships (output is logged then discarded — skip when
+    # either song is cached to avoid unnecessary compute)
+    if not has_cached_meta_a and not has_cached_meta_b:
+        try:
+            relationships = compute_relationships(meta_a, meta_b)
+            logger.info(
+                "Session %s: Cross-song: loudness_diff=%.1fdB, vocal_source=%s, stretch=%.1f%%",
+                session_id, relationships.loudness_diff_db,
+                relationships.vocal_source, relationships.stretch_pct,
+            )
+        except Exception as e:
+            logger.warning("Session %s: Cross-song relationship analysis failed: %s", session_id, e)
 
     # --- PulseMap analysis (parallel) ---
-    _run_pulsemap_analysis(
-        meta_a, meta_b,
-        song_a_path, song_b_path,
-        song_a_stems_dir, song_b_stems_dir,
-        lyrics_a_data, session_id,
-    )
+    # Skip for songs with cached metadata (already has PulseMap fields)
+    if not has_cached_meta_a and not has_cached_meta_b:
+        _run_pulsemap_analysis(
+            meta_a, meta_b,
+            song_a_path, song_b_path,
+            song_a_stems_dir, song_b_stems_dir,
+            lyrics_a_data, session_id,
+        )
+    elif not has_cached_meta_a or not has_cached_meta_b:
+        # One song cached, one not — PulseMap only operates on specific
+        # per-song fields, so we can still run it and the cached song's
+        # fields won't be overwritten (they're already set).
+        _run_pulsemap_analysis(
+            meta_a, meta_b,
+            song_a_path if not has_cached_meta_a else None,
+            song_b_path if not has_cached_meta_b else None,
+            song_a_stems_dir, song_b_stems_dir,
+            lyrics_a_data, session_id,
+        )
 
     emit_progress(event_queue, {
         "step": "analyzing",
@@ -1806,8 +1873,16 @@ def analyze_songs(
     source_quality_a: str | None = None,
     source_quality_b: str | None = None,
     metrics: PipelineMetrics | None = None,
+    cached_meta_a: AudioMetadata | None = None,
+    cached_meta_b: AudioMetadata | None = None,
+    cached_lyrics_a: LyricsData | None = None,
+    cached_lyrics_b: LyricsData | None = None,
 ) -> AnalyzedSongs:
     """Analysis phase (steps 1-3.8): separation, audio analysis, structure detection.
+
+    When cached metadata is provided for a song (medium cache path), analysis,
+    lyrics lookup, and ML structure detection are skipped for that song.
+    Separation and LUFS measurement always run.
 
     Returns an AnalyzedSongs with everything the remix phase needs.
     """
@@ -1834,6 +1909,10 @@ def analyze_songs(
         session_id, _song_a, _song_b, stems_dir,
         song_a_original_filename, song_b_original_filename,
         event_queue, session,
+        cached_meta_a=cached_meta_a,
+        cached_meta_b=cached_meta_b,
+        cached_lyrics_a=cached_lyrics_a,
+        cached_lyrics_b=cached_lyrics_b,
     )
     _step_times["1+2 separate+analyze"] = time.monotonic() - _t0
 
@@ -1895,6 +1974,8 @@ def analyze_songs(
         song_a_path=_song_a,
         song_b_path=_song_b,
         lyrics_a_data=lyrics_a_data,
+        has_cached_meta_a=cached_meta_a is not None,
+        has_cached_meta_b=cached_meta_b is not None,
     )
     _step_times["3.5 structure+pulsemap"] = time.monotonic() - _t0
 

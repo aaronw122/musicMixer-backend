@@ -1,7 +1,7 @@
 """Tests for the /api/stats endpoint."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -393,22 +393,23 @@ class TestTimeRangeFilter:
 
     def test_days_filter(self, client, tmp_path):
         """Only entries within the time range should be included."""
+        now = datetime.now(timezone.utc)
         log_path = tmp_path / "logs" / "musicmixer.log"
         entries = [
             _make_completion_entry(
-                timestamp="2026-05-10T10:00:00+00:00",
+                timestamp=(now - timedelta(days=30)).isoformat(),
                 session_id="old",
                 total_pipeline_time_s=50.0,
             ),
             _make_completion_entry(
-                timestamp="2026-05-20T10:00:00+00:00",
+                timestamp=(now - timedelta(hours=1)).isoformat(),
                 session_id="recent",
                 total_pipeline_time_s=100.0,
             ),
         ]
         _write_log(log_path, entries)
 
-        # With days=3, only the May 20 entry should be included
+        # With days=3, only the recent entry should be included
         resp = client.get("/api/stats?days=3")
         data = resp.json()
 
