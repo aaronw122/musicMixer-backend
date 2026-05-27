@@ -629,3 +629,287 @@ class TestLossySourceWiring:
             f"Expected lossy_lpf_hz=16000 passed to master_static, "
             f"got: {captured_kwargs}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Medium cache path tests (skip re-analysis when metadata is cached)
+# ---------------------------------------------------------------------------
+
+
+def _make_cached_metadata(bpm: float = 120.0) -> "AudioMetadata":
+    """Create a minimal AudioMetadata for cache-hit testing."""
+    from musicmixer.models import AudioMetadata
+    return AudioMetadata(
+        bpm=bpm,
+        bpm_confidence=0.9,
+        beat_frames=np.arange(0, 100),
+        duration_seconds=15.0,
+        total_beats=60,
+        key="C",
+        scale="major",
+        key_confidence=0.85,
+    )
+
+
+class TestMediumCachePath:
+    """Verify that cached metadata skips analysis/lyrics/structure but always runs separation."""
+
+    def test_cached_meta_a_skips_analysis_for_song_a(self, pipeline_tmp):
+        """When cached_meta_a is provided, analyze_audio_full should NOT be called for song A."""
+        from musicmixer.services.pipeline import _step_separate_and_analyze
+        from musicmixer.models import SessionState
+
+        tmp_path = pipeline_tmp["tmp_path"]
+        stems_dir = tmp_path / "stems" / "test-session"
+        cached_meta = _make_cached_metadata(bpm=130.0)
+
+        analysis_calls = []
+        original_analyze = None
+
+        def _tracking_analyze(audio_path):
+            analysis_calls.append(str(audio_path))
+            return original_analyze(audio_path)
+
+        from musicmixer.services import analysis as analysis_mod
+        original_analyze = analysis_mod.analyze_audio_full
+
+        def mock_separate(audio_path, output_dir, progress_callback=None):
+            if "song_a" in str(audio_path):
+                return pipeline_tmp["song_a_stems"]
+            return pipeline_tmp["song_b_stems"]
+
+        event_queue = queue.Queue(maxsize=100)
+        session = SessionState()
+
+        with (
+            patch("musicmixer.config.settings") as mock_settings,
+            patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate),
+            patch("musicmixer.services.analysis.analyze_audio_full", side_effect=_tracking_analyze),
+        ):
+            mock_settings.lyrics_lookup_enabled = False
+            mock_settings.section_detection_backend = "heuristic"
+
+            result = _step_separate_and_analyze(
+                session_id="test-session",
+                song_a_path=pipeline_tmp["song_a_path"],
+                song_b_path=pipeline_tmp["song_b_path"],
+                stems_dir=stems_dir,
+                song_a_original_filename="song_a.wav",
+                song_b_original_filename="song_b.wav",
+                event_queue=event_queue,
+                session=session,
+                cached_meta_a=cached_meta,
+            )
+
+        # analyze_audio_full should be called only for song B (not song A)
+        assert len(analysis_calls) == 1, f"Expected 1 analysis call, got {len(analysis_calls)}: {analysis_calls}"
+        assert "song_b" in analysis_calls[0], f"Expected song_b analysis call, got: {analysis_calls[0]}"
+
+        # meta_a should be the cached value
+        _stems_a, _stems_b, meta_a, meta_b = result[:4]
+        assert meta_a.bpm == 130.0, "meta_a should use cached BPM"
+
+    def test_cached_meta_b_skips_analysis_for_song_b(self, pipeline_tmp):
+        """When cached_meta_b is provided, analyze_audio_full should NOT be called for song B."""
+        from musicmixer.services.pipeline import _step_separate_and_analyze
+        from musicmixer.models import SessionState
+
+        tmp_path = pipeline_tmp["tmp_path"]
+        stems_dir = tmp_path / "stems" / "test-session"
+        cached_meta = _make_cached_metadata(bpm=140.0)
+
+        analysis_calls = []
+        original_analyze = None
+
+        def _tracking_analyze(audio_path):
+            analysis_calls.append(str(audio_path))
+            return original_analyze(audio_path)
+
+        from musicmixer.services import analysis as analysis_mod
+        original_analyze = analysis_mod.analyze_audio_full
+
+        def mock_separate(audio_path, output_dir, progress_callback=None):
+            if "song_a" in str(audio_path):
+                return pipeline_tmp["song_a_stems"]
+            return pipeline_tmp["song_b_stems"]
+
+        event_queue = queue.Queue(maxsize=100)
+        session = SessionState()
+
+        with (
+            patch("musicmixer.config.settings") as mock_settings,
+            patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate),
+            patch("musicmixer.services.analysis.analyze_audio_full", side_effect=_tracking_analyze),
+        ):
+            mock_settings.lyrics_lookup_enabled = False
+            mock_settings.section_detection_backend = "heuristic"
+
+            result = _step_separate_and_analyze(
+                session_id="test-session",
+                song_a_path=pipeline_tmp["song_a_path"],
+                song_b_path=pipeline_tmp["song_b_path"],
+                stems_dir=stems_dir,
+                song_a_original_filename="song_a.wav",
+                song_b_original_filename="song_b.wav",
+                event_queue=event_queue,
+                session=session,
+                cached_meta_b=cached_meta,
+            )
+
+        # analyze_audio_full should be called only for song A (not song B)
+        assert len(analysis_calls) == 1, f"Expected 1 analysis call, got {len(analysis_calls)}: {analysis_calls}"
+        assert "song_a" in analysis_calls[0], f"Expected song_a analysis call, got: {analysis_calls[0]}"
+
+        # meta_b should be the cached value
+        _stems_a, _stems_b, _meta_a, meta_b = result[:4]
+        assert meta_b.bpm == 140.0, "meta_b should use cached BPM"
+
+    def test_both_cached_skips_all_analysis(self, pipeline_tmp):
+        """When both songs have cached metadata, no analysis futures should be submitted."""
+        from musicmixer.services.pipeline import _step_separate_and_analyze
+        from musicmixer.models import SessionState
+
+        tmp_path = pipeline_tmp["tmp_path"]
+        stems_dir = tmp_path / "stems" / "test-session"
+        cached_a = _make_cached_metadata(bpm=125.0)
+        cached_b = _make_cached_metadata(bpm=135.0)
+
+        analysis_calls = []
+
+        def _tracking_analyze(audio_path):
+            analysis_calls.append(str(audio_path))
+            raise AssertionError("analyze_audio_full should not be called when both songs cached")
+
+        def mock_separate(audio_path, output_dir, progress_callback=None):
+            if "song_a" in str(audio_path):
+                return pipeline_tmp["song_a_stems"]
+            return pipeline_tmp["song_b_stems"]
+
+        event_queue = queue.Queue(maxsize=100)
+        session = SessionState()
+
+        with (
+            patch("musicmixer.config.settings") as mock_settings,
+            patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate),
+            patch("musicmixer.services.analysis.analyze_audio_full", side_effect=_tracking_analyze),
+        ):
+            mock_settings.lyrics_lookup_enabled = False
+            mock_settings.section_detection_backend = "heuristic"
+
+            result = _step_separate_and_analyze(
+                session_id="test-session",
+                song_a_path=pipeline_tmp["song_a_path"],
+                song_b_path=pipeline_tmp["song_b_path"],
+                stems_dir=stems_dir,
+                song_a_original_filename="song_a.wav",
+                song_b_original_filename="song_b.wav",
+                event_queue=event_queue,
+                session=session,
+                cached_meta_a=cached_a,
+                cached_meta_b=cached_b,
+            )
+
+        assert len(analysis_calls) == 0, f"Expected no analysis calls, got: {analysis_calls}"
+        _stems_a, _stems_b, meta_a, meta_b = result[:4]
+        assert meta_a.bpm == 125.0
+        assert meta_b.bpm == 135.0
+
+    def test_separation_always_runs_even_with_cached_meta(self, pipeline_tmp):
+        """Separation should ALWAYS run for both songs, even when metadata is cached."""
+        from musicmixer.services.pipeline import _step_separate_and_analyze
+        from musicmixer.models import SessionState
+
+        tmp_path = pipeline_tmp["tmp_path"]
+        stems_dir = tmp_path / "stems" / "test-session"
+        cached_a = _make_cached_metadata()
+        cached_b = _make_cached_metadata()
+
+        separation_calls = []
+
+        def mock_separate(audio_path, output_dir, progress_callback=None):
+            separation_calls.append(str(audio_path))
+            if "song_a" in str(audio_path):
+                return pipeline_tmp["song_a_stems"]
+            return pipeline_tmp["song_b_stems"]
+
+        event_queue = queue.Queue(maxsize=100)
+        session = SessionState()
+
+        with (
+            patch("musicmixer.config.settings") as mock_settings,
+            patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate),
+            patch("musicmixer.services.analysis.analyze_audio_full", side_effect=AssertionError),
+        ):
+            mock_settings.lyrics_lookup_enabled = False
+            mock_settings.section_detection_backend = "heuristic"
+
+            _step_separate_and_analyze(
+                session_id="test-session",
+                song_a_path=pipeline_tmp["song_a_path"],
+                song_b_path=pipeline_tmp["song_b_path"],
+                stems_dir=stems_dir,
+                song_a_original_filename="song_a.wav",
+                song_b_original_filename="song_b.wav",
+                event_queue=event_queue,
+                session=session,
+                cached_meta_a=cached_a,
+                cached_meta_b=cached_b,
+            )
+
+        # Both separation calls should have happened
+        assert len(separation_calls) == 2, f"Expected 2 separation calls, got {len(separation_calls)}"
+
+    def test_cached_lyrics_used_when_meta_cached(self, pipeline_tmp):
+        """When cached metadata + lyrics are provided, the cached lyrics should appear in results."""
+        from musicmixer.services.pipeline import _step_separate_and_analyze
+        from musicmixer.models import SessionState, LyricsData
+
+        tmp_path = pipeline_tmp["tmp_path"]
+        stems_dir = tmp_path / "stems" / "test-session"
+        cached_meta = _make_cached_metadata()
+        cached_lyrics = LyricsData(
+            artist="Test Artist",
+            title="Test Song",
+            source="test",
+            is_synced=False,
+            lines=[],
+            raw_text="Hello world",
+            lookup_duration_ms=5.0,
+        )
+
+        def mock_separate(audio_path, output_dir, progress_callback=None):
+            if "song_a" in str(audio_path):
+                return pipeline_tmp["song_a_stems"]
+            return pipeline_tmp["song_b_stems"]
+
+        event_queue = queue.Queue(maxsize=100)
+        session = SessionState()
+
+        with (
+            patch("musicmixer.config.settings") as mock_settings,
+            patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate),
+            patch("musicmixer.services.analysis.analyze_audio_full", side_effect=AssertionError),
+        ):
+            mock_settings.lyrics_lookup_enabled = True
+            mock_settings.section_detection_backend = "heuristic"
+
+            result = _step_separate_and_analyze(
+                session_id="test-session",
+                song_a_path=pipeline_tmp["song_a_path"],
+                song_b_path=pipeline_tmp["song_b_path"],
+                stems_dir=stems_dir,
+                song_a_original_filename="song_a.wav",
+                song_b_original_filename="song_b.wav",
+                event_queue=event_queue,
+                session=session,
+                cached_meta_a=cached_meta,
+                cached_meta_b=cached_meta,
+                cached_lyrics_a=cached_lyrics,
+                cached_lyrics_b=cached_lyrics,
+            )
+
+        # Lyrics should be the cached values
+        lyrics_a = result[4]
+        lyrics_b = result[5]
+        assert lyrics_a is cached_lyrics
+        assert lyrics_b is cached_lyrics

@@ -512,9 +512,15 @@ def _youtube_pipeline_wrapper(
             source_quality_a=source_quality_a,
             source_quality_b=source_quality_b,
             metrics=_metrics,
+            cached_meta_a=cached_song_a.meta if cached_song_a else None,
+            cached_meta_b=cached_song_b.meta if cached_song_b else None,
+            cached_lyrics_a=cached_song_a.lyrics if cached_song_a else None,
+            cached_lyrics_b=cached_song_b.lyrics if cached_song_b else None,
         )
 
-        # Cache analysis results to Redis for future cache hits
+        # Cache analysis results to Redis for future cache hits.
+        # Skip metadata write for songs that already had cached metadata
+        # (medium cache path) — only write stems for those.
         from musicmixer.api.shelf import _extract_video_id
         from musicmixer.services.song_cache import (
             ROLE_VOCAL, ROLE_INSTRUMENTAL,
@@ -525,13 +531,14 @@ def _youtube_pipeline_wrapper(
         # Song A (vocal source)
         vid_a = _extract_video_id(url_a)
         if vid_a is not None:
-            cache_song_metadata(
-                video_id=vid_a,
-                title=result_a.title,
-                artist="",
-                meta=analysis.meta_a,
-                lyrics=analysis.lyrics_a,
-            )
+            if cached_song_a is None:
+                cache_song_metadata(
+                    video_id=vid_a,
+                    title=result_a.title,
+                    artist="",
+                    meta=analysis.meta_a,
+                    lyrics=analysis.lyrics_a,
+                )
             cache_song_stems(
                 video_id=vid_a,
                 role=ROLE_VOCAL,
@@ -541,13 +548,14 @@ def _youtube_pipeline_wrapper(
         # Song B (instrumental source)
         vid_b = _extract_video_id(url_b)
         if vid_b is not None:
-            cache_song_metadata(
-                video_id=vid_b,
-                title=result_b.title,
-                artist="",
-                meta=analysis.meta_b,
-                lyrics=analysis.lyrics_b,
-            )
+            if cached_song_b is None:
+                cache_song_metadata(
+                    video_id=vid_b,
+                    title=result_b.title,
+                    artist="",
+                    meta=analysis.meta_b,
+                    lyrics=analysis.lyrics_b,
+                )
             cache_song_stems(
                 video_id=vid_b,
                 role=ROLE_INSTRUMENTAL,
