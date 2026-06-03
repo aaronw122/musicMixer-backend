@@ -704,6 +704,7 @@ class TestMediumCachePath:
         with (
             patch("musicmixer.config.settings") as mock_settings,
             patch("musicmixer.services.separation.separate_stems", side_effect=self._mock_separate(pipeline_tmp)),
+            patch("musicmixer.services.separation.separate_vocal_song", side_effect=self._mock_separate(pipeline_tmp)),
             patch("musicmixer.services.analysis.analyze_audio_full", side_effect=_tracking_analyze),
         ):
             mock_settings.lyrics_lookup_enabled = False
@@ -752,6 +753,7 @@ class TestMediumCachePath:
         with (
             patch("musicmixer.config.settings") as mock_settings,
             patch("musicmixer.services.separation.separate_stems", side_effect=self._mock_separate(pipeline_tmp)),
+            patch("musicmixer.services.separation.separate_vocal_song", side_effect=self._mock_separate(pipeline_tmp)),
             patch("musicmixer.services.analysis.analyze_audio_full", side_effect=_tracking_analyze),
         ):
             mock_settings.lyrics_lookup_enabled = False
@@ -794,6 +796,10 @@ class TestMediumCachePath:
             patch("musicmixer.config.settings") as mock_settings,
             patch(
                 "musicmixer.services.separation.separate_stems",
+                side_effect=self._mock_separate(pipeline_tmp, separation_calls),
+            ),
+            patch(
+                "musicmixer.services.separation.separate_vocal_song",
                 side_effect=self._mock_separate(pipeline_tmp, separation_calls),
             ),
             patch("musicmixer.services.analysis.analyze_audio_full", side_effect=AssertionError),
@@ -841,6 +847,7 @@ class TestMediumCachePath:
         with (
             patch("musicmixer.config.settings") as mock_settings,
             patch("musicmixer.services.separation.separate_stems", side_effect=self._mock_separate(pipeline_tmp)),
+            patch("musicmixer.services.separation.separate_vocal_song", side_effect=self._mock_separate(pipeline_tmp)),
             patch("musicmixer.services.analysis.analyze_audio_full", side_effect=AssertionError),
         ):
             mock_settings.lyrics_lookup_enabled = True

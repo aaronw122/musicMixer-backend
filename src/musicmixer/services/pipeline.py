@@ -256,7 +256,7 @@ def _step_separate_and_analyze(
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         # Separation futures: ALWAYS run (even with cached metadata, stems
         # must be separated for the new role).
-        sep_future_a = pool.submit(separate_stems, song_a_path, song_a_stems_dir)
+        sep_future_a = pool.submit(separate_vocal_song, song_a_path, song_a_stems_dir)
         sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir)
 
         # Analysis futures (skip when cached metadata is available)
