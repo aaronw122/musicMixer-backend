@@ -29,6 +29,7 @@ import numpy as np
 import redis
 
 from musicmixer.config import settings
+from musicmixer.services.separation import VOCAL_SONG_STEMS
 from musicmixer.models import (
     AudioMetadata,
     CachedSong,
@@ -50,17 +51,56 @@ from musicmixer.models import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Song roles and stem thresholds
+# Song roles and stem identity validation
 # ---------------------------------------------------------------------------
 
 SongRole = Literal["vocal", "instrumental"]
 ROLE_VOCAL: SongRole = "vocal"
 ROLE_INSTRUMENTAL: SongRole = "instrumental"
 
-_MIN_STEMS_BY_ROLE: dict[SongRole, int] = {
-    ROLE_VOCAL: 3,         # lead_vocals, backing_vocals, instrumental
-    ROLE_INSTRUMENTAL: 4,  # vocals, drums, bass, guitar, piano, other (at least 4)
+# A cached stem directory is only valid for a role if its WAV file names (the
+# stem identities) exactly match one of the intended separation shapes for that
+# role. This rejects mismatched blobs (e.g. a 6-stem instrumental separation
+# cached under the vocal role) and partial caches that pass a count-only check.
+#
+# vocal:
+#   - modal/MelBand:   {lead_vocals, backing_vocals, instrumental}
+#   - local fallback:  {lead_vocals, instrumental}  (intentionally accepted)
+# instrumental:
+#   - modal/BS-RoFormer: {vocals, drums, bass, guitar, piano, other}
+#   - local htdemucs_ft: {vocals, drums, bass, other}
+_VALID_STEM_SETS_BY_ROLE: dict[SongRole, tuple[frozenset[str], ...]] = {
+    ROLE_VOCAL: (
+        frozenset(VOCAL_SONG_STEMS),
+        frozenset({"lead_vocals", "instrumental"}),
+    ),
+    ROLE_INSTRUMENTAL: (
+        frozenset({"vocals", "drums", "bass", "guitar", "piano", "other"}),
+        frozenset({"vocals", "drums", "bass", "other"}),
+    ),
 }
+
+# Secondary floor for the instrumental full-cache contract: even a known
+# identity set must contain at least this many stems. Guards against a future
+# accepted shape with fewer than 4 stems satisfying the full-cache fast path.
+_MIN_INSTRUMENTAL_STEMS = 4
+
+
+def _stems_valid_for_role(role: SongRole, wav_files: list[Path]) -> bool:
+    """Return True iff the WAV file names exactly match a known shape for role.
+
+    Identities are derived from each path's ``.stem`` (filename without
+    extension). Replaces the old count-only validation so a role's cache can
+    only be considered usable when it actually holds that role's stems.
+    """
+    if role not in _VALID_STEM_SETS_BY_ROLE:
+        raise ValueError(
+            f"Invalid role {role!r}, must be one of {tuple(_VALID_STEM_SETS_BY_ROLE)}"
+        )
+    names = {f.stem for f in wav_files}
+    if role == ROLE_INSTRUMENTAL and len(names) < _MIN_INSTRUMENTAL_STEMS:
+        return False
+    return frozenset(names) in _VALID_STEM_SETS_BY_ROLE[role]
 
 # ---------------------------------------------------------------------------
 # Redis connection
@@ -93,17 +133,9 @@ def _meta_key(video_id: str) -> str:
 
 def _stems_key(video_id: str, role: SongRole) -> str:
     """Redis key for role-specific stems path: song:{video_id}:{role}:stems"""
-    if role not in _MIN_STEMS_BY_ROLE:
-        raise ValueError(f"Invalid role {role!r}, must be one of {tuple(_MIN_STEMS_BY_ROLE)}")
+    if role not in _VALID_STEM_SETS_BY_ROLE:
+        raise ValueError(f"Invalid role {role!r}, must be one of {tuple(_VALID_STEM_SETS_BY_ROLE)}")
     return f"song:{video_id}:{role}:stems"
-
-
-def _min_stems_for_role(role: SongRole) -> int:
-    """Return the minimum stem file count for a given role."""
-    try:
-        return _MIN_STEMS_BY_ROLE[role]
-    except KeyError:
-        raise ValueError(f"Invalid role {role!r}, must be one of {tuple(_MIN_STEMS_BY_ROLE)}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +277,7 @@ def _resolve_stems_path(r: redis.Redis, video_id: str, role: SongRole) -> tuple[
         return stems_path, False
 
     wav_files = list(cached_stems_dir.glob("*.wav"))
-    return stems_path, len(wav_files) >= _min_stems_for_role(role)
+    return stems_path, _stems_valid_for_role(role, wav_files)
 
 
 # ---------------------------------------------------------------------------
@@ -324,15 +356,34 @@ def cache_song_metadata(
 
 
 def cache_song_stems(video_id: str, role: SongRole, stems_dir: Path) -> None:
-    """Copy stems to a role-qualified cache directory and update Redis.
+    """Replace the role-qualified cache directory with fresh stems and update Redis.
 
-    Writes stems_path to song:{video_id}:{role}:stems as a plain Redis string.
+    The role directory is pruned (rmtree + recreate) before copying so a recache
+    cannot leave stale WAVs (e.g. legacy 6-stem blobs) beside the new stems —
+    making the cache self-healing. Writes stems_path to
+    song:{video_id}:{role}:stems as a plain Redis string only after the copied
+    stem names validate for the role.
     """
     cache_dir = settings.song_cache_dir / video_id / role
+
+    # Prune any existing (possibly stale/corrupt) role directory, then recreate.
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     for wav_file in stems_dir.glob("*.wav"):
         shutil.copy2(wav_file, cache_dir / wav_file.name)
+
+    copied = list(cache_dir.glob("*.wav"))
+    if not _stems_valid_for_role(role, copied):
+        logger.warning(
+            "Refusing to cache stems for video %s (role=%s): copied stems %s do not "
+            "match a valid shape for this role",
+            video_id,
+            role,
+            sorted(f.stem for f in copied),
+        )
+        return
 
     try:
         r = _get_redis()
@@ -345,14 +396,15 @@ def cache_song_stems(video_id: str, role: SongRole, stems_dir: Path) -> None:
 def get_cached_stems(video_id: str, role: SongRole, output_dir: Path) -> bool:
     """Copy cached stems to output_dir. Returns True if stems were found.
 
-    Uses role-aware stem count validation: vocal needs >= 3, instrumental >= 4.
+    Uses role-aware stem identity validation: the cached WAV names must exactly
+    match a known separation shape for the role (see ``_stems_valid_for_role``).
     """
     cache_dir = settings.song_cache_dir / video_id / role
     if not cache_dir.is_dir():
         return False
 
     wav_files = list(cache_dir.glob("*.wav"))
-    if len(wav_files) < _min_stems_for_role(role):
+    if not _stems_valid_for_role(role, wav_files):
         return False
 
     output_dir.mkdir(parents=True, exist_ok=True)

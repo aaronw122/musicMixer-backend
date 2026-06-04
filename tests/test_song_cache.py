@@ -1,11 +1,13 @@
 """Tests for musicmixer.services.song_cache — Redis-backed per-song cache."""
 
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
 import soundfile as sf
 
+from musicmixer.config import settings
 from musicmixer.models import (
     AudioMetadata,
     ChordEvent,
@@ -26,7 +28,9 @@ from musicmixer.services.song_cache import (
     ROLE_INSTRUMENTAL,
     ROLE_VOCAL,
     SongRole,
-    _MIN_STEMS_BY_ROLE,
+    _MIN_INSTRUMENTAL_STEMS,
+    _VALID_STEM_SETS_BY_ROLE,
+    _stems_valid_for_role,
     _deserialize_audio_metadata,
     _deserialize_lyrics,
     _get_redis,
@@ -546,7 +550,7 @@ class TestRoleAwareCache:
         assert inst_result.has_stems is True
 
     def test_vocal_role_stem_validation(self, clean_redis, tmp_path):
-        """Vocal role requires >= 3 stems to set has_stems=True."""
+        """Vocal role with the full modal vocal shape sets has_stems=True."""
         _cache_test_metadata("test_vid_voc_valid")
         _cache_test_stems("test_vid_voc_valid", ROLE_VOCAL, tmp_path)
 
@@ -555,7 +559,7 @@ class TestRoleAwareCache:
         assert result.has_stems is True
 
     def test_vocal_role_insufficient_stems(self, clean_redis, tmp_path):
-        """Vocal role with < 3 stems sets has_stems=False."""
+        """Vocal role with a non-accepted partial shape sets has_stems=False."""
         sparse_dir = tmp_path / "sparse_stems"
         sparse_dir.mkdir(parents=True, exist_ok=True)
         _make_wav(sparse_dir / "lead_vocals.wav")
@@ -568,7 +572,7 @@ class TestRoleAwareCache:
         assert result.has_stems is False
 
     def test_instrumental_role_stem_validation(self, clean_redis, tmp_stems):
-        """Instrumental role requires >= 4 stems to set has_stems=True."""
+        """Instrumental role with the full modal 6-stem shape sets has_stems=True."""
         _cache_test_metadata("test_vid_inst_valid")
         cache_song_stems("test_vid_inst_valid", ROLE_INSTRUMENTAL, tmp_stems)
 
@@ -577,7 +581,7 @@ class TestRoleAwareCache:
         assert result.has_stems is True
 
     def test_instrumental_role_insufficient_stems(self, clean_redis, tmp_path):
-        """Instrumental role with < 4 stems sets has_stems=False."""
+        """Instrumental role with a non-accepted partial shape sets has_stems=False."""
         sparse_dir = tmp_path / "sparse_inst"
         sparse_dir.mkdir(parents=True, exist_ok=True)
         _make_wav(sparse_dir / "vocals.wav")
@@ -646,6 +650,238 @@ class TestRoleAwareCache:
         assert result is None
 
     def test_constants_values(self):
-        """Verify module-level constants have expected values."""
-        assert _MIN_STEMS_BY_ROLE[ROLE_VOCAL] == 3
-        assert _MIN_STEMS_BY_ROLE[ROLE_INSTRUMENTAL] == 4
+        """Verify module-level validation constants have expected values."""
+        assert _MIN_INSTRUMENTAL_STEMS == 4
+        assert _VALID_STEM_SETS_BY_ROLE[ROLE_VOCAL] == (
+            frozenset({"lead_vocals", "backing_vocals", "instrumental"}),
+            frozenset({"lead_vocals", "instrumental"}),
+        )
+        assert _VALID_STEM_SETS_BY_ROLE[ROLE_INSTRUMENTAL] == (
+            frozenset({"vocals", "drums", "bass", "guitar", "piano", "other"}),
+            frozenset({"vocals", "drums", "bass", "other"}),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Name-aware stem validation (self-healing role cache)
+# ---------------------------------------------------------------------------
+
+# Legacy 6-stem instrumental blob, which the regression window wrongly cached
+# under the vocal role.
+LEGACY_BLOB_NAMES = ["vocals", "drums", "bass", "guitar", "piano", "other"]
+LOCAL_INSTRUMENTAL_NAMES = ["vocals", "drums", "bass", "other"]
+LOCAL_VOCAL_NAMES = ["lead_vocals", "instrumental"]
+
+
+def _make_named_dir(base: Path, names: list[str]) -> Path:
+    """Create a directory containing one minimal WAV per provided stem name."""
+    base.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        _make_wav(base / f"{name}.wav")
+    return base
+
+
+def _seed_corrupt_cache(video_id: str, role: SongRole, names: list[str]) -> Path:
+    """Seed an on-disk role cache dir + Redis stems key directly.
+
+    Bypasses cache_song_stems() so we can simulate a pre-existing corrupt entry
+    (e.g. a legacy blob written before name-aware validation existed).
+    """
+    cache_dir = settings.song_cache_dir / video_id / role
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+    _make_named_dir(cache_dir, names)
+    r = _get_redis()
+    r.set(_stems_key(video_id, role), str(cache_dir))
+    return cache_dir
+
+
+@pytest.fixture
+def clean_disk_cache():
+    """Remove on-disk cache dirs for test video IDs created during a test."""
+    created: list[str] = []
+    yield created
+    for video_id in created:
+        cache_root = settings.song_cache_dir / video_id
+        if cache_root.exists():
+            shutil.rmtree(cache_root)
+
+
+class TestNameAwareStemValidation:
+    """Validation is stem-name aware, not count-only (self-healing role cache)."""
+
+    def test_helper_accepts_modal_vocal_shape(self, tmp_path):
+        d = _make_named_dir(tmp_path / "v", VOCAL_STEM_NAMES)
+        assert _stems_valid_for_role(ROLE_VOCAL, list(d.glob("*.wav"))) is True
+
+    def test_helper_accepts_local_vocal_fallback_shape(self, tmp_path):
+        d = _make_named_dir(tmp_path / "v", LOCAL_VOCAL_NAMES)
+        assert _stems_valid_for_role(ROLE_VOCAL, list(d.glob("*.wav"))) is True
+
+    def test_helper_rejects_partial_vocal_lead_only(self, tmp_path):
+        d = _make_named_dir(tmp_path / "v", ["lead_vocals"])
+        assert _stems_valid_for_role(ROLE_VOCAL, list(d.glob("*.wav"))) is False
+
+    def test_helper_rejects_partial_vocal_lead_plus_backing(self, tmp_path):
+        d = _make_named_dir(tmp_path / "v", ["lead_vocals", "backing_vocals"])
+        assert _stems_valid_for_role(ROLE_VOCAL, list(d.glob("*.wav"))) is False
+
+    def test_helper_rejects_legacy_blob_under_vocal(self, tmp_path):
+        d = _make_named_dir(tmp_path / "v", LEGACY_BLOB_NAMES)
+        assert _stems_valid_for_role(ROLE_VOCAL, list(d.glob("*.wav"))) is False
+
+    def test_helper_accepts_modal_instrumental_shape(self, tmp_path):
+        d = _make_named_dir(tmp_path / "i", STEM_NAMES)
+        assert _stems_valid_for_role(ROLE_INSTRUMENTAL, list(d.glob("*.wav"))) is True
+
+    def test_helper_accepts_local_instrumental_shape(self, tmp_path):
+        d = _make_named_dir(tmp_path / "i", LOCAL_INSTRUMENTAL_NAMES)
+        assert _stems_valid_for_role(ROLE_INSTRUMENTAL, list(d.glob("*.wav"))) is True
+
+    def test_helper_rejects_partial_instrumental_drums_bass(self, tmp_path):
+        d = _make_named_dir(tmp_path / "i", ["drums", "bass"])
+        assert _stems_valid_for_role(ROLE_INSTRUMENTAL, list(d.glob("*.wav"))) is False
+
+    def test_reject_corrupt_vocal_entry_blob(self, clean_redis, clean_disk_cache, tmp_path):
+        """A 6-stem blob seeded under vocal/ is rejected by BOTH validation sites."""
+        video_id = "test_vid_corrupt_vocal"
+        clean_disk_cache.append(video_id)
+        _cache_test_metadata(video_id)
+        _seed_corrupt_cache(video_id, ROLE_VOCAL, LEGACY_BLOB_NAMES)
+
+        result = get_cached_song(video_id, ROLE_VOCAL)
+        assert result is not None
+        assert result.has_stems is False
+
+        output_dir = tmp_path / "restored"
+        assert get_cached_stems(video_id, ROLE_VOCAL, output_dir) is False
+
+    def test_accept_valid_vocal_modal(self, clean_redis, clean_disk_cache, tmp_path):
+        """Modal vocal shape (lead, backing, instrumental) is accepted."""
+        video_id = "test_vid_voc_modal"
+        clean_disk_cache.append(video_id)
+        _cache_test_metadata(video_id)
+        stems = _make_named_dir(tmp_path / "src", VOCAL_STEM_NAMES)
+        cache_song_stems(video_id, ROLE_VOCAL, stems)
+
+        result = get_cached_song(video_id, ROLE_VOCAL)
+        assert result is not None
+        assert result.has_stems is True
+        assert get_cached_stems(video_id, ROLE_VOCAL, tmp_path / "out") is True
+
+    def test_accept_valid_vocal_local_fallback(self, clean_redis, clean_disk_cache, tmp_path):
+        """Local fallback vocal shape (lead, instrumental — 2 files) is accepted."""
+        video_id = "test_vid_voc_local"
+        clean_disk_cache.append(video_id)
+        _cache_test_metadata(video_id)
+        stems = _make_named_dir(tmp_path / "src", LOCAL_VOCAL_NAMES)
+        cache_song_stems(video_id, ROLE_VOCAL, stems)
+
+        result = get_cached_song(video_id, ROLE_VOCAL)
+        assert result is not None
+        assert result.has_stems is True
+
+    def test_reject_partial_vocal_entries(self, clean_redis, clean_disk_cache, tmp_path):
+        """Partial / non-accepted vocal shapes never set has_stems=True."""
+        for suffix, names in [
+            ("lead_only", ["lead_vocals"]),
+            ("lead_backing", ["lead_vocals", "backing_vocals"]),
+            ("backing_only", ["backing_vocals"]),
+        ]:
+            video_id = f"test_vid_voc_partial_{suffix}"
+            clean_disk_cache.append(video_id)
+            _cache_test_metadata(video_id)
+            _seed_corrupt_cache(video_id, ROLE_VOCAL, names)
+
+            result = get_cached_song(video_id, ROLE_VOCAL)
+            assert result is not None, suffix
+            assert result.has_stems is False, suffix
+            assert get_cached_stems(video_id, ROLE_VOCAL, tmp_path / f"out_{suffix}") is False, suffix
+
+    def test_instrumental_unaffected_six_stem(self, clean_redis, clean_disk_cache, tmp_path):
+        """The 6-stem instrumental set remains valid."""
+        video_id = "test_vid_inst_six"
+        clean_disk_cache.append(video_id)
+        _cache_test_metadata(video_id)
+        stems = _make_named_dir(tmp_path / "src", STEM_NAMES)
+        cache_song_stems(video_id, ROLE_INSTRUMENTAL, stems)
+
+        result = get_cached_song(video_id, ROLE_INSTRUMENTAL)
+        assert result is not None
+        assert result.has_stems is True
+
+    def test_reject_partial_instrumental_keeps_known_sets(
+        self, clean_redis, clean_disk_cache, tmp_path
+    ):
+        """drums+bass alone invalid; local 4-stem and modal 6-stem remain valid."""
+        # drums + bass alone → invalid
+        bad_id = "test_vid_inst_drums_bass"
+        clean_disk_cache.append(bad_id)
+        _cache_test_metadata(bad_id)
+        _seed_corrupt_cache(bad_id, ROLE_INSTRUMENTAL, ["drums", "bass"])
+        bad = get_cached_song(bad_id, ROLE_INSTRUMENTAL)
+        assert bad is not None
+        assert bad.has_stems is False
+        assert get_cached_stems(bad_id, ROLE_INSTRUMENTAL, tmp_path / "bad_out") is False
+
+        # local 4-stem → valid
+        local_id = "test_vid_inst_local4"
+        clean_disk_cache.append(local_id)
+        _cache_test_metadata(local_id)
+        cache_song_stems(
+            local_id,
+            ROLE_INSTRUMENTAL,
+            _make_named_dir(tmp_path / "local_src", LOCAL_INSTRUMENTAL_NAMES),
+        )
+        local = get_cached_song(local_id, ROLE_INSTRUMENTAL)
+        assert local is not None
+        assert local.has_stems is True
+
+        # modal 6-stem → valid
+        modal_id = "test_vid_inst_modal6"
+        clean_disk_cache.append(modal_id)
+        _cache_test_metadata(modal_id)
+        cache_song_stems(
+            modal_id,
+            ROLE_INSTRUMENTAL,
+            _make_named_dir(tmp_path / "modal_src", STEM_NAMES),
+        )
+        modal = get_cached_song(modal_id, ROLE_INSTRUMENTAL)
+        assert modal is not None
+        assert modal.has_stems is True
+
+    def test_self_heal_prunes_stale_wavs(self, clean_redis, clean_disk_cache, tmp_path):
+        """Recaching a corrupt vocal/ entry replaces the dir with only valid stems.
+
+        Simulates the regression-window state: a 6-stem blob cached under vocal/.
+        Validation rejects it, re-separation runs, and cache_song_stems() with
+        valid vocal output must leave ONLY the valid vocal shape — no legacy
+        WAVs lingering.
+        """
+        video_id = "test_vid_self_heal"
+        clean_disk_cache.append(video_id)
+        _cache_test_metadata(video_id)
+
+        # 1. Seed the corrupt 6-stem blob under vocal/.
+        cache_dir = _seed_corrupt_cache(video_id, ROLE_VOCAL, LEGACY_BLOB_NAMES)
+        assert (cache_dir / "drums.wav").exists()
+
+        # 2. Validation rejects it → re-separation would run.
+        rejected = get_cached_song(video_id, ROLE_VOCAL)
+        assert rejected is not None
+        assert rejected.has_stems is False
+
+        # 3. Re-run "separation" (fresh valid vocal output) and recache.
+        fresh = _make_named_dir(tmp_path / "fresh_vocal", VOCAL_STEM_NAMES)
+        cache_song_stems(video_id, ROLE_VOCAL, fresh)
+
+        # 4. The cache dir now holds ONLY the valid vocal shape.
+        remaining = {f.stem for f in cache_dir.glob("*.wav")}
+        assert remaining == set(VOCAL_STEM_NAMES)
+        for stale in LEGACY_BLOB_NAMES:
+            assert not (cache_dir / f"{stale}.wav").exists(), stale
+
+        # 5. The healed entry is now valid.
+        healed = get_cached_song(video_id, ROLE_VOCAL)
+        assert healed is not None
+        assert healed.has_stems is True
