@@ -101,3 +101,9 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
             root@${{ secrets.HETZNER_HOST }} \
             "sleep 15 && curl -f http://localhost:8880/health"
+
+      - name: Prune stale images
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            root@${{ secrets.HETZNER_HOST }} \
+            'docker image prune -af'
