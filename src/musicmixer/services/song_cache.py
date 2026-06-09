@@ -344,10 +344,12 @@ def _self_heal_degenerate_energy(
 
     stem_paths = {f.stem: f for f in wav_files}
     try:
-        # No audio_path: the original mix is not cached on disk, so energy falls
-        # back to the per-stem sum. The role's cached stems reconstruct the full
-        # mix, so the sum yields real (non-degenerate) energy — sufficient to heal.
-        stem_analysis, song_structure = analyze_stems(
+        # No audio_path / ml_segments: the original mix is not cached on disk, so
+        # energy falls back to the per-stem sum. The role's cached stems
+        # reconstruct the full mix, so the sum yields real (non-degenerate)
+        # energy — sufficient to heal. song_structure from this recompute is
+        # heuristic (no ml_segments), so we do NOT use it (see below).
+        recomputed_stem_analysis, recomputed_structure = analyze_stems(
             stem_paths=stem_paths,
             beat_frames=meta.beat_frames,
             bpm=meta.bpm,
@@ -358,15 +360,24 @@ def _self_heal_degenerate_energy(
         )
         return False
 
-    if _is_degenerate_energy(stem_analysis):
+    if _is_degenerate_energy(recomputed_stem_analysis):
         logger.warning(
             "Self-heal recompute for video %s (role=%s) still degenerate; leaving meta as-is",
             video_id, role,
         )
         return False
 
-    meta.stem_analysis = stem_analysis
-    meta.song_structure = song_structure
+    # Heal ONLY stem_analysis. Section labels (song_structure) were never part of
+    # the energy defect — SongFormer runs on raw audio and is role-independent —
+    # so preserve any existing (likely ML-derived) song_structure rather than
+    # downgrade it to this recompute's heuristic version. Fall back to the
+    # recomputed structure only if the cached one is absent/empty.
+    # NOTE: a healed entry carries per-stem-sum (not raw-mix-anchored) energy, so
+    # role-identity isn't guaranteed for healed entries (still non-degenerate and
+    # strictly better than zeroed).
+    meta.stem_analysis = recomputed_stem_analysis
+    if meta.song_structure is None or not meta.song_structure.sections:
+        meta.song_structure = recomputed_structure
     cache_song_metadata(video_id, title, artist, meta, lyrics)
     logger.info(
         "Self-healed degenerate energy metadata for video %s (role=%s) from cached stems",

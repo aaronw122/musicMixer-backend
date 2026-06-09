@@ -985,6 +985,14 @@ class TestSelfHealDegenerateEnergy:
         before = _deserialize_audio_metadata(raw)
         assert _is_degenerate_energy(before.stem_analysis) is True
 
+        # The seeded meta carries an ML-derived song_structure (SongFormer-style
+        # sections). Section labels were never part of the energy defect, so the
+        # heal must NOT downgrade them to a heuristic recompute.
+        assert before.song_structure is not None
+        assert len(before.song_structure.sections) == 1
+        assert before.song_structure.sections[0].label == "intro"
+        assert before.song_structure.sections[0].section_source == "ml"
+
         # Medium-cache load triggers the self-heal.
         result = get_cached_song(video_id, ROLE_INSTRUMENTAL)
         assert result is not None
@@ -995,10 +1003,53 @@ class TestSelfHealDegenerateEnergy:
         assert result.meta.stem_analysis.combined_energy.size > 0
         assert np.any(result.meta.stem_analysis.combined_energy)
 
+        # ...but the existing ML song_structure is preserved, not replaced by the
+        # recompute's heuristic structure.
+        assert result.meta.song_structure is not None
+        assert len(result.meta.song_structure.sections) == 1
+        assert result.meta.song_structure.sections[0].label == "intro"
+        assert result.meta.song_structure.sections[0].section_source == "ml"
+        assert result.meta.song_structure.total_bars == before.song_structure.total_bars
+
         # And :meta was rewritten in Redis (persisted, not just the returned copy).
         healed_raw = r.hget(_meta_key(video_id), "meta")
         healed = _deserialize_audio_metadata(healed_raw)
         assert _is_degenerate_energy(healed.stem_analysis) is False
+        # Persisted structure is the preserved ML one, too.
+        assert healed.song_structure is not None
+        assert healed.song_structure.sections[0].label == "intro"
+        assert healed.song_structure.sections[0].section_source == "ml"
+
+    def test_self_heal_falls_back_to_recomputed_structure_when_absent(
+        self, clean_redis, clean_disk_cache, tmp_path
+    ):
+        """Degenerate meta with NO existing song_structure → use recomputed one."""
+        video_id = "test_vid_selfheal_no_structure"
+        clean_disk_cache.append(video_id)
+
+        degenerate = _make_degenerate_metadata()
+        degenerate.song_structure = None  # nothing to preserve
+        cache_song_metadata(
+            video_id=video_id,
+            title="Song",
+            artist="Artist",
+            meta=degenerate,
+            lyrics=None,
+        )
+        cache_song_stems(
+            video_id,
+            ROLE_INSTRUMENTAL,
+            _make_named_dir(tmp_path / "inst_src", STEM_NAMES),
+        )
+
+        result = get_cached_song(video_id, ROLE_INSTRUMENTAL)
+        assert result is not None
+        assert result.has_stems is True
+        # Energy healed...
+        assert _is_degenerate_energy(result.meta.stem_analysis) is False
+        # ...and since there was no cached structure, the recomputed one is used
+        # (i.e. structure is now populated rather than left None).
+        assert result.meta.song_structure is not None
 
     def test_no_recompute_when_stems_absent(self, clean_redis, clean_disk_cache):
         """Degenerate meta but NO cached stems → fall through, meta left degenerate."""
