@@ -333,13 +333,17 @@ def _load_stems(
 ) -> dict[str, np.ndarray]:
     """Load stem audio files at the given sample rate.
 
-    Always returns 6 stems (STEM_NAMES). Missing stems are filled with zeros
-    using the length of the first available stem.
+    Loads exactly the stems provided in ``stem_paths`` (stem-shape agnostic:
+    works for the 6-stem instrumental shape, the {lead_vocals, backing_vocals,
+    instrumental} vocal shape, or any other set). The returned dict is keyed by
+    the provided names. ``ref_length`` is taken from the first loaded stem; any
+    stem whose file is missing is zero-filled to that reference length.
     """
     loaded: dict[str, np.ndarray] = {}
+    missing: list[str] = []
     ref_length: int = 0
 
-    for name in STEM_NAMES:
+    for name in stem_paths.keys():
         path = stem_paths.get(name)
         if path is not None and path.exists():
             y, _ = librosa.load(str(path), sr=sr, mono=True)
@@ -347,14 +351,13 @@ def _load_stems(
             if ref_length == 0:
                 ref_length = len(y)
         else:
-            loaded[name] = None  # type: ignore[assignment]
+            missing.append(name)
 
-    # Fill missing stems with zeros of reference length
+    # Fill any missing stems with zeros of reference length
     if ref_length == 0:
         ref_length = 1  # safety: at least 1 sample
-    for name in STEM_NAMES:
-        if loaded[name] is None:
-            loaded[name] = np.zeros(ref_length, dtype=np.float32)
+    for name in missing:
+        loaded[name] = np.zeros(ref_length, dtype=np.float32)
 
     return loaded
 
@@ -362,6 +365,79 @@ def _load_stems(
 # ---------------------------------------------------------------------------
 # 2.1 Adaptive percentile bucketing (normalization pipeline)
 # ---------------------------------------------------------------------------
+
+def _normalize_and_bucket(combined: np.ndarray) -> tuple[np.ndarray, EnergyBuckets]:
+    """Normalize a per-bar energy envelope to p99 = 1.0 and derive bucket thresholds.
+
+    This is the shared normalization core used by both the per-stem combined-energy
+    path (``compute_adaptive_buckets``) and the raw-mix energy path (``analyze_stems``).
+
+    Steps:
+        1. Pre-normalization noise floor filter (0.001 / -60 dBFS) — already applied
+           by callers before summing, and re-applied here for the single-series case.
+        2. Normalize to p99 = 1.0.
+        3. Compute bucket thresholds from active bars (above the bucket noise floor).
+
+    Args:
+        combined: 1D per-bar energy envelope (already summed / noise-floored).
+
+    Returns:
+        (normalized_energy, bucket_thresholds)
+    """
+    combined = combined.astype(np.float64, copy=True)
+
+    if len(combined) == 0:
+        empty = np.array([], dtype=np.float64)
+        return empty, EnergyBuckets(noise_floor=BUCKET_NOISE_FLOOR, p10=0.0, p50=0.0, p85=0.0)
+
+    # Normalize to p99 = 1.0
+    if np.any(combined > 0):
+        p99 = float(np.percentile(combined[combined > 0], 99))
+        if p99 > 0:
+            combined = combined / p99
+        # Clip to prevent extreme outliers
+        combined = np.clip(combined, 0.0, None)
+
+    # Compute adaptive bucket thresholds on active bars (above bucket noise floor)
+    active_mask = combined >= BUCKET_NOISE_FLOOR
+    active_bars = combined[active_mask]
+
+    if len(active_bars) == 0:
+        return combined, EnergyBuckets(
+            noise_floor=BUCKET_NOISE_FLOOR, p10=0.0, p50=0.0, p85=0.0,
+        )
+
+    p10 = float(np.percentile(active_bars, 10))
+    p50 = float(np.percentile(active_bars, 50))
+    p85 = float(np.percentile(active_bars, 85))
+
+    return combined, EnergyBuckets(
+        noise_floor=BUCKET_NOISE_FLOOR, p10=p10, p50=p50, p85=p85,
+    )
+
+
+def compute_full_mix_buckets(
+    full_mix_bar_rms: np.ndarray,
+) -> tuple[np.ndarray, EnergyBuckets]:
+    """Compute normalized combined energy + bucket thresholds from the raw-mix envelope.
+
+    Unlike ``compute_adaptive_buckets`` (which sums per-stem RMS), this anchors the
+    energy envelope to the raw mix — a role-independent source — so the result is
+    identical regardless of how the song was separated (vocal-shape vs 6-stem).
+
+    Applies the pre-normalization noise floor filter, then the shared normalize-and-
+    bucket core.
+
+    Returns:
+        (combined_energy, bucket_thresholds)
+    """
+    rms = full_mix_bar_rms.astype(np.float64, copy=True)
+    if len(rms) == 0:
+        empty = np.array([], dtype=np.float64)
+        return empty, EnergyBuckets(noise_floor=BUCKET_NOISE_FLOOR, p10=0.0, p50=0.0, p85=0.0)
+    rms[rms < PRE_NORM_NOISE_FLOOR] = 0.0
+    return _normalize_and_bucket(rms)
+
 
 def compute_adaptive_buckets(
     bar_rms_per_stem: dict[str, np.ndarray],
@@ -400,30 +476,8 @@ def compute_adaptive_buckets(
     for name in stem_names:
         combined += filtered_rms[name]
 
-    # Step 3: Normalize to p99 = 1.0
-    if len(combined) > 0 and np.any(combined > 0):
-        p99 = float(np.percentile(combined[combined > 0], 99))
-        if p99 > 0:
-            combined = combined / p99
-        # Clip to prevent extreme outliers
-        combined = np.clip(combined, 0.0, None)
-
-    # Step 4: Compute adaptive bucket thresholds on active bars (above bucket noise floor)
-    active_mask = combined >= BUCKET_NOISE_FLOOR
-    active_bars = combined[active_mask]
-
-    if len(active_bars) == 0:
-        return combined, EnergyBuckets(
-            noise_floor=BUCKET_NOISE_FLOOR, p10=0.0, p50=0.0, p85=0.0,
-        )
-
-    p10 = float(np.percentile(active_bars, 10))
-    p50 = float(np.percentile(active_bars, 50))
-    p85 = float(np.percentile(active_bars, 85))
-
-    return combined, EnergyBuckets(
-        noise_floor=BUCKET_NOISE_FLOOR, p10=p10, p50=p50, p85=p85,
-    )
+    # Steps 3-4: Normalize to p99 = 1.0 and derive adaptive bucket thresholds
+    return _normalize_and_bucket(combined)
 
 
 def classify_energy(value: float, buckets: EnergyBuckets) -> str:
@@ -1618,7 +1672,7 @@ def _enrich_sections(
 
 def _empty_analysis_result() -> tuple[StemAnalysis, SongStructure]:
     """Return a minimal empty result when there are no bars or audio to analyze."""
-    empty_rms: dict[str, np.ndarray] = {n: np.array([]) for n in STEM_NAMES}
+    empty_rms: dict[str, np.ndarray] = {}
     stem_analysis = StemAnalysis(
         bar_rms=empty_rms,
         combined_energy=np.array([]),
@@ -1650,10 +1704,15 @@ def analyze_stems(
     7. Run section detection (ML-based if ml_segments provided, else heuristic).
 
     Args:
-        stem_paths: Dict mapping stem name to WAV file path.
+        stem_paths: Dict mapping stem name to WAV file path. May be the 6-stem
+            instrumental shape or the {lead_vocals, backing_vocals, instrumental}
+            vocal shape — loading is stem-shape agnostic.
         beat_frames: Reconciled beat frame positions.
         bpm: Reconciled BPM.
-        audio_path: Path to original mix audio (for BPM re-detection if needed).
+        audio_path: Path to original mix audio. Used for BPM re-detection and, when
+            provided, to anchor ``combined_energy`` + bucket thresholds to the raw
+            mix's per-bar envelope (a role-independent source). When absent, energy
+            falls back to the per-stem sum.
         ml_segments: Optional ML-detected segments from structure_ml. If provided
             and non-empty, these are converted to SectionInfo and enriched with
             audio features, skipping the heuristic detection path.
@@ -1672,12 +1731,12 @@ def analyze_stems(
             beat_frames = beat_frames_d
             logger.info("Re-detected BPM from drums: %.1f", bpm)
 
-    # Load all stems
+    # Load all stems (exactly the stems provided, any shape)
     stems = _load_stems(stem_paths, sr=ANALYSIS_SR)
 
-    # Find reference audio length (use first non-zero stem)
+    # Find reference audio length (use longest loaded stem)
     audio_length = 0
-    for name in STEM_NAMES:
+    for name in stems.keys():
         if len(stems[name]) > audio_length:
             audio_length = len(stems[name])
 
@@ -1692,16 +1751,35 @@ def analyze_stems(
     if total_bars <= 0:
         return _empty_analysis_result()
 
-    # Compute per-bar RMS for each stem (raw values)
+    # Compute per-bar RMS for each provided stem (raw values)
     bar_rms: dict[str, np.ndarray] = {}
-    for name in STEM_NAMES:
+    for name in stems.keys():
         bar_rms[name] = _compute_bar_rms(stems[name], bar_boundaries)
 
-    # Normalization pipeline: combined energy + adaptive buckets
-    combined_energy, buckets = compute_adaptive_buckets(bar_rms)
+    # Normalization pipeline: combined energy + adaptive buckets.
+    # Anchor energy to the raw mix (role-independent) when audio_path is available;
+    # otherwise fall back to the per-stem sum. The raw-mix path guarantees identical
+    # energy metadata regardless of which separator (vocal-shape vs 6-stem) produced
+    # the stems for this song.
+    combined_energy: np.ndarray
+    buckets: EnergyBuckets
+    if audio_path is not None and Path(audio_path).exists():
+        y_mix, _ = librosa.load(str(audio_path), sr=ANALYSIS_SR, mono=True)
+        full_mix_bar_rms = _compute_bar_rms(y_mix, bar_boundaries)
+        combined_energy, buckets = compute_full_mix_buckets(full_mix_bar_rms)
+    else:
+        combined_energy, buckets = compute_adaptive_buckets(bar_rms)
 
-    # Vocal activity detection
-    vocal_rms = bar_rms.get("vocals", np.zeros(total_bars))
+    # Vocal activity detection (role-shape aware: 6-stem "vocals" or vocal-shape
+    # lead/backing vocals)
+    if "vocals" in bar_rms:
+        vocal_rms = bar_rms["vocals"]
+    elif "lead_vocals" in bar_rms:
+        vocal_rms = bar_rms["lead_vocals"].copy()
+        if "backing_vocals" in bar_rms:
+            vocal_rms = vocal_rms + bar_rms["backing_vocals"]
+    else:
+        vocal_rms = np.zeros(total_bars)
     vocal_active = detect_vocal_activity(vocal_rms)
 
     # Vocal gap detection
@@ -1718,7 +1796,7 @@ def analyze_stems(
         )
         # Find a reference audio array for enrichment (use first non-empty stem)
         ref_audio = np.zeros(1, dtype=np.float32)
-        for name in STEM_NAMES:
+        for name in stems.keys():
             if len(stems[name]) > 0:
                 ref_audio = stems[name]
                 break
