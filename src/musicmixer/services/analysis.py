@@ -336,8 +336,12 @@ def _load_stems(
     Loads exactly the stems provided in ``stem_paths`` (stem-shape agnostic:
     works for the 6-stem instrumental shape, the {lead_vocals, backing_vocals,
     instrumental} vocal shape, or any other set). The returned dict is keyed by
-    the provided names. ``ref_length`` is taken from the first loaded stem; any
-    stem whose file is missing is zero-filled to that reference length.
+    the provided names.
+
+    Real callers (the pipeline and self-heal paths) filter ``stem_paths`` to
+    existing files before calling, so the missing-stem branch is a defensive
+    fallback for direct callers that pass non-existent paths: any such stem is
+    zero-filled to ``ref_length`` (the length of the first loaded stem).
     """
     loaded: dict[str, np.ndarray] = {}
     missing: list[str] = []
@@ -372,11 +376,13 @@ def _normalize_and_bucket(combined: np.ndarray) -> tuple[np.ndarray, EnergyBucke
     This is the shared normalization core used by both the per-stem combined-energy
     path (``compute_adaptive_buckets``) and the raw-mix energy path (``analyze_stems``).
 
+    Precondition: the caller has already applied the pre-normalization noise floor
+    filter (``PRE_NORM_NOISE_FLOOR``, 0.001 / -60 dBFS) and any per-stem summing. This
+    helper does NOT re-apply that floor — it only normalizes and buckets.
+
     Steps:
-        1. Pre-normalization noise floor filter (0.001 / -60 dBFS) — already applied
-           by callers before summing, and re-applied here for the single-series case.
-        2. Normalize to p99 = 1.0.
-        3. Compute bucket thresholds from active bars (above the bucket noise floor).
+        1. Normalize to p99 = 1.0.
+        2. Compute bucket thresholds from active bars (above ``BUCKET_NOISE_FLOOR``).
 
     Args:
         combined: 1D per-bar energy envelope (already summed / noise-floored).
@@ -1686,6 +1692,46 @@ def _empty_analysis_result() -> tuple[StemAnalysis, SongStructure]:
     return stem_analysis, song_structure
 
 
+def _compute_combined_energy(
+    bar_rms: dict[str, np.ndarray],
+    bar_boundaries: np.ndarray,
+    audio_path: Optional[Path],
+) -> tuple[np.ndarray, EnergyBuckets]:
+    """Compute the per-bar combined energy envelope and adaptive bucket thresholds.
+
+    Anchor energy to the raw mix (a role-independent source) when ``audio_path`` is
+    available: load the raw mix, compute its per-bar RMS, and bucket that. This
+    guarantees identical energy metadata regardless of which separator (vocal-shape
+    vs 6-stem) produced the stems for this song. When the raw mix is unavailable,
+    fall back to the per-stem sum via ``compute_adaptive_buckets``.
+    """
+    if audio_path is not None and Path(audio_path).exists():
+        y_mix, _ = librosa.load(str(audio_path), sr=ANALYSIS_SR, mono=True)
+        full_mix_bar_rms = _compute_bar_rms(y_mix, bar_boundaries)
+        return compute_full_mix_buckets(full_mix_bar_rms)
+    return compute_adaptive_buckets(bar_rms)
+
+
+def _vocal_rms_for_activity(
+    bar_rms: dict[str, np.ndarray],
+    total_bars: int,
+) -> np.ndarray:
+    """Derive the per-bar vocal RMS series used for vocal-activity detection.
+
+    Role-shape aware: uses the 6-stem ``vocals`` series when present, otherwise sums
+    the vocal-shape ``lead_vocals`` (+ ``backing_vocals``) series. Returns zeros when
+    no vocal stem is present.
+    """
+    if "vocals" in bar_rms:
+        return bar_rms["vocals"]
+    if "lead_vocals" in bar_rms:
+        vocal_rms = bar_rms["lead_vocals"].copy()
+        if "backing_vocals" in bar_rms:
+            vocal_rms = vocal_rms + bar_rms["backing_vocals"]
+        return vocal_rms
+    return np.zeros(total_bars)
+
+
 def analyze_stems(
     stem_paths: dict[str, Path],
     beat_frames: np.ndarray,
@@ -1756,30 +1802,12 @@ def analyze_stems(
     for name in stems.keys():
         bar_rms[name] = _compute_bar_rms(stems[name], bar_boundaries)
 
-    # Normalization pipeline: combined energy + adaptive buckets.
-    # Anchor energy to the raw mix (role-independent) when audio_path is available;
-    # otherwise fall back to the per-stem sum. The raw-mix path guarantees identical
-    # energy metadata regardless of which separator (vocal-shape vs 6-stem) produced
-    # the stems for this song.
-    combined_energy: np.ndarray
-    buckets: EnergyBuckets
-    if audio_path is not None and Path(audio_path).exists():
-        y_mix, _ = librosa.load(str(audio_path), sr=ANALYSIS_SR, mono=True)
-        full_mix_bar_rms = _compute_bar_rms(y_mix, bar_boundaries)
-        combined_energy, buckets = compute_full_mix_buckets(full_mix_bar_rms)
-    else:
-        combined_energy, buckets = compute_adaptive_buckets(bar_rms)
+    # Combined energy + adaptive bucket thresholds (raw-mix anchored when available).
+    combined_energy, buckets = _compute_combined_energy(bar_rms, bar_boundaries, audio_path)
 
     # Vocal activity detection (role-shape aware: 6-stem "vocals" or vocal-shape
     # lead/backing vocals)
-    if "vocals" in bar_rms:
-        vocal_rms = bar_rms["vocals"]
-    elif "lead_vocals" in bar_rms:
-        vocal_rms = bar_rms["lead_vocals"].copy()
-        if "backing_vocals" in bar_rms:
-            vocal_rms = vocal_rms + bar_rms["backing_vocals"]
-    else:
-        vocal_rms = np.zeros(total_bars)
+    vocal_rms = _vocal_rms_for_activity(bar_rms, total_bars)
     vocal_active = detect_vocal_activity(vocal_rms)
 
     # Vocal gap detection

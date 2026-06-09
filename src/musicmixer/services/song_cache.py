@@ -106,12 +106,6 @@ def _stems_valid_for_role(role: SongRole, wav_files: list[Path]) -> bool:
 def _is_degenerate_energy(stem_analysis: StemAnalysis | None) -> bool:
     """Return True iff a cached ``StemAnalysis`` carries zeroed-out energy.
 
-    A vocal-source analysis written before the Phase 1 fix (and any legacy entry
-    where the instrumental stem was dropped) stores an empty/all-zero
-    ``combined_energy`` with ``vocal_active`` all-false. Such metadata is shared
-    role-independently via ``song:{video_id}:meta``, so reusing it for an
-    instrumental source feeds the arrangement flat energy.
-
     Degenerate iff ``combined_energy`` is empty OR all-zero, AND ``vocal_active``
     is all-false. The conjunction avoids flagging a genuinely quiet-but-valid
     analysis: real energy is never both flat *and* devoid of any vocal activity.
@@ -311,6 +305,73 @@ def _resolve_stems_path(r: redis.Redis, video_id: str, role: SongRole) -> tuple[
 # Public API
 # ---------------------------------------------------------------------------
 
+def _recompute_analysis_from_cached_stems(
+    video_id: str,
+    role: SongRole,
+    meta: AudioMetadata,
+    stems_path: str,
+) -> tuple[StemAnalysis, SongStructure] | None:
+    """Recompute ``analyze_stems`` from the role's on-disk stems, or None if unusable.
+
+    Returns None when the cached stems are invalid for the role, the recompute
+    raises, or the recomputed energy is still degenerate. No audio_path/ml_segments
+    are passed: the original mix is not cached on disk, so energy falls back to the
+    per-stem sum. The role's cached stems reconstruct the full mix, so that sum
+    yields real (non-degenerate) energy — sufficient to heal.
+    """
+    # Imported lazily: analysis pulls in librosa/soundfile, which are heavy and
+    # only needed on the rare degenerate path (keeps cache lookups cheap).
+    from musicmixer.services.analysis import analyze_stems
+
+    wav_files = list(Path(stems_path).glob("*.wav"))
+    if not _stems_valid_for_role(role, wav_files):
+        return None
+
+    stem_paths = {f.stem: f for f in wav_files}
+    try:
+        recomputed_stem_analysis, recomputed_structure = analyze_stems(
+            stem_paths=stem_paths,
+            beat_frames=meta.beat_frames,
+            bpm=meta.bpm,
+        )
+    except Exception:
+        logger.warning(
+            "Self-heal recompute failed for video %s (role=%s)", video_id, role, exc_info=True
+        )
+        return None
+
+    if _is_degenerate_energy(recomputed_stem_analysis):
+        logger.warning(
+            "Self-heal recompute for video %s (role=%s) still degenerate; leaving meta as-is",
+            video_id, role,
+        )
+        return None
+
+    return recomputed_stem_analysis, recomputed_structure
+
+
+def _apply_healed_stem_analysis(
+    meta: AudioMetadata,
+    recomputed_stem_analysis: StemAnalysis,
+    recomputed_structure: SongStructure,
+) -> None:
+    """Swap fresh ``stem_analysis`` into ``meta`` while preserving its song structure.
+
+    Heal ONLY stem_analysis. Section labels (song_structure) were never part of the
+    energy defect — SongFormer runs on raw audio and is role-independent — so
+    preserve any existing (likely ML-derived) song_structure rather than downgrade
+    it to this recompute's heuristic version. Fall back to the recomputed structure
+    only if the cached one is absent/empty.
+
+    NOTE: a healed entry carries per-stem-sum (not raw-mix-anchored) energy, so
+    role-identity isn't guaranteed for healed entries (still non-degenerate and
+    strictly better than zeroed).
+    """
+    meta.stem_analysis = recomputed_stem_analysis
+    if meta.song_structure is None or not meta.song_structure.sections:
+        meta.song_structure = recomputed_structure
+
+
 def _self_heal_degenerate_energy(
     video_id: str,
     role: SongRole,
@@ -322,62 +383,25 @@ def _self_heal_degenerate_energy(
 ) -> bool:
     """Recompute zeroed energy metadata in place from the role's cached stems.
 
-    Mirrors the #232 stem-cache self-heal, but for the shared meta key: when a
-    medium-cache hit carries a degenerate ``stem_analysis`` (energy written by a
-    pre-Phase-1 vocal-source analysis) and the requested role's stems are cached
-    on disk, recompute ``analyze_stems`` from those on-disk stems — no
-    re-download, no re-separation — and overwrite ``song:{video_id}:meta`` so the
-    cache self-corrects. ``meta.stem_analysis`` / ``meta.song_structure`` are
-    updated in place; returns True iff the recompute produced non-degenerate
-    energy and the meta was rewritten.
+    Background: a vocal-source analysis written before the Phase 1 fix (and any
+    legacy entry where the instrumental stem was dropped) stores zeroed energy.
+    Because metadata is shared role-independently via ``song:{video_id}:meta``,
+    reusing it for an instrumental source feeds the arrangement flat energy. This
+    mirrors the #232 stem-cache self-heal but targets the shared meta key.
+
+    Policy: recompute from the role's on-disk stems (no re-download/re-separation),
+    apply the fresh stem_analysis while preserving existing song_structure, then
+    overwrite ``song:{video_id}:meta``. ``meta`` is updated in place; returns True
+    iff the recompute produced non-degenerate energy and the meta was rewritten.
 
     Self-limiting: only fires on a degenerate hit with valid on-disk stems.
     """
-    # Imported lazily: analysis pulls in librosa/soundfile, which are heavy and
-    # only needed on the rare degenerate path (keeps cache lookups cheap).
-    from musicmixer.services.analysis import analyze_stems
-
-    cache_dir = Path(stems_path)
-    wav_files = list(cache_dir.glob("*.wav"))
-    if not _stems_valid_for_role(role, wav_files):
+    recomputed = _recompute_analysis_from_cached_stems(video_id, role, meta, stems_path)
+    if recomputed is None:
         return False
 
-    stem_paths = {f.stem: f for f in wav_files}
-    try:
-        # No audio_path / ml_segments: the original mix is not cached on disk, so
-        # energy falls back to the per-stem sum. The role's cached stems
-        # reconstruct the full mix, so the sum yields real (non-degenerate)
-        # energy — sufficient to heal. song_structure from this recompute is
-        # heuristic (no ml_segments), so we do NOT use it (see below).
-        recomputed_stem_analysis, recomputed_structure = analyze_stems(
-            stem_paths=stem_paths,
-            beat_frames=meta.beat_frames,
-            bpm=meta.bpm,
-        )
-    except Exception:
-        logger.warning(
-            "Self-heal recompute failed for video %s (role=%s)", video_id, role, exc_info=True
-        )
-        return False
-
-    if _is_degenerate_energy(recomputed_stem_analysis):
-        logger.warning(
-            "Self-heal recompute for video %s (role=%s) still degenerate; leaving meta as-is",
-            video_id, role,
-        )
-        return False
-
-    # Heal ONLY stem_analysis. Section labels (song_structure) were never part of
-    # the energy defect — SongFormer runs on raw audio and is role-independent —
-    # so preserve any existing (likely ML-derived) song_structure rather than
-    # downgrade it to this recompute's heuristic version. Fall back to the
-    # recomputed structure only if the cached one is absent/empty.
-    # NOTE: a healed entry carries per-stem-sum (not raw-mix-anchored) energy, so
-    # role-identity isn't guaranteed for healed entries (still non-degenerate and
-    # strictly better than zeroed).
-    meta.stem_analysis = recomputed_stem_analysis
-    if meta.song_structure is None or not meta.song_structure.sections:
-        meta.song_structure = recomputed_structure
+    recomputed_stem_analysis, recomputed_structure = recomputed
+    _apply_healed_stem_analysis(meta, recomputed_stem_analysis, recomputed_structure)
     cache_song_metadata(video_id, title, artist, meta, lyrics)
     logger.info(
         "Self-healed degenerate energy metadata for video %s (role=%s) from cached stems",
