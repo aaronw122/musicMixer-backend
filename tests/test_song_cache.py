@@ -30,6 +30,7 @@ from musicmixer.services.song_cache import (
     SongRole,
     _MIN_INSTRUMENTAL_STEMS,
     _VALID_STEM_SETS_BY_ROLE,
+    _is_degenerate_energy,
     _stems_valid_for_role,
     _deserialize_audio_metadata,
     _deserialize_lyrics,
@@ -885,3 +886,166 @@ class TestNameAwareStemValidation:
         healed = get_cached_song(video_id, ROLE_VOCAL)
         assert healed is not None
         assert healed.has_stems is True
+
+
+# ---------------------------------------------------------------------------
+# Self-heal: degenerate (zeroed) energy metadata on a medium-cache hit
+# ---------------------------------------------------------------------------
+
+def _make_degenerate_metadata() -> AudioMetadata:
+    """AudioMetadata whose stem_analysis carries zeroed-out energy.
+
+    Mirrors what a pre-Phase-1 vocal-source analysis wrote: empty/all-zero
+    combined_energy + all-false vocal_active in the shared meta. beat_frames is
+    short (<4) so analyze_stems treats the whole stem as a single bar — enough to
+    recompute real energy from short test WAVs.
+    """
+    meta = _make_audio_metadata()
+    meta.beat_frames = np.array([0, 1])  # <4 beats → one bar over the full stem
+    meta.stem_analysis = StemAnalysis(
+        bar_rms={},
+        combined_energy=np.array([]),
+        vocal_active=np.array([], dtype=bool),
+        vocal_gaps=[],
+        bucket_thresholds=EnergyBuckets(noise_floor=0.0, p10=0.0, p50=0.0, p85=0.0),
+    )
+    return meta
+
+
+class TestDegenerateEnergyPredicate:
+    """_is_degenerate_energy flags zeroed energy, passes healthy analyses."""
+
+    def test_empty_combined_energy_is_degenerate(self):
+        sa = StemAnalysis(
+            bar_rms={},
+            combined_energy=np.array([]),
+            vocal_active=np.array([], dtype=bool),
+            vocal_gaps=[],
+            bucket_thresholds=EnergyBuckets(noise_floor=0.0, p10=0.0, p50=0.0, p85=0.0),
+        )
+        assert _is_degenerate_energy(sa) is True
+
+    def test_all_zero_energy_all_false_vocals_is_degenerate(self):
+        sa = StemAnalysis(
+            bar_rms={},
+            combined_energy=np.array([0.0, 0.0, 0.0]),
+            vocal_active=np.array([False, False, False]),
+            vocal_gaps=[],
+            bucket_thresholds=EnergyBuckets(noise_floor=0.0, p10=0.0, p50=0.0, p85=0.0),
+        )
+        assert _is_degenerate_energy(sa) is True
+
+    def test_healthy_energy_is_not_degenerate(self):
+        sa = _make_audio_metadata().stem_analysis
+        assert _is_degenerate_energy(sa) is False
+
+    def test_zero_energy_but_active_vocals_is_not_degenerate(self):
+        # Energy flat but vocals detected → not the zeroed-meta defect.
+        sa = StemAnalysis(
+            bar_rms={},
+            combined_energy=np.array([0.0, 0.0, 0.0]),
+            vocal_active=np.array([False, True, False]),
+            vocal_gaps=[],
+            bucket_thresholds=EnergyBuckets(noise_floor=0.0, p10=0.0, p50=0.0, p85=0.0),
+        )
+        assert _is_degenerate_energy(sa) is False
+
+    def test_none_analysis_is_not_degenerate(self):
+        assert _is_degenerate_energy(None) is False
+
+
+class TestSelfHealDegenerateEnergy:
+    """A degenerate medium-cache hit with cached stems recomputes + rewrites meta."""
+
+    def test_self_heal_recomputes_and_rewrites_meta(
+        self, clean_redis, clean_disk_cache, tmp_path
+    ):
+        """Degenerate meta + valid on-disk instrumental stems → energy recomputed."""
+        video_id = "test_vid_selfheal_energy"
+        clean_disk_cache.append(video_id)
+
+        # Seed a degenerate meta (zeroed energy) in Redis.
+        cache_song_metadata(
+            video_id=video_id,
+            title="Song",
+            artist="Artist",
+            meta=_make_degenerate_metadata(),
+            lyrics=None,
+        )
+        # Seed valid instrumental stems on disk (real sine-wave audio).
+        cache_song_stems(
+            video_id,
+            ROLE_INSTRUMENTAL,
+            _make_named_dir(tmp_path / "inst_src", STEM_NAMES),
+        )
+
+        # Sanity: what's in Redis right now is degenerate.
+        r = clean_redis
+        raw = r.hget(_meta_key(video_id), "meta")
+        before = _deserialize_audio_metadata(raw)
+        assert _is_degenerate_energy(before.stem_analysis) is True
+
+        # Medium-cache load triggers the self-heal.
+        result = get_cached_song(video_id, ROLE_INSTRUMENTAL)
+        assert result is not None
+        assert result.has_stems is True
+
+        # Returned meta now carries real energy.
+        assert _is_degenerate_energy(result.meta.stem_analysis) is False
+        assert result.meta.stem_analysis.combined_energy.size > 0
+        assert np.any(result.meta.stem_analysis.combined_energy)
+
+        # And :meta was rewritten in Redis (persisted, not just the returned copy).
+        healed_raw = r.hget(_meta_key(video_id), "meta")
+        healed = _deserialize_audio_metadata(healed_raw)
+        assert _is_degenerate_energy(healed.stem_analysis) is False
+
+    def test_no_recompute_when_stems_absent(self, clean_redis, clean_disk_cache):
+        """Degenerate meta but NO cached stems → fall through, meta left degenerate."""
+        video_id = "test_vid_selfheal_no_stems"
+        clean_disk_cache.append(video_id)
+        cache_song_metadata(
+            video_id=video_id,
+            title="Song",
+            artist="Artist",
+            meta=_make_degenerate_metadata(),
+            lyrics=None,
+        )
+
+        result = get_cached_song(video_id, ROLE_INSTRUMENTAL)
+        assert result is not None
+        assert result.has_stems is False
+        # No stems to recompute from → meta stays degenerate (full fresh analysis
+        # happens later in the pipeline, not here).
+        assert _is_degenerate_energy(result.meta.stem_analysis) is True
+        healed = _deserialize_audio_metadata(clean_redis.hget(_meta_key(video_id), "meta"))
+        assert _is_degenerate_energy(healed.stem_analysis) is True
+
+    def test_healthy_meta_untouched(self, clean_redis, clean_disk_cache, tmp_path):
+        """A healthy cached meta is returned as-is; no recompute, no rewrite."""
+        video_id = "test_vid_selfheal_healthy"
+        clean_disk_cache.append(video_id)
+        cache_song_metadata(
+            video_id=video_id,
+            title="Song",
+            artist="Artist",
+            meta=_make_audio_metadata(),
+            lyrics=None,
+        )
+        cache_song_stems(
+            video_id,
+            ROLE_INSTRUMENTAL,
+            _make_named_dir(tmp_path / "inst_src", STEM_NAMES),
+        )
+
+        cached_at_before = clean_redis.hget(_meta_key(video_id), "cached_at")
+        expected = _make_audio_metadata().stem_analysis.combined_energy
+
+        result = get_cached_song(video_id, ROLE_INSTRUMENTAL)
+        assert result is not None
+        # Energy preserved exactly — not recomputed from the (different) stems.
+        np.testing.assert_array_equal(
+            result.meta.stem_analysis.combined_energy, expected
+        )
+        # :meta was not rewritten (cached_at unchanged).
+        assert clean_redis.hget(_meta_key(video_id), "cached_at") == cached_at_before
