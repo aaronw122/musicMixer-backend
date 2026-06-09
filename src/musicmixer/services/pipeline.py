@@ -630,7 +630,7 @@ def _step_analyze_structure(
             logger.info("Session %s: Song %s structure: skipped (cached)", session_id, label)
             continue
         try:
-            stem_paths = {name: s_dir / f"{name}.wav" for name in ["vocals", "lead_vocals", "backing_vocals", "drums", "bass", "guitar", "piano", "other"]}
+            stem_paths = {name: s_dir / f"{name}.wav" for name in ["vocals", "lead_vocals", "backing_vocals", "instrumental", "drums", "bass", "guitar", "piano", "other"]}
             # Filter to stems that actually exist
             stem_paths = {k: v for k, v in stem_paths.items() if v.exists()}
             if stem_paths:
@@ -638,6 +638,7 @@ def _step_analyze_structure(
                     stem_paths=stem_paths,
                     beat_frames=meta.beat_frames,
                     bpm=meta.bpm,
+                    audio_path=song_a_path if label == "A" else song_b_path,
                     ml_segments=ml_segs,
                 )
                 meta.stem_analysis = stem_analysis
