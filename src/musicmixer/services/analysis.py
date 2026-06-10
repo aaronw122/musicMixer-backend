@@ -313,27 +313,25 @@ def _compute_bar_boundaries(
     hop_length = 512
 
     if downbeat_times is not None and len(downbeat_times) >= 1:
-        # Neural source: seconds -> sample indices.
         bar_starts = np.round(np.asarray(downbeat_times) * ANALYSIS_SR).astype(np.intp)
-        # Drop any downbeats at/after audio end (a stem may be shorter than the
-        # analyzed mix); the final boundary is appended as audio_length below.
+        # Drop downbeats at/after audio end (a stem may be shorter than the
+        # analyzed mix); audio_length is appended as the final boundary below.
         bar_starts = bar_starts[bar_starts < audio_length]
         if len(bar_starts) == 0:
             return np.array([0, audio_length], dtype=np.intp)
         bar_boundaries = np.append(bar_starts, audio_length)
     else:
         if len(beat_frames) < 4:
-            # Too few beats for even one bar; return the whole audio as one bar
             return np.array([0, audio_length], dtype=np.intp)
 
-        # Take every 4th beat as a bar boundary, converting frame -> sample units.
+        # Fallback: every 4th beat is a bar start. frames_to_samples converts the
+        # frame-unit beats to samples — the fix for the original frame/sample mix.
         bar_starts = librosa.frames_to_samples(
             np.asarray(beat_frames[::4]), hop_length=hop_length
         ).astype(np.intp)
         bar_starts = bar_starts[bar_starts < audio_length]
         if len(bar_starts) == 0:
             return np.array([0, audio_length], dtype=np.intp)
-        # Extend the last bar to the audio end regardless of partial-bar alignment
         bar_boundaries = np.append(bar_starts, audio_length)
 
     # Clamp/dedup BEFORE asserting so the assertion validates the final grid.
@@ -1609,8 +1607,7 @@ def _segments_to_sections(
     if len(bar_boundaries) < 2:
         return []
 
-    # Convert bar boundaries (sample indices) to times: sample index / sr.
-    # The final entry is audio_length, which maps to audio_length / sr.
+    # bar_boundaries are sample indices, so / sr gives seconds (NOT frames_to_time).
     bar_times = bar_boundaries / sr
 
     sections: list[SectionInfo] = []
@@ -1816,10 +1813,8 @@ def analyze_stems(
     Returns:
         (StemAnalysis, SongStructure)
     """
-    # BPM outside 70-170: re-run beat_track on drum stem. This updates `bpm`
-    # metadata and (only as a fallback grid source) `beat_frames`. When neural
-    # `downbeat_times` are present they remain the bar-grid source regardless of
-    # this re-detection (see _compute_bar_boundaries precedence).
+    # Re-detecting here only corrects `bpm`/`beat_frames`; neural `downbeat_times`,
+    # when present, stay the bar-grid source (see _compute_bar_boundaries).
     if (bpm < 70 or bpm > 170) and "drums" in stem_paths and stem_paths["drums"].exists():
         logger.info("BPM %.1f outside 70-170 range, re-detecting from drum stem", bpm)
         y_drums, sr_drums = librosa.load(str(stem_paths["drums"]), sr=ANALYSIS_SR)
@@ -1843,8 +1838,6 @@ def analyze_stems(
         # Empty stems: return minimal result
         return _empty_analysis_result()
 
-    # Compute bar boundaries (sample units): neural downbeats when available,
-    # else frame->sample-converted beat_frames[::4].
     bar_boundaries = _compute_bar_boundaries(beat_frames, audio_length, downbeat_times)
     total_bars = len(bar_boundaries) - 1
 
