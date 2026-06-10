@@ -19,6 +19,9 @@ data/
 .vscode/
 *.swp
 
+# Claude Code worktrees
+.claude/worktrees/
+
 notes
 conversations/
 .zed
