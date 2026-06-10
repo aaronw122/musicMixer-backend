@@ -123,15 +123,34 @@ def _make_metadata_with_stems(
 
 class TestBarBoundaries:
     def test_basic_boundaries(self) -> None:
-        """Bar boundaries from evenly spaced beat frames."""
-        # 16 beats = 4 bars
-        beat_frames = np.arange(0, 16) * 1000
-        audio_length = 16000
+        """Fallback path (no downbeats): bar boundaries from evenly spaced beat
+        FRAMES, converted to SAMPLE units via frames_to_samples (hop_length=512)."""
+        hop = 512
+        # 16 beats = 4 bars. Frame values are small (frame units); the grid must
+        # convert them to samples (x hop) before producing boundaries.
+        beat_frames = np.arange(0, 16) * 10
+        # bar starts = beat_frames[::4] = [0, 40, 80, 120] frames
+        #            -> samples [0, 20480, 40960, 61440]
+        audio_length = 80000
         boundaries = _compute_bar_boundaries(beat_frames, audio_length)
-        # Should have bar starts at [0, 4000, 8000, 12000] + audio_length
         assert boundaries[0] == 0
         assert boundaries[-1] == audio_length
         assert len(boundaries) == 5  # 4 bars + 1 end
+        # Sample-unit contract: the second boundary is the frame value x hop_length.
+        assert boundaries[1] == 40 * hop
+
+    def test_neural_downbeats_drive_sample_grid(self) -> None:
+        """Preferred path: downbeat_times (seconds) -> sample boundaries."""
+        from musicmixer.services.analysis import ANALYSIS_SR
+        downbeat_times = np.array([0.0, 1.0, 2.0, 3.0])
+        audio_length = int(round(4.0 * ANALYSIS_SR))
+        boundaries = _compute_bar_boundaries(
+            np.array([], dtype=np.intp), audio_length, downbeat_times=downbeat_times
+        )
+        assert boundaries[0] == 0
+        assert boundaries[-1] == audio_length
+        assert len(boundaries) == 5  # 4 downbeats + audio_length end
+        assert boundaries[1] == int(round(1.0 * ANALYSIS_SR))
 
     def test_too_few_beats(self) -> None:
         """With <4 beats, return whole audio as one bar."""

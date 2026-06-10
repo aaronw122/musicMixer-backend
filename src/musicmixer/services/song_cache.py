@@ -333,6 +333,7 @@ def _recompute_analysis_from_cached_stems(
             stem_paths=stem_paths,
             beat_frames=meta.beat_frames,
             bpm=meta.bpm,
+            downbeat_times=meta.downbeat_times,
         )
     except Exception:
         logger.warning(

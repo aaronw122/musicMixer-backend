@@ -658,6 +658,7 @@ def _step_analyze_structure(
                     bpm=meta.bpm,
                     audio_path=song_a_path if label == "A" else song_b_path,
                     ml_segments=ml_segs,
+                    downbeat_times=meta.downbeat_times,
                 )
                 meta.stem_analysis = stem_analysis
                 meta.song_structure = song_structure
