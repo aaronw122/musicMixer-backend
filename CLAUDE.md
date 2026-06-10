@@ -30,7 +30,7 @@ uv sync                    # Install all dependencies from lockfile
 ## Running the Dev Server
 
 ```bash
-cd /Users/aaron/Projects/musicMixer/backend
+cd /Users/aaron/code/personal/Projects/musicMixer/backend
 uv run uvicorn musicmixer.main:app --reload --port 8000
 ```
 
@@ -46,7 +46,7 @@ brew install ffmpeg libsndfile rubberband
 
 - **ffmpeg** -- required for MP3 export. Verify: `ffmpeg -version`
 - **libsndfile** -- required by soundfile. Verify: `uv run python -c "import soundfile"`
-- **rubberband** -- required for tempo stretching (Day 2+). Verify: `rubberband --version` (need v3.x)
+- **rubberband** -- required for tempo stretching. Verify: `rubberband --version` (need v3.x)
 
 ## Config
 
@@ -67,42 +67,32 @@ All config lives in `config.py` via Pydantic `BaseSettings`. Override any settin
 - **API prefix:** all business endpoints under `/api/`
 - **Create remix:** `POST /api/remix` -- multipart form with `song_a`, `song_b` (files), `prompt` (text). Returns `{"session_id": "<uuid>"}`
 - **Get audio:** `GET /api/remix/{session_id}/audio` -- serves rendered MP3
+- **Progress:** `GET /api/remix/{session_id}/progress` -- SSE stream (`text/event-stream`) of progress events. `POST /api/remix` returns immediately; the pipeline runs in a background `ThreadPoolExecutor` with a single-slot queue (SSE emits `queue_position`/`queue_estimate` when busy).
 - **No auth** -- single-user proof of concept
-- **Day 1 is synchronous** -- POST blocks until remix completes. Day 2 adds async + SSE progress.
 
 ## Stem Separation Models
 
-Two backends, two models. Controlled by `STEM_BACKEND` in `.env`:
+The two songs play different roles and get **different separation paths**, dispatched by `separation.py` (`separate_stems` for Song B, `separate_vocal_song` for Song A). Backend is controlled by `STEM_BACKEND` in `.env`.
+
+**Song B — instrumental source (`separate_stems`):**
 
 | | Modal (cloud GPU) | Local (CPU) |
 |---|---|---|
 | **Env var** | `STEM_BACKEND=modal` (default) | `STEM_BACKEND=local` |
 | **Model** | BS-Roformer-SW (`BS-Roformer-SW.ckpt` by jarredou) | htdemucs_ft |
-| **Stems** | 6: vocals, drums, bass, guitar, piano, other | 4: vocals, drums, bass, other |
-| **GPU** | L40S (benchmarked 2026-05-19: 37% faster than A10G, same cost/run) | N/A |
-| **Speed** | ~16s/song warm, ~25s cold start overhead | 10-20 min/song |
-| **Requires** | Modal account + token (`uv run modal setup`) | Just CPU + RAM |
+| **Stems** | 6: `vocals`, `drums`, `bass`, `guitar`, `piano`, `other` | 4: `vocals`, `drums`, `bass`, `other` (`guitar`/`piano` = `None`) |
 
-Day 1 separates **both songs sequentially**, so double the single-song time.
+**Song A — vocal source (`separate_vocal_song`):** a two-pass MelBand Roformer (karaoke) approach via audio-separator splits the vocal into lead vs. backing.
+
+| | Modal (cloud GPU) | Local (CPU) |
+|---|---|---|
+| **Stems** | 3: `lead_vocals`, `backing_vocals`, `instrumental` | 3 keys: `lead_vocals` (from `vocals`), `backing_vocals` = `None`, `instrumental` (from `other`) |
+
+Canonical name set: `VOCAL_SONG_STEMS = {"lead_vocals", "backing_vocals", "instrumental"}` (top of `separation.py`). The interpreter assigns section-level roles across both songs' stems.
+
+**GPU:** L40S (benchmarked 2026-05-19: 37% faster than A10G, same cost/run). Modal cold starts add ~25s.
 
 **Switching:** Set `STEM_BACKEND=local` in `backend/.env` for local fallback. No code changes needed — `separation.py` dispatches automatically.
-
-**Important:** These are *stem separation* models (splitting a song into parts). Audio *analysis* (BPM, key, energy) uses different libraries (librosa/essentia) and is not implemented until Day 2+.
-
-## Expected Processing Times
-
-| Operation | Modal (L40S) | Local CPU | Notes |
-|-----------|--------------|-----------|-------|
-| Stem separation (1 song) | ~16s warm | 10-20 min | First Modal run adds ~25s cold start |
-| Stem separation (2 songs) | ~16s (parallel) | 20-40 min | Both songs run concurrently on separate GPUs |
-| Mixing + export | <10 sec | <10 sec | CPU-bound, fast |
-| Full pipeline | ~2-3 min | ~20-40 min | Upload → stems → mix → MP3 |
-
-If processing seems stuck, check logs for progress. Stem separation produces no output until complete — long silences are normal.
-
-## LLM Integration Status
-
-**Day 1: No LLM.** The `prompt` field is accepted by the API but ignored. Stem selection is hardcoded: vocals from Song A, instrumentals from Song B. LLM-driven mix decisions come in Day 3.
 
 ## Modal Setup
 
@@ -133,19 +123,23 @@ uv run modal run scripts/my_script.py --arg val  # with args (Modal handles CLI 
 
 ## Testing
 
-No test suite yet (coming Day 4). For now, manual testing:
+Pytest suite under `tests/` (~1,200 tests across ~40 files). See the parent CLAUDE.md "Testing" section for commands and the sandbox/Redis caveats.
 
 ```bash
-# Health check
-curl http://localhost:8000/health
+uv run pytest tests/ -m "not slow" -v   # fast subset (~10s)
+uv run pytest tests/ -v                 # full suite
+```
 
-# Upload and remix (synchronous, takes 1-2 min)
+Manual smoke test against a running server:
+
+```bash
+curl http://localhost:8000/health   # {"status":"ok"}
+
+# POST returns a session_id immediately; stream progress over SSE, then fetch audio
 curl -X POST http://localhost:8000/api/remix \
   -F "song_a=@/path/to/song_a.mp3" \
   -F "song_b=@/path/to/song_b.mp3" \
   -F "prompt=test"
-
-# Fetch the remix audio
 curl http://localhost:8000/api/remix/<session_id>/audio --output remix.mp3
 ```
 
@@ -159,10 +153,6 @@ docker compose up --build   # enforces mem_limit: 3g from docker-compose.yml
 ```
 
 Docker uses Linux cgroups to track real RSS — `ulimit -v` on macOS tracks virtual memory and gives false positives, so always use Docker for memory testing.
-
-## Background Jobs
-
-Coming in Day 2. Day 1 pipeline is fully synchronous (POST blocks until done).
 
 ## File Watcher (--reload)
 
@@ -210,6 +200,6 @@ This downloads the Whisper base model, pyannote VAD model, and wav2vec2 alignmen
 - **Kill background agents before `uv run dev`.** Agents writing files in the backend dir trigger `--reload` restart loops. See "File Watcher" section above. Quick check: `pgrep -lf 'claude -p|codex exec'`
 - **Verify port is free before starting server.** Zombie processes hold ports after `Ctrl+C`. Check: `lsof -i :8000`. Kill: `kill $(lsof -i :8000 -t)`
 - **No `.env` = Modal default.** Without `STEM_BACKEND=local` in `.env`, the server tries Modal (hangs if unconfigured).
-- **Long silences during separation are normal.** Stem separation produces no intermediate output. Don't assume it's stuck until you've exceeded the expected times (see "Expected Processing Times" above).
+- **Long silences during separation are normal.** Stem separation produces no intermediate output (Modal is ~16s/song warm but adds a ~25s cold start; local CPU is 10-20 min/song). Don't assume it's stuck during these windows.
 - **Each session produces ~500MB of stem data.** Clean between test runs: `rm -rf data/stems/* data/uploads/* data/remixes/*`
 - **`uv run modal` fails with "Failed to spawn: `modal`"?** Two causes: (1) You're not in `backend/` — `uv` can't find the venv. (2) The venv was created at a different path (project moved/symlinked) and shebang paths in `.venv/bin/` are stale. Fix: `rm -rf .venv && uv sync`.
