@@ -18,7 +18,9 @@ from musicmixer.services.analysis import (
     analyze_audio,
     analyze_stems,
     reconcile_bpm,
+    _compute_bar_boundaries,
     _detect_beats_neural,
+    _segments_to_sections,
 )
 
 
@@ -202,6 +204,12 @@ _BEAT_FRAMES: np.ndarray = np.arange(
 ).astype(np.intp) * (_BAR_FRAMES // _BEATS_PER_BAR)
 _TOTAL_FRAMES: int = _N_BARS * _BAR_FRAMES
 
+# Neural downbeat timestamps (seconds) that map 1:1 onto the synthetic bar grid:
+# one downbeat per bar at the bar start (bar = _BAR_SECONDS seconds long). Under
+# the sample-unit grid contract these become sample boundaries 0, _BAR_FRAMES,
+# 2*_BAR_FRAMES, ... This is the canonical (production) grid source.
+_DOWNBEAT_TIMES: np.ndarray = np.arange(_N_BARS, dtype=np.float64) * _BAR_SECONDS
+
 
 def _tone(amplitude: float, n: int, freq: float = 220.0) -> np.ndarray:
     """A constant-amplitude sine tone of length n samples."""
@@ -270,6 +278,7 @@ class TestAnalyzeStemsEnergy:
             beat_frames=_BEAT_FRAMES,
             bpm=120.0,
             audio_path=raw_mix,
+            downbeat_times=_DOWNBEAT_TIMES,
         )
 
         energy = stem_analysis.combined_energy
@@ -296,9 +305,11 @@ class TestAnalyzeStemsEnergy:
 
         sa_vocal, _ = analyze_stems(
             stem_paths=vocal_paths, beat_frames=_BEAT_FRAMES, bpm=120.0, audio_path=raw_mix,
+            downbeat_times=_DOWNBEAT_TIMES,
         )
         sa_six, _ = analyze_stems(
             stem_paths=six_paths, beat_frames=_BEAT_FRAMES, bpm=120.0, audio_path=raw_mix,
+            downbeat_times=_DOWNBEAT_TIMES,
         )
 
         np.testing.assert_array_equal(sa_vocal.combined_energy, sa_six.combined_energy)
@@ -315,6 +326,7 @@ class TestAnalyzeStemsEnergy:
 
         stem_analysis, structure = analyze_stems(
             stem_paths=stem_paths, beat_frames=_BEAT_FRAMES, bpm=120.0, audio_path=raw_mix,
+            downbeat_times=_DOWNBEAT_TIMES,
         )
 
         vocal_active = stem_analysis.vocal_active
@@ -336,6 +348,7 @@ class TestAnalyzeStemsEnergy:
 
         stem_analysis, structure = analyze_stems(
             stem_paths=stem_paths, beat_frames=_BEAT_FRAMES, bpm=120.0, audio_path=raw_mix,
+            downbeat_times=_DOWNBEAT_TIMES,
         )
 
         energy = stem_analysis.combined_energy
@@ -344,3 +357,151 @@ class TestAnalyzeStemsEnergy:
         assert energy.argmax() in (3, 4)
         # `vocals` stem present → vocal activity from it.
         assert stem_analysis.vocal_active.any()
+
+
+# ---------------------------------------------------------------------------
+# Bar-grid downbeat regression (sample-unit contract)
+# ---------------------------------------------------------------------------
+
+class TestBarGridDownbeatRegression:
+    """Regression for the frame/sample unit-mix bug in _compute_bar_boundaries.
+
+    Prior behavior: the grid took ``beat_frames[::4]`` (librosa FRAME units) and
+    appended ``audio_length`` (SAMPLE units), producing 1-bar-wide slivers plus a
+    single giant final bar spanning the rest of the song. The fix derives the
+    grid from neural ``downbeat_times × ANALYSIS_SR`` (sample indices) and
+    establishes a sample-unit output contract.
+    """
+
+    def test_neural_grid_is_sample_units_no_giant_final_bar(self) -> None:
+        # 83 downbeats spaced ~2.56s (the prod Hypnotize case), audio ~210s.
+        spacing = 2.56
+        downbeat_times = np.arange(83, dtype=np.float64) * spacing + 0.10
+        audio_length = int(round((downbeat_times[-1] + spacing) * _STEM_SR))
+
+        boundaries = _compute_bar_boundaries(
+            np.array([], dtype=np.intp), audio_length, downbeat_times=downbeat_times
+        )
+
+        # Monotonic + within [0, audio_length].
+        assert boundaries[0] >= 0
+        assert boundaries[-1] == audio_length
+        assert np.all(np.diff(boundaries) > 0)
+
+        widths = np.diff(boundaries)
+        # No giant final bar: the max bar is nowhere near the whole song.
+        assert widths.max() < audio_length * 0.1
+        # Bars are real (seconds-scale), not 110-sample slivers.
+        assert widths.min() > _STEM_SR * 0.5
+        # Bar count tracks the downbeats (one bar per downbeat interval).
+        assert len(boundaries) - 1 == len(downbeat_times)
+
+    def test_fallback_path_converts_frames_to_samples(self) -> None:
+        # No downbeats → fallback uses beat_frames[::4] in FRAME units, converted
+        # to samples via frames_to_samples (hop_length=512).
+        hop = 512
+        # 8 bars * 4 beats, one frame per beat spaced so bars are ~1s apart.
+        frames_per_bar = int(round(_STEM_SR / hop))  # frames in one second
+        beat_frames = np.arange(8 * 4, dtype=np.intp) * (frames_per_bar // 4)
+        audio_length = 8 * _STEM_SR
+
+        boundaries = _compute_bar_boundaries(
+            beat_frames, audio_length, downbeat_times=None
+        )
+
+        assert boundaries[0] >= 0
+        assert boundaries[-1] == audio_length
+        assert np.all(np.diff(boundaries) > 0)
+        # Converted boundaries land in sample range, not frame range.
+        assert boundaries[1] > hop  # first real bar start is sample-scale
+
+    def test_downbeats_beyond_audio_length_are_dropped(self) -> None:
+        # A stem slightly shorter than the analyzed mix: a downbeat sits past the
+        # stem end. It must be dropped/clamped BEFORE the assertion (no false-fire).
+        downbeat_times = np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float64)
+        audio_length = int(round(2.5 * _STEM_SR))  # cuts off the 3.0s downbeat
+
+        boundaries = _compute_bar_boundaries(
+            np.array([], dtype=np.intp), audio_length, downbeat_times=downbeat_times
+        )
+
+        assert boundaries[-1] == audio_length
+        assert np.all(np.diff(boundaries) > 0)
+        assert boundaries[-1] <= audio_length
+
+    def test_neural_path_wins_over_redetected_beat_frames(self, tmp_path: Path) -> None:
+        """When downbeat_times are present, the neural grid drives the bar count
+        even though beat_frames is also supplied (drum re-detection precedence)."""
+        stem_paths = {
+            "lead_vocals": _write_wav(
+                tmp_path / "lead_vocals.wav", _bar_signal(_VOCAL_BAR_AMPS, freq=330.0)
+            ),
+            "instrumental": _write_wav(
+                tmp_path / "instrumental.wav", _bar_signal(_MIX_BAR_AMPS, freq=110.0)
+            ),
+        }
+        raw_mix = _make_raw_mix(tmp_path / "mix.wav")
+
+        stem_analysis, structure = analyze_stems(
+            stem_paths=stem_paths,
+            beat_frames=_BEAT_FRAMES,
+            bpm=120.0,
+            audio_path=raw_mix,
+            downbeat_times=_DOWNBEAT_TIMES,
+        )
+
+        # Grid tracks the 8 neural downbeats → 8 bars.
+        assert structure.total_bars == _N_BARS
+
+    def test_vocal_source_throughout_yields_non_degenerate_vocal_active(
+        self, tmp_path: Path
+    ) -> None:
+        """A vocal stem with vocals across the whole song must not collapse to
+        all-false vocal_active (the original prod symptom)."""
+        # Vocals present in every bar.
+        full_vocal = _write_wav(
+            tmp_path / "lead_vocals.wav", _bar_signal([0.6] * _N_BARS, freq=330.0)
+        )
+        instrumental = _write_wav(
+            tmp_path / "instrumental.wav", _bar_signal(_MIX_BAR_AMPS, freq=110.0)
+        )
+        stem_paths = {"lead_vocals": full_vocal, "instrumental": instrumental}
+        raw_mix = _make_raw_mix(tmp_path / "mix.wav")
+
+        stem_analysis, _ = analyze_stems(
+            stem_paths=stem_paths,
+            beat_frames=_BEAT_FRAMES,
+            bpm=120.0,
+            audio_path=raw_mix,
+            downbeat_times=_DOWNBEAT_TIMES,
+        )
+
+        vocal_active = stem_analysis.vocal_active
+        assert vocal_active.size == _N_BARS
+        # Non-degenerate: most bars active (not the all-false prod bug).
+        assert vocal_active.sum() >= _N_BARS - 1
+
+    def test_segments_to_sections_maps_midsong_segment_to_nonzero_start_bar(self) -> None:
+        """CRITICAL-1 guard: under the sample-unit grid, _segments_to_sections must
+        use boundaries/sr (not frames_to_time), so a mid-song ML segment maps to a
+        non-zero start_bar instead of collapsing onto bar 0."""
+        # 8 one-second bars → sample boundaries 0, sr, 2sr, ..., 8sr.
+        audio_length = 8 * _STEM_SR
+        downbeat_times = np.arange(8, dtype=np.float64) * 1.0
+        bar_boundaries = _compute_bar_boundaries(
+            np.array([], dtype=np.intp), audio_length, downbeat_times=downbeat_times
+        )
+
+        # A segment in the middle of the song (4.0s -> 6.0s) → bars [4, 6).
+        ml_segments = [{"label": "chorus", "start": 4.0, "end": 6.0}]
+        sections = _segments_to_sections(
+            ml_segments=ml_segments,
+            bar_boundaries=bar_boundaries,
+            sr=_STEM_SR,
+            audio_length=audio_length,
+        )
+
+        assert len(sections) == 1
+        assert sections[0].start_bar == 4
+        assert sections[0].start_bar != 0  # did NOT collapse onto bar 0
+        assert sections[0].end_bar == 6
