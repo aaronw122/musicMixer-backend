@@ -3,6 +3,12 @@ name: Deploy
 on:
   push:
     branches: [main]
+    paths-ignore:
+      # Docs/config-only changes don't affect the built artifact — skip deploy.
+      # (Applies to push only; repository_dispatch/workflow_dispatch still deploy.)
+      - '**.md'
+      - '.gitignore'
+      - '.claude/**'
   repository_dispatch:
     types: [frontend-deploy]
   workflow_dispatch:
