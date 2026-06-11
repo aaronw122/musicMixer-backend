@@ -29,8 +29,6 @@ services:
       - ${MODAL_TOML_PATH:-/root/.modal.toml}:/root/.modal.toml:ro
       - ${YT_COOKIES_PATH:-/root/musicmixer/yt-cookies.txt}:/app/yt-cookies.txt
       - yt-dlp-cache:/root/.cache/yt-dlp
-  # Standalone static frontend. Transitional: the backend still serves static
-  # too, until the tunnel cutover routes non-/api traffic here on :8080.
   frontend:
     image: ghcr.io/aaronw122/musicmixer-frontend:latest
     ports:
