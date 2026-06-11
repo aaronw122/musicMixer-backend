@@ -29,6 +29,16 @@ services:
       - ${MODAL_TOML_PATH:-/root/.modal.toml}:/root/.modal.toml:ro
       - ${YT_COOKIES_PATH:-/root/musicmixer/yt-cookies.txt}:/app/yt-cookies.txt
       - yt-dlp-cache:/root/.cache/yt-dlp
+  frontend:
+    image: ghcr.io/aaronw122/musicmixer-frontend:latest
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
   redis:
     image: redis:7-alpine
     ports:
