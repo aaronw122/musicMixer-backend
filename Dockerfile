@@ -18,7 +18,7 @@ RUN apt-get update && \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# -- Runtime stage: copy source + frontend build --
+# -- Runtime stage: copy source --
 FROM base AS runtime
 
 WORKDIR /app
