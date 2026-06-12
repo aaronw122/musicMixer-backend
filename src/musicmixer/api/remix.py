@@ -262,6 +262,49 @@ class YouTubeRemixRequest(BaseModel):
 # YouTube pipeline wrapper (download + existing pipeline)
 # ---------------------------------------------------------------------------
 
+def _checkpoint_song(
+    *,
+    url: str,
+    role,
+    title: str,
+    meta,
+    lyrics,
+    stems_dir,
+    already_cached: bool,
+    session_id: str,
+) -> None:
+    """Persist one song's metadata + stems to the cache, failure-isolated.
+
+    Called per-song right after analysis (Part A per-song checkpoint). Any
+    exception is swallowed and logged: a cache write must never crash the
+    pipeline the user is waiting on, and one song's failure must not abort the
+    other song's checkpoint. Metadata is skipped when the song came from the
+    medium-cache path (it's already persisted); stems are always (re-)written for
+    the role since separation always runs.
+    """
+    from pathlib import Path as _Path
+    from musicmixer.api.shelf import _extract_video_id
+    from musicmixer.services.song_cache import cache_song_metadata, cache_song_stems
+
+    video_id = _extract_video_id(url)
+    if video_id is None:
+        return
+    try:
+        if not already_cached:
+            cache_song_metadata(
+                video_id=video_id, title=title, artist="", meta=meta, lyrics=lyrics,
+            )
+        cache_song_stems(video_id=video_id, role=role, stems_dir=_Path(stems_dir))
+        logger.info(
+            "Session %s: checkpointed song %s (role=%s) to cache", session_id, video_id, role,
+        )
+    except Exception:
+        logger.warning(
+            "Session %s: failed to checkpoint song %s (role=%s); continuing",
+            session_id, video_id, role, exc_info=True,
+        )
+
+
 def _youtube_pipeline_wrapper(
     session_id: str,
     url_a: str,
@@ -430,12 +473,21 @@ def _youtube_pipeline_wrapper(
             else:
                 _emit_monotonic("Grabbing your second song...", progress)
 
+        # --- Resolve video IDs up-front so the audio cache + single-flight can key
+        #     on them (Tier 2/3: a cached download skips YouTube; single-flight
+        #     dedups concurrent same-video requests, incl. the future_a/future_b
+        #     pair in inverse-songs mixes).
+        from musicmixer.api.shelf import _extract_video_id as _yt_extract_vid_dl
+        _dl_vid_a = _yt_extract_vid_dl(url_a)
+        _dl_vid_b = _yt_extract_vid_dl(url_b)
+
         # --- Download helpers (run async fn in a fresh event loop per thread) ---
         def _download_a():
             return _run_sync(download_youtube_audio(
                 url=url_a,
                 output_dir=upload_dir,
                 progress_callback=_progress_a,
+                video_id=_dl_vid_a,
             ))
 
         def _download_b():
@@ -443,6 +495,7 @@ def _youtube_pipeline_wrapper(
                 url=url_b,
                 output_dir=upload_dir,
                 progress_callback=_progress_b,
+                video_id=_dl_vid_b,
             ))
 
         # --- Parallel downloads ---
@@ -519,49 +572,29 @@ def _youtube_pipeline_wrapper(
             cached_lyrics_b=cached_song_b.lyrics if cached_song_b else None,
         )
 
-        # Cache analysis results to Redis for future cache hits.
-        # Skip metadata write for songs that already had cached metadata
-        # (medium cache path) — only write stems for those.
+        # --- Per-song checkpoint (Part A resumability) ---
+        # Persist each song's stems + metadata to the cache NOW — immediately
+        # after separation/analysis completes and BEFORE the expensive remix /
+        # render phase. This is per-song and failure-isolated: a crash or cache
+        # failure for one song never discards the other's already-persisted work,
+        # so a retry resumes at song granularity instead of re-separating both.
+        # Songs that arrived via the medium-cache path (cached_song_* set) already
+        # have metadata cached, so only their stems are (re-)written for the role.
         from musicmixer.api.shelf import _extract_video_id
-        from musicmixer.services.song_cache import (
-            ROLE_VOCAL, ROLE_INSTRUMENTAL,
-            cache_song_metadata, cache_song_stems,
+        from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
+
+        _checkpoint_song(
+            url=url_a, role=ROLE_VOCAL, title=result_a.title,
+            meta=analysis.meta_a, lyrics=analysis.lyrics_a,
+            stems_dir=analysis.song_a_stems_dir,
+            already_cached=cached_song_a is not None, session_id=session_id,
         )
-        from pathlib import Path
-
-        # Song A (vocal source)
-        vid_a = _extract_video_id(url_a)
-        if vid_a is not None:
-            if cached_song_a is None:
-                cache_song_metadata(
-                    video_id=vid_a,
-                    title=result_a.title,
-                    artist="",
-                    meta=analysis.meta_a,
-                    lyrics=analysis.lyrics_a,
-                )
-            cache_song_stems(
-                video_id=vid_a,
-                role=ROLE_VOCAL,
-                stems_dir=Path(analysis.song_a_stems_dir),
-            )
-
-        # Song B (instrumental source)
-        vid_b = _extract_video_id(url_b)
-        if vid_b is not None:
-            if cached_song_b is None:
-                cache_song_metadata(
-                    video_id=vid_b,
-                    title=result_b.title,
-                    artist="",
-                    meta=analysis.meta_b,
-                    lyrics=analysis.lyrics_b,
-                )
-            cache_song_stems(
-                video_id=vid_b,
-                role=ROLE_INSTRUMENTAL,
-                stems_dir=Path(analysis.song_b_stems_dir),
-            )
+        _checkpoint_song(
+            url=url_b, role=ROLE_INSTRUMENTAL, title=result_b.title,
+            meta=analysis.meta_b, lyrics=analysis.lyrics_b,
+            stems_dir=analysis.song_b_stems_dir,
+            already_cached=cached_song_b is not None, session_id=session_id,
+        )
 
         run_remix(
             session_id=session_id,

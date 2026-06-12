@@ -243,22 +243,55 @@ async def _download_via_proxy(
     )
 
 
+def _copy_cached_audio_to_session(
+    cached_path: Path,
+    output_dir: Path,
+    meta: dict,
+) -> YouTubeAudioResult:
+    """Build a YouTubeAudioResult from a cached audio file, copied into the session.
+
+    The pipeline reads from a session-scoped path, so the cached artifact is
+    copied (not referenced) — the cache stays immutable and the session owns its
+    copy.
+    """
+    import shutil as _shutil
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    session_copy = output_dir / f"{uuid.uuid4().hex}{cached_path.suffix}"
+    _shutil.copy2(cached_path, session_copy)
+    return YouTubeAudioResult(
+        wav_path=session_copy,
+        title=meta.get("title", "Unknown"),
+        duration_seconds=float(meta.get("duration_seconds", 0.0)),
+        source_codec=meta.get("source_codec", "unknown"),
+        source_bitrate=int(meta.get("source_bitrate", 0)),
+    )
+
+
 async def download_youtube_audio(
     url: str,
     output_dir: Path,
     progress_callback: Callable[[float, str], None] | None = None,
+    video_id: str | None = None,
 ) -> YouTubeAudioResult:
-    """Download audio from a YouTube video as a PCM WAV file.
+    """Download audio from a YouTube video, using the per-video_id audio cache.
+
+    Tiered behavior (Part A): when ``video_id`` is known, check the audio cache
+    first — a hit skips YouTube entirely (Tier 2/3 bridge). On a miss, download
+    once and persist to the cache so the next request reuses it. A per-video_id
+    single-flight lock prevents two concurrent requests for the same video from
+    both downloading.
 
     Args:
         url: YouTube video URL (must pass SSRF validation).
-        output_dir: Directory to write the output WAV file.
-        progress_callback: Optional callback ``(progress_fraction, message)``
-            for reporting download progress. Throttled to max 1 call/sec or
-            5% increments (whichever is less frequent).
+        output_dir: Directory to write the output audio file.
+        progress_callback: Optional callback ``(progress_fraction, message)``.
+        video_id: YouTube video ID for cache keying. When None, caching is
+            skipped (download always runs) — preserves back-compat for callers
+            that don't supply it.
 
     Returns:
-        YouTubeAudioResult with path to WAV file and metadata.
+        YouTubeAudioResult with path to the audio file and metadata.
 
     Raises:
         YouTubeDownloadError: On validation failure or download error.
@@ -266,6 +299,63 @@ async def download_youtube_audio(
     # --- SSRF validation (must happen before yt-dlp touches the URL) ---
     validate_youtube_url(url)
 
+    if video_id is None:
+        return await _download_youtube_audio_uncached(url, output_dir, progress_callback)
+
+    from musicmixer.services.song_cache import (
+        cache_audio,
+        get_cached_audio,
+        single_flight,
+    )
+
+    # Fast path: cache hit before taking the single-flight lock.
+    hit = get_cached_audio(video_id)
+    if hit is not None:
+        cached_path, meta = hit
+        logger.info("Audio cache HIT for video %s (skipping YouTube)", video_id)
+        if progress_callback:
+            progress_callback(1.0, "Already had this one!")
+        return _copy_cached_audio_to_session(cached_path, output_dir, meta)
+
+    # Single-flight: serialize concurrent downloads of the same video. The second
+    # caller waits, then re-checks the cache and reuses the first's result.
+    with single_flight(video_id):
+        hit = get_cached_audio(video_id)
+        if hit is not None:
+            cached_path, meta = hit
+            logger.info("Audio cache HIT for video %s after single-flight wait", video_id)
+            if progress_callback:
+                progress_callback(1.0, "Already had this one!")
+            return _copy_cached_audio_to_session(cached_path, output_dir, meta)
+
+        result = await _download_youtube_audio_uncached(url, output_dir, progress_callback)
+
+        # Persist to the audio cache (atomic). Best-effort: a cache failure must
+        # not fail the download the user is waiting on.
+        try:
+            audio_bytes = result.wav_path.read_bytes()
+            cache_audio(
+                video_id,
+                audio_bytes,
+                meta={
+                    "title": result.title,
+                    "duration_seconds": result.duration_seconds,
+                    "source_codec": result.source_codec,
+                    "source_bitrate": result.source_bitrate,
+                },
+            )
+        except Exception:
+            logger.warning("Failed to persist audio cache for video %s", video_id, exc_info=True)
+
+        return result
+
+
+async def _download_youtube_audio_uncached(
+    url: str,
+    output_dir: Path,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> YouTubeAudioResult:
+    """Download audio from YouTube without any cache interaction (the raw path)."""
     # Use remote proxy service if configured (bypasses datacenter IP blocks)
     if settings.youtube_proxy_service_url:
         return await _download_via_proxy(url, output_dir, progress_callback)

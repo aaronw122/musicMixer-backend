@@ -408,7 +408,7 @@ class TestYouTubePipelineWrapper:
 
         download_call_count = 0
 
-        async def fake_download(url, output_dir, progress_callback=None):
+        async def fake_download(url, output_dir, progress_callback=None, video_id=None):
             nonlocal download_call_count
             download_call_count += 1
             if "dQw4w9WgXcQ" in url:
@@ -479,7 +479,7 @@ class TestYouTubePipelineWrapper:
             duration_seconds=180.0, source_codec="opus", source_bitrate=128,
         )
 
-        async def fake_download(url, output_dir, progress_callback=None):
+        async def fake_download(url, output_dir, progress_callback=None, video_id=None):
             if progress_callback:
                 progress_callback(0.5, "50%")
             return result
@@ -543,7 +543,7 @@ class TestYouTubePipelineWrapper:
         lock = threading.Lock()
         lock.acquire()
 
-        async def failing_download(url, output_dir, progress_callback=None):
+        async def failing_download(url, output_dir, progress_callback=None, video_id=None):
             raise RuntimeError("Download failed: video unavailable")
 
         mock_app_state = MagicMock()

@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     song_cache_dir: Path = Path("data/song_cache")
 
+    # Audio cache (raw YouTube download, by video_id — recompute-avoidance, not
+    # user output). Generous TTL + size cap so the same video is fetched at most
+    # once within the window. ttl<=0 disables expiry; max_gb<=0 disables the cap.
+    audio_cache_ttl_hours: int = 168  # 7 days
+    audio_cache_max_gb: float = 5.0
+
     # Twilio SMS notifications
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
