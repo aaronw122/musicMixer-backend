@@ -26,9 +26,6 @@ WORKDIR /app
 # Copy application source
 COPY src/ ./src/
 
-# Copy frontend build (staged by deploy.sh)
-COPY static-build/ /app/static/
-
 EXPOSE 8880
 
 CMD ["uv", "run", "uvicorn", "musicmixer.main:app", "--host", "0.0.0.0", "--port", "8880"]

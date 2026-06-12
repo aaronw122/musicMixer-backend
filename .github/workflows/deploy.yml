@@ -5,12 +5,10 @@ on:
     branches: [main]
     paths-ignore:
       # Docs/config-only changes don't affect the built artifact — skip deploy.
-      # (Applies to push only; repository_dispatch/workflow_dispatch still deploy.)
+      # (Applies to push only; workflow_dispatch still deploys.)
       - '**.md'
       - '.gitignore'
       - '.claude/**'
-  repository_dispatch:
-    types: [frontend-deploy]
   workflow_dispatch:
 
 concurrency:
@@ -26,30 +24,6 @@ jobs:
     steps:
       - name: Checkout backend
         uses: actions/checkout@v4
-
-      - name: Checkout frontend
-        uses: actions/checkout@v4
-        with:
-          repository: aaronw122/musicMixer-frontend
-          token: ${{ secrets.DEPLOY_PAT }}
-          path: frontend
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install frontend dependencies
-        run: cd frontend && bun install
-
-      - name: Build frontend
-        run: cd frontend && bun run build
-        env:
-          VITE_GOATCOUNTER_SITE: ${{ secrets.VITE_GOATCOUNTER_SITE }}
-
-      - name: Stage frontend build
-        run: cp -r frontend/dist static-build/
-
-      - name: Verify frontend build
-        run: test -f static-build/index.html || exit 1
 
       - name: Login to GHCR
         uses: docker/login-action@v3

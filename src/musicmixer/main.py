@@ -8,8 +8,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from musicmixer.api import health, remix, shelf, stats, thumbnail
 from musicmixer.config import settings
@@ -135,29 +133,12 @@ app.include_router(stats.router, prefix="/api")
 app.include_router(thumbnail.router, prefix="/api")
 
 
-@app.get("/about")
-async def about_page() -> FileResponse:
-    return FileResponse("static/about.html")
-
-
-@app.get("/terms")
-async def terms_page() -> FileResponse:
-    return FileResponse("static/terms.html")
-
-
-@app.get("/privacy")
-async def privacy_page() -> FileResponse:
-    return FileResponse("static/privacy.html")
-
-
-@app.get("/remix/{session_id}")
-async def remix_spa_fallback(session_id: str) -> FileResponse:
-    """SPA catch-all: serve index.html for /remix/* so React Router handles routing."""
-    return FileResponse("static/index.html")
-
-
-# Serve static files -- must come LAST (after all API routes)
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+@app.get("/")
+async def root() -> dict[str, str]:
+    """API-only service. The frontend (SPA, /about, /terms, /privacy, /remix/*)
+    is served by its own container; the Cloudflare tunnel routes non-/api traffic
+    there. This backend handles /api/* and /health only."""
+    return {"service": "musicmixer-api"}
 
 
 def dev():
