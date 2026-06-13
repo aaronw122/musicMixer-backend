@@ -55,44 +55,13 @@ class YouTubeDownloadError(Exception):
         self.error_class = error_class
 
 
-def classify_youtube_error(*, status_code: int | None, detail: str) -> str:
-    """Classify a download failure as ``transient`` (retryable) or ``permanent``.
-
-    This is the SINGLE choke-point for transient/permanent classification. It is
-    net-new logic — NOT a reuse of ``_map_ytdlp_error`` (which returns DISPLAY
-    strings, not a retry class). It borrows that function's string-matching
-    *patterns* but maps to the wire-contract ``error_class`` instead.
-
-    Best-effort from what the backend actually has today: the proxy collapses
-    every yt-dlp error to a fixed ``HTTPException(400, "Failed to download from
-    YouTube")`` (``yt-proxy/main.py``), so the only signals available are the
-    proxy's HTTP ``status_code`` and its ``detail`` string. We classify from
-    those.
-
-    TODO(proxy-forwarded-category): once ``yt-proxy`` forwards a structured
-    category (e.g. a raw yt-dlp error string and/or an explicit ``error_class``
-    in the JSON body), plug it in HERE — prefer the forwarded category over the
-    status/detail heuristics below. This is the seam; do not classify anywhere
-    else. (Proxy change is OUT OF SCOPE for this wave.)
-
-    Args:
-        status_code: HTTP status from the proxy response, or None when the
-            failure was raised before/without an HTTP response (e.g. a network
-            error talking to the proxy itself).
-        detail: The proxy's ``detail`` string (or any error text available).
-
-    Returns:
-        ``ERROR_CLASS_TRANSIENT`` or ``ERROR_CLASS_PERMANENT``.
-    """
-    msg = (detail or "").lower()
-
-    # --- Permanent signals first (a removed/private/age-gated video will never
-    #     succeed on retry, so these must win even if a transient-looking token
-    #     also appears in the text). ---
+def _has_permanent_youtube_signal(msg: str) -> bool:
+    """True when ``msg`` names a failure that a retry can never clear
+    (removed/private/age-gated/geo-blocked/unsupported-format video)."""
     # Live streams: not a download target (mirrors _map_ytdlp_error ordering —
     # checked before "not available" since a live message may contain it).
     if "live" in msg and ("stream" in msg or "event" in msg):
-        return ERROR_CLASS_PERMANENT
+        return True
     if (
         "video unavailable" in msg
         or "is not available" in msg
@@ -103,11 +72,11 @@ def classify_youtube_error(*, status_code: int | None, detail: str) -> str:
         or "account associated" in msg  # "account...has been terminated"
         or "terminated" in msg
     ):
-        return ERROR_CLASS_PERMANENT
+        return True
     if "age" in msg and ("restrict" in msg or "gate" in msg or "confirm" in msg):
-        return ERROR_CLASS_PERMANENT
+        return True
     if "no audio" in msg or "no suitable" in msg or "requested format" in msg:
-        return ERROR_CLASS_PERMANENT
+        return True
     # Geo-blocking is permanent from THIS server's vantage point — a retry from
     # the same IP/region won't clear it.
     if (
@@ -117,11 +86,14 @@ def classify_youtube_error(*, status_code: int | None, detail: str) -> str:
         or "country" in msg
         or "region" in msg
     ):
-        return ERROR_CLASS_PERMANENT
+        return True
+    return False
 
-    # --- Transient signals: throttle / forbidden / timeout / network / 5xx. ---
-    # These are exactly the incident class (a 403 that succeeded a beat later).
-    if (
+
+def _has_transient_youtube_signal(msg: str) -> bool:
+    """True when ``msg`` names a throttle / forbidden / timeout / network / 5xx
+    failure — exactly the incident class (a 403 that succeeded a beat later)."""
+    return (
         "403" in msg
         or "forbidden" in msg
         or "429" in msg
@@ -135,26 +107,50 @@ def classify_youtube_error(*, status_code: int | None, detail: str) -> str:
         or "network" in msg
         or "urlopen" in msg
         or "resolve" in msg
-    ):
+    )
+
+
+def _class_from_status(status_code: int | None) -> str | None:
+    """Classify from the HTTP status alone when the detail text is unhelpful
+    (it usually is — the proxy sends a generic "Failed to download"). Returns
+    ``None`` when the status gives no signal."""
+    if status_code is None:
+        return None
+    # 5xx and 429 are server-side / throttle → retryable.
+    if status_code >= 500 or status_code == 429:
         return ERROR_CLASS_TRANSIENT
+    # Generic 400 biases transient: the proxy collapses transient yt-dlp 403s
+    # into its own 400, and that observed incident is the dominant generic-400
+    # cause — an over-eager retry is cheaper than wrongly telling the user a
+    # recoverable video is gone forever.
+    if status_code == 400:
+        return ERROR_CLASS_TRANSIENT
+    return None
 
-    # --- Fall back to the HTTP status code when the detail text is unhelpful
-    #     (it usually is — the proxy sends a generic "Failed to download"). ---
-    if status_code is not None:
-        # 5xx and 429 are server-side / throttle → retryable.
-        if status_code >= 500 or status_code == 429:
-            return ERROR_CLASS_TRANSIENT
-        # The proxy collapses transient yt-dlp 403s into its own 400. We can't
-        # distinguish a transient 403 from a permanent "unavailable" purely from
-        # a generic 400 + opaque detail, so we bias the generic-400 case toward
-        # TRANSIENT: the observed incident (HTTP 403 on the media stream) is the
-        # dominant generic-400 cause, and an over-eager retry is cheaper than
-        # wrongly telling the user a recoverable video is gone forever.
-        if status_code == 400:
-            return ERROR_CLASS_TRANSIENT
 
-    # Truly unknown → permanent (safe default: don't promise a retry we can't
-    # justify).
+def classify_youtube_error(*, status_code: int | None, detail: str) -> str:
+    """Classify a download failure as ``transient`` (retryable) or ``permanent``.
+
+    The SINGLE choke-point for transient/permanent classification. Ordering is
+    policy and permanent wins ties: normalize detail → permanent signal →
+    transient signal → status fallback → default permanent (don't promise a
+    retry we can't justify).
+
+    TODO(proxy-forwarded-category): once ``yt-proxy`` forwards a structured
+    category, prefer it over the status/detail heuristics here — this is the seam.
+
+    Returns:
+        ``ERROR_CLASS_TRANSIENT`` or ``ERROR_CLASS_PERMANENT``.
+    """
+    msg = (detail or "").lower()
+
+    if _has_permanent_youtube_signal(msg):
+        return ERROR_CLASS_PERMANENT
+    if _has_transient_youtube_signal(msg):
+        return ERROR_CLASS_TRANSIENT
+    status_class = _class_from_status(status_code)
+    if status_class is not None:
+        return status_class
     return ERROR_CLASS_PERMANENT
 
 

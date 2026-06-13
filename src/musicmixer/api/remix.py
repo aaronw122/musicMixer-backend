@@ -424,17 +424,11 @@ def _try_run_fully_cached_youtube_remix(
     return True
 
 
-# ---------------------------------------------------------------------------
-# Structured-error wire contract (consumed by frontend PR #76)
-#
-# The SSE `error` event carries two OPTIONAL fields in addition to the existing
-# {step, detail, progress}:
-#   error_class: "transient" | "permanent"   — is a retry worth offering?
-#   failed_song: "A" | "B"                    — which download failed (if known)
-#
-# The backend is the PRODUCER of this contract; RemixPage is the consumer. Field
-# NAMES and VALUES (snake_case, exact strings) must match the frontend.
-# ---------------------------------------------------------------------------
+# Structured-error wire contract (producer side; consumer is frontend PR #76).
+# The SSE `error` event carries two OPTIONAL fields alongside {step, detail,
+# progress}: `error_class` ("transient" | "permanent") and `failed_song`
+# ("A" | "B"). Field names and values (snake_case, exact strings) must match
+# the frontend. Built by `_build_error_event`.
 
 # Attribute used to carry "which song failed" on a download exception until the
 # top-level error handler reads it. Set by `_tag_failed_song`.
@@ -575,7 +569,7 @@ def _youtube_pipeline_wrapper(
 
         # --- Resolve video IDs up-front so the audio cache + single-flight can key
         #     on them (Tier 2/3: a cached download skips YouTube; single-flight
-        #     dedups concurrent same-video requests, incl. the future_a/future_b
+        #     dedups concurrent same-video requests, incl. the song_a/song_b
         #     pair in inverse-songs mixes).
         from musicmixer.api.shelf import _extract_video_id as _yt_extract_vid_dl
         _dl_vid_a = _yt_extract_vid_dl(url_a)
@@ -599,26 +593,24 @@ def _youtube_pipeline_wrapper(
             ))
 
         # --- Parallel downloads ---
-        # A/B ↔ role mapping (confirmed against the _checkpoint_song calls
-        # below): future_a → url_a → Song "A" → ROLE_VOCAL (vocal source);
-        # future_b → url_b → Song "B" → ROLE_INSTRUMENTAL (instrumental source).
-        # On failure we tag the originating exception with which song failed so
-        # the SSE error handler can emit `failed_song` to the frontend (PR #76).
+        # song_a_future → url_a → Song "A"; song_b_future → url_b → Song "B".
+        # On failure we tag the exception with its slot so the SSE error handler
+        # can emit `failed_song` to the frontend (PR #76).
         with ThreadPoolExecutor(max_workers=2) as dl_executor:
-            future_a = dl_executor.submit(_download_a)
-            future_b = dl_executor.submit(_download_b)
+            song_a_future = dl_executor.submit(_download_a)
+            song_b_future = dl_executor.submit(_download_b)
 
             try:
-                result_a = future_a.result(timeout=300)
+                result_a = song_a_future.result(timeout=300)
             except Exception as exc:
                 # If Song A fails, cancel Song B and re-raise
                 _tag_failed_song(exc, "A")
-                future_b.cancel()
+                song_b_future.cancel()
                 dl_executor.shutdown(wait=False, cancel_futures=True)
                 raise
 
             try:
-                result_b = future_b.result(timeout=300)
+                result_b = song_b_future.result(timeout=300)
             except Exception as exc:
                 # Song B failed after Song A succeeded
                 _tag_failed_song(exc, "B")
