@@ -305,6 +305,117 @@ def _checkpoint_song(
         )
 
 
+def _try_run_fully_cached_youtube_remix(
+    session_id: str,
+    prompt: str,
+    session: SessionState,
+    cached_song_a: CachedSong | None,
+    cached_song_b: CachedSong | None,
+    pipeline_start: float,
+) -> bool:
+    """Fast path for when both songs are fully cached (stems + metadata on disk).
+
+    Restores cached stems, measures LUFS, builds ``AnalyzedSongs``, populates
+    metrics, and runs the remix — skipping downloads + analysis entirely.
+
+    Returns:
+        True if the remix was fully handled here. False if the cached stems were
+        missing from disk, signalling the caller to fall back to the normal
+        download/separate pipeline.
+    """
+    from musicmixer.services.pipeline import (
+        check_cancelled, emit_progress, run_remix, _step_measure_stem_lufs,
+    )
+    from musicmixer.services.pipeline_metrics import PipelineMetrics
+    from musicmixer.services.song_cache import get_cached_stems
+    from musicmixer.models import AnalyzedSongs
+
+    # Skip downloads + analysis — jump straight to remix with cached data
+    logger.info("Session %s: Both songs fully cached, skipping downloads + analysis", session_id)
+    emit_progress(session.events, {
+        "step": "downloading",
+        "detail": "Both songs cached — skipping download!",
+        "progress": 0.10,
+    }, session=session)
+
+    check_cancelled(session)
+
+    assert cached_song_a is not None
+    assert cached_song_b is not None
+
+    # Copy cached stems to session directory
+    stems_dir = settings.data_dir / "stems" / session_id
+    song_a_stems_dir = stems_dir / "song_a"
+    song_b_stems_dir = stems_dir / "song_b"
+    from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
+    stems_restored = (
+        get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
+        and get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
+    )
+
+    if not stems_restored:
+        # Stems gone from disk — signal caller to fall back to normal download path
+        logger.warning("Session %s: Cached stems missing, falling back to full pipeline", session_id)
+        return False
+
+    # Build stem path dicts dynamically from whatever WAVs exist on disk.
+    # Song A may have 3 stems (lead_vocals, backing_vocals, instrumental)
+    # or 6 legacy stems; Song B always has 6.
+    song_a_stems = {f.stem: f for f in song_a_stems_dir.glob("*.wav")}
+    song_b_stems = {f.stem: f for f in song_b_stems_dir.glob("*.wav")}
+
+    # Measure LUFS from restored stems
+    vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(
+        session_id, song_a_stems_dir, song_b_stems_dir,
+    )
+
+    analysis = AnalyzedSongs(
+        meta_a=cached_song_a.meta,
+        meta_b=cached_song_b.meta,
+        song_a_stems=song_a_stems,
+        song_b_stems=song_b_stems,
+        song_a_stems_dir=song_a_stems_dir,
+        song_b_stems_dir=song_b_stems_dir,
+        lyrics_a=cached_song_a.lyrics,
+        lyrics_b=cached_song_b.lyrics,
+        vocal_stem_lufs=vocal_stem_lufs,
+        inst_stem_lufs=inst_stem_lufs,
+    )
+
+    _metrics = PipelineMetrics(session_id=session_id)
+    _metrics.song_a_title = cached_song_a.title
+    _metrics.song_b_title = cached_song_b.title
+    _metrics.song_a_video_id = cached_song_a.video_id
+    _metrics.song_b_video_id = cached_song_b.video_id
+    _metrics.song_a_cache_hit = True
+    _metrics.song_b_cache_hit = True
+    _metrics.bpm_a = cached_song_a.meta.bpm
+    _metrics.bpm_b = cached_song_b.meta.bpm
+    _metrics.key_a = cached_song_a.meta.key or ""
+    _metrics.scale_a = cached_song_a.meta.scale or ""
+    _metrics.key_b = cached_song_b.meta.key or ""
+    _metrics.scale_b = cached_song_b.meta.scale or ""
+    _metrics.key_confidence_a = cached_song_a.meta.key_confidence or 0.0
+    _metrics.key_confidence_b = cached_song_b.meta.key_confidence or 0.0
+    _metrics.duration_a_s = cached_song_a.meta.duration_seconds
+    _metrics.duration_b_s = cached_song_b.meta.duration_seconds
+    _metrics.log_input()
+    _metrics.log_analysis()
+
+    run_remix(
+        session_id=session_id,
+        analysis=analysis,
+        prompt=prompt,
+        event_queue=session.events,
+        session=session,
+        source_quality_a=cached_song_a.meta.source_quality,
+        source_quality_b=cached_song_b.meta.source_quality,
+        metrics=_metrics,
+    )
+    _update_avg_remix_duration(time.monotonic() - pipeline_start)
+    return True
+
+
 def _youtube_pipeline_wrapper(
     session_id: str,
     url_a: str,
@@ -344,94 +455,15 @@ def _youtube_pipeline_wrapper(
             and cached_song_b is not None and cached_song_b.has_stems
         )
 
-        if both_fully_cached:
-            # Skip downloads + analysis — jump straight to remix with cached data
-            logger.info("Session %s: Both songs fully cached, skipping downloads + analysis", session_id)
-            emit_progress(session.events, {
-                "step": "downloading",
-                "detail": "Both songs cached — skipping download!",
-                "progress": 0.10,
-            }, session=session)
-
-            from musicmixer.services.pipeline import check_cancelled, _step_measure_stem_lufs
-            from musicmixer.services.song_cache import get_cached_stems
-            from musicmixer.models import AnalyzedSongs
-
-            check_cancelled(session)
-
-            assert cached_song_a is not None
-            assert cached_song_b is not None
-
-            # Copy cached stems to session directory
-            stems_dir = settings.data_dir / "stems" / session_id
-            song_a_stems_dir = stems_dir / "song_a"
-            song_b_stems_dir = stems_dir / "song_b"
-            from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
-            stems_restored = (
-                get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
-                and get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
-            )
-
-            if stems_restored:
-                # Build stem path dicts dynamically from whatever WAVs exist on disk.
-                # Song A may have 3 stems (lead_vocals, backing_vocals, instrumental)
-                # or 6 legacy stems; Song B always has 6.
-                song_a_stems = {f.stem: f for f in song_a_stems_dir.glob("*.wav")}
-                song_b_stems = {f.stem: f for f in song_b_stems_dir.glob("*.wav")}
-
-                # Measure LUFS from restored stems
-                vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(
-                    session_id, song_a_stems_dir, song_b_stems_dir,
-                )
-
-                analysis = AnalyzedSongs(
-                    meta_a=cached_song_a.meta,
-                    meta_b=cached_song_b.meta,
-                    song_a_stems=song_a_stems,
-                    song_b_stems=song_b_stems,
-                    song_a_stems_dir=song_a_stems_dir,
-                    song_b_stems_dir=song_b_stems_dir,
-                    lyrics_a=cached_song_a.lyrics,
-                    lyrics_b=cached_song_b.lyrics,
-                    vocal_stem_lufs=vocal_stem_lufs,
-                    inst_stem_lufs=inst_stem_lufs,
-                )
-
-                _metrics = PipelineMetrics(session_id=session_id)
-                _metrics.song_a_title = cached_song_a.title
-                _metrics.song_b_title = cached_song_b.title
-                _metrics.song_a_video_id = cached_song_a.video_id
-                _metrics.song_b_video_id = cached_song_b.video_id
-                _metrics.song_a_cache_hit = True
-                _metrics.song_b_cache_hit = True
-                _metrics.bpm_a = cached_song_a.meta.bpm
-                _metrics.bpm_b = cached_song_b.meta.bpm
-                _metrics.key_a = cached_song_a.meta.key or ""
-                _metrics.scale_a = cached_song_a.meta.scale or ""
-                _metrics.key_b = cached_song_b.meta.key or ""
-                _metrics.scale_b = cached_song_b.meta.scale or ""
-                _metrics.key_confidence_a = cached_song_a.meta.key_confidence or 0.0
-                _metrics.key_confidence_b = cached_song_b.meta.key_confidence or 0.0
-                _metrics.duration_a_s = cached_song_a.meta.duration_seconds
-                _metrics.duration_b_s = cached_song_b.meta.duration_seconds
-                _metrics.log_input()
-                _metrics.log_analysis()
-
-                run_remix(
-                    session_id=session_id,
-                    analysis=analysis,
-                    prompt=prompt,
-                    event_queue=session.events,
-                    session=session,
-                    source_quality_a=cached_song_a.meta.source_quality,
-                    source_quality_b=cached_song_b.meta.source_quality,
-                    metrics=_metrics,
-                )
-                _update_avg_remix_duration(time.monotonic() - pipeline_start)
-                return
-
-            # Stems gone from disk — fall through to normal download path
-            logger.warning("Session %s: Cached stems missing, falling back to full pipeline", session_id)
+        if both_fully_cached and _try_run_fully_cached_youtube_remix(
+            session_id=session_id,
+            prompt=prompt,
+            session=session,
+            cached_song_a=cached_song_a,
+            cached_song_b=cached_song_b,
+            pipeline_start=pipeline_start,
+        ):
+            return
 
         # --- Monotonic progress tracker ---
         # Both downloads report into the 0.02-0.10 range.  Song A maps to
