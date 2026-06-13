@@ -32,10 +32,130 @@ _YOUTUBE_HOSTS = frozenset({
 })
 
 
-class YouTubeDownloadError(Exception):
-    """User-facing error from YouTube download operations."""
+# Wire-contract values for the SSE `error` event's `error_class` field.
+# Consumed by frontend PR #76: `error_class: "transient" | "permanent"`.
+#   - transient  → retryable (403 / throttle / timeout / 5xx). Worth a retry.
+#   - permanent  → not retryable (video unavailable/private/removed/age-gated).
+ERROR_CLASS_TRANSIENT = "transient"
+ERROR_CLASS_PERMANENT = "permanent"
 
-    pass
+
+class YouTubeDownloadError(Exception):
+    """User-facing error from YouTube download operations.
+
+    Carries an ``error_class`` (``"transient"`` | ``"permanent"``) so the SSE
+    ``error`` event can tell the frontend whether a retry is worth offering.
+    Defaults to ``"permanent"`` — the safe default is to NOT promise a retry for
+    a failure we can't prove is transient (mirrors the frontend's own default in
+    PR #76: a missing ``error_class`` is treated as permanent).
+    """
+
+    def __init__(self, message: str, error_class: str = ERROR_CLASS_PERMANENT) -> None:
+        super().__init__(message)
+        self.error_class = error_class
+
+
+def classify_youtube_error(*, status_code: int | None, detail: str) -> str:
+    """Classify a download failure as ``transient`` (retryable) or ``permanent``.
+
+    This is the SINGLE choke-point for transient/permanent classification. It is
+    net-new logic — NOT a reuse of ``_map_ytdlp_error`` (which returns DISPLAY
+    strings, not a retry class). It borrows that function's string-matching
+    *patterns* but maps to the wire-contract ``error_class`` instead.
+
+    Best-effort from what the backend actually has today: the proxy collapses
+    every yt-dlp error to a fixed ``HTTPException(400, "Failed to download from
+    YouTube")`` (``yt-proxy/main.py``), so the only signals available are the
+    proxy's HTTP ``status_code`` and its ``detail`` string. We classify from
+    those.
+
+    TODO(proxy-forwarded-category): once ``yt-proxy`` forwards a structured
+    category (e.g. a raw yt-dlp error string and/or an explicit ``error_class``
+    in the JSON body), plug it in HERE — prefer the forwarded category over the
+    status/detail heuristics below. This is the seam; do not classify anywhere
+    else. (Proxy change is OUT OF SCOPE for this wave.)
+
+    Args:
+        status_code: HTTP status from the proxy response, or None when the
+            failure was raised before/without an HTTP response (e.g. a network
+            error talking to the proxy itself).
+        detail: The proxy's ``detail`` string (or any error text available).
+
+    Returns:
+        ``ERROR_CLASS_TRANSIENT`` or ``ERROR_CLASS_PERMANENT``.
+    """
+    msg = (detail or "").lower()
+
+    # --- Permanent signals first (a removed/private/age-gated video will never
+    #     succeed on retry, so these must win even if a transient-looking token
+    #     also appears in the text). ---
+    # Live streams: not a download target (mirrors _map_ytdlp_error ordering —
+    # checked before "not available" since a live message may contain it).
+    if "live" in msg and ("stream" in msg or "event" in msg):
+        return ERROR_CLASS_PERMANENT
+    if (
+        "video unavailable" in msg
+        or "is not available" in msg
+        or "has been removed" in msg
+        or "private video" in msg
+        or "this video is private" in msg
+        or "removed by the user" in msg
+        or "account associated" in msg  # "account...has been terminated"
+        or "terminated" in msg
+    ):
+        return ERROR_CLASS_PERMANENT
+    if "age" in msg and ("restrict" in msg or "gate" in msg or "confirm" in msg):
+        return ERROR_CLASS_PERMANENT
+    if "no audio" in msg or "no suitable" in msg or "requested format" in msg:
+        return ERROR_CLASS_PERMANENT
+    # Geo-blocking is permanent from THIS server's vantage point — a retry from
+    # the same IP/region won't clear it.
+    if (
+        "not available in your" in msg
+        or "not available in the server" in msg
+        or "geo" in msg
+        or "country" in msg
+        or "region" in msg
+    ):
+        return ERROR_CLASS_PERMANENT
+
+    # --- Transient signals: throttle / forbidden / timeout / network / 5xx. ---
+    # These are exactly the incident class (a 403 that succeeded a beat later).
+    if (
+        "403" in msg
+        or "forbidden" in msg
+        or "429" in msg
+        or "too many" in msg
+        or "throttl" in msg
+        or "rate" in msg
+        or "timed out" in msg
+        or "timeout" in msg
+        or "temporarily" in msg
+        or "connection" in msg
+        or "network" in msg
+        or "urlopen" in msg
+        or "resolve" in msg
+    ):
+        return ERROR_CLASS_TRANSIENT
+
+    # --- Fall back to the HTTP status code when the detail text is unhelpful
+    #     (it usually is — the proxy sends a generic "Failed to download"). ---
+    if status_code is not None:
+        # 5xx and 429 are server-side / throttle → retryable.
+        if status_code >= 500 or status_code == 429:
+            return ERROR_CLASS_TRANSIENT
+        # The proxy collapses transient yt-dlp 403s into its own 400. We can't
+        # distinguish a transient 403 from a permanent "unavailable" purely from
+        # a generic 400 + opaque detail, so we bias the generic-400 case toward
+        # TRANSIENT: the observed incident (HTTP 403 on the media stream) is the
+        # dominant generic-400 cause, and an over-eager retry is cheaper than
+        # wrongly telling the user a recoverable video is gone forever.
+        if status_code == 400:
+            return ERROR_CLASS_TRANSIENT
+
+    # Truly unknown → permanent (safe default: don't promise a retry we can't
+    # justify).
+    return ERROR_CLASS_PERMANENT
 
 
 @dataclass
@@ -210,13 +330,30 @@ async def _download_via_proxy(
                 json={"url": url, "max_duration_seconds": settings.youtube_max_duration_seconds},
                 headers={"X-API-Key": api_key} if api_key else {},
             )
+    except httpx.RequestError as exc:
+        # Transport-level failure talking to the proxy (timeout, connection
+        # reset, DNS) — there's no HTTP response to read. These are inherently
+        # retryable, so classify transient (status_code=None).
+        logger.warning("Proxy request error (transient): %s", exc)
+        raise YouTubeDownloadError(
+            "Failed to download from YouTube. Check the URL and try again",
+            error_class=ERROR_CLASS_TRANSIENT,
+        ) from exc
     finally:
         download_done.set()
         await ticker
 
     if resp.status_code != 200:
         detail = resp.json().get("detail", "Download failed") if resp.headers.get("content-type", "").startswith("application/json") else "Download failed"
-        raise YouTubeDownloadError(detail)
+        # Best-effort transient/permanent classification from the only signals
+        # the proxy gives us today (status code + detail string). See the TODO
+        # seam in classify_youtube_error() for the future proxy-forwarded category.
+        error_class = classify_youtube_error(status_code=resp.status_code, detail=detail)
+        logger.warning(
+            "Proxy download failed: status=%s class=%s detail=%r",
+            resp.status_code, error_class, detail,
+        )
+        raise YouTubeDownloadError(detail, error_class=error_class)
 
     title = resp.headers.get("X-Title", "Unknown")
     duration = float(resp.headers.get("X-Duration", "0"))
@@ -521,11 +658,16 @@ async def _download_youtube_audio_uncached(
     except YouTubeDownloadError:
         raise
     except yt_dlp.utils.DownloadError as e:
+        # Direct (non-proxy) path: we have the RAW yt-dlp error string here, a
+        # richer signal than the proxy path gets. Classify from it so this path
+        # also emits a correct error_class on the SSE error event.
         user_msg = _map_ytdlp_error(e)
-        raise YouTubeDownloadError(user_msg) from e
+        error_class = classify_youtube_error(status_code=None, detail=str(e))
+        raise YouTubeDownloadError(user_msg, error_class=error_class) from e
     except Exception as e:
         user_msg = _map_ytdlp_error(e)
-        raise YouTubeDownloadError(user_msg) from e
+        error_class = classify_youtube_error(status_code=None, detail=str(e))
+        raise YouTubeDownloadError(user_msg, error_class=error_class) from e
 
     # Determine the output WAV path
     if final_path_holder:
