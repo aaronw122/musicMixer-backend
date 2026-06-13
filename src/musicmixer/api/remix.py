@@ -327,7 +327,7 @@ def _try_run_fully_cached_youtube_remix(
         check_cancelled, emit_progress, run_remix, _step_measure_stem_lufs,
     )
     from musicmixer.services.pipeline_metrics import PipelineMetrics
-    from musicmixer.services.song_cache import get_cached_stems
+    from musicmixer.services.song_cache import cached_stems_exist, get_cached_stems
     from musicmixer.models import AnalyzedSongs
 
     # Skip downloads + analysis — jump straight to remix with cached data
@@ -348,15 +348,23 @@ def _try_run_fully_cached_youtube_remix(
     song_a_stems_dir = stems_dir / "song_a"
     song_b_stems_dir = stems_dir / "song_b"
     from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
-    stems_restored = (
-        get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
-        and get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
-    )
 
-    if not stems_restored:
+    # Validate-before-mutate: confirm BOTH songs' cached stems are present/valid
+    # on disk before copying either. get_cached_stems() copies as a side effect,
+    # so a short-circuited "A ok and B missing" would orphan A's freshly-copied
+    # stems in the session dir before falling back. Checking both first means the
+    # fallback path copies nothing.
+    if not (
+        cached_stems_exist(cached_song_a.video_id, ROLE_VOCAL)
+        and cached_stems_exist(cached_song_b.video_id, ROLE_INSTRUMENTAL)
+    ):
         # Stems gone from disk — signal caller to fall back to normal download path
         logger.warning("Session %s: Cached stems missing, falling back to full pipeline", session_id)
         return False
+
+    # Both confirmed present — now perform the copies.
+    get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
+    get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
 
     # Build stem path dicts dynamically from whatever WAVs exist on disk.
     # Song A may have 3 stems (lead_vocals, backing_vocals, instrumental)

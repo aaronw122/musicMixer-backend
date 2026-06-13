@@ -482,3 +482,123 @@ class TestTieredLookup:
                 output_dir=tmp_path / "s", video_id=None,
             ))
         assert calls["n"] == 2, "no caching without a video_id"
+
+
+# ---------------------------------------------------------------------------
+# Fully-cached fast path: validate-before-mutate (no orphaned copy)
+# ---------------------------------------------------------------------------
+
+class TestFullyCachedFastPath:
+    """`_try_run_fully_cached_youtube_remix` must confirm BOTH songs' cached
+    stems exist on disk before copying either, so the degraded-cache fallback
+    leaves no orphaned (half-restored) stems in the session dir.
+
+    Role mapping (matches the production fast path): song A = ROLE_VOCAL,
+    song B = ROLE_INSTRUMENTAL.
+    """
+
+    def _cached_song(self, video_id: str, has_stems: bool = True) -> CachedSong:
+        from musicmixer.models import CachedSong
+        return CachedSong(
+            video_id=video_id,
+            title=f"Title-{video_id}",
+            artist="Artist",
+            meta=_make_meta(),
+            lyrics=None,
+            stems_path=None,
+            has_stems=has_stems,
+        )
+
+    def _write_cache_stems(self, video_id: str, role: SongRole, names: list[str]) -> None:
+        """Lay down valid cached stems on disk for (video_id, role)."""
+        _make_named_dir(settings.song_cache_dir / video_id / role, names)
+
+    @pytest.fixture
+    def fast_path_env(self, tmp_path, monkeypatch):
+        """Isolate data_dir + song_cache_dir under tmp_path and stub the heavy
+        pipeline functions the helper lazily imports."""
+        monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
+        monkeypatch.setattr(settings, "song_cache_dir", tmp_path / "song_cache")
+
+        import musicmixer.services.pipeline as pipeline
+
+        calls: dict[str, int] = {"run_remix": 0, "lufs": 0}
+
+        def _fake_run_remix(**kwargs):
+            calls["run_remix"] += 1
+
+        def _fake_lufs(session_id, a_dir, b_dir):
+            calls["lufs"] += 1
+            return {}, {}
+
+        monkeypatch.setattr(pipeline, "run_remix", _fake_run_remix)
+        monkeypatch.setattr(pipeline, "_step_measure_stem_lufs", _fake_lufs)
+        monkeypatch.setattr(pipeline, "emit_progress", lambda *a, **k: None)
+        monkeypatch.setattr(pipeline, "check_cancelled", lambda *a, **k: None)
+        return calls
+
+    def _make_session(self):
+        from musicmixer.models import SessionState
+        return SessionState(status="processing")
+
+    def _run(self, session_id, song_a, song_b):
+        from musicmixer.api.remix import _try_run_fully_cached_youtube_remix
+        return _try_run_fully_cached_youtube_remix(
+            session_id=session_id,
+            prompt="test prompt",
+            session=self._make_session(),
+            cached_song_a=song_a,
+            cached_song_b=song_b,
+            pipeline_start=0.0,
+        )
+
+    def test_both_present_runs_remix(self, fast_path_env):
+        """Happy path: both stem sets present -> True, run_remix invoked, both
+        session stem dirs populated."""
+        session_id = "sess_fastpath_both"
+        vid_a, vid_b = "test_cc_fp_a1", "test_cc_fp_b1"
+        self._write_cache_stems(vid_a, ROLE_VOCAL, VOCAL_STEM_NAMES)
+        self._write_cache_stems(vid_b, ROLE_INSTRUMENTAL, STEM_NAMES)
+
+        result = self._run(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
+
+        assert result is True
+        assert fast_path_env["run_remix"] == 1
+
+        stems_dir = settings.data_dir / "stems" / session_id
+        assert (stems_dir / "song_a").is_dir()
+        assert list((stems_dir / "song_a").glob("*.wav"))
+        assert list((stems_dir / "song_b").glob("*.wav"))
+
+    def test_song_b_missing_falls_through_without_orphan_copy(self, fast_path_env):
+        """Regression: song A present, song B missing -> False (fall through) and
+        NO song-A stems were copied into the session dir (no orphaned work)."""
+        session_id = "sess_fastpath_b_missing"
+        vid_a, vid_b = "test_cc_fp_a2", "test_cc_fp_b2"
+        # Song A cached/valid; song B intentionally NOT written to disk.
+        self._write_cache_stems(vid_a, ROLE_VOCAL, VOCAL_STEM_NAMES)
+
+        result = self._run(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
+
+        assert result is False, "missing B stems must signal fall-through"
+        assert fast_path_env["run_remix"] == 0, "remix must not run on fall-through"
+
+        # The orphaned-copy bug: A's stems must NOT have been copied. The session
+        # song_a dir must be absent/empty (nothing copied before the False return).
+        song_a_session = settings.data_dir / "stems" / session_id / "song_a"
+        copied = list(song_a_session.glob("*.wav")) if song_a_session.exists() else []
+        assert copied == [], f"song A stems were orphaned into session dir: {copied}"
+
+    def test_both_absent_falls_through(self, fast_path_env):
+        """Both stem sets missing -> False, nothing copied, no remix."""
+        session_id = "sess_fastpath_both_missing"
+        vid_a, vid_b = "test_cc_fp_a3", "test_cc_fp_b3"
+        # Neither written to disk.
+
+        result = self._run(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
+
+        assert result is False
+        assert fast_path_env["run_remix"] == 0
+        session_root = settings.data_dir / "stems" / session_id
+        copied = list(session_root.rglob("*.wav")) if session_root.exists() else []
+        assert copied == [], f"nothing should be copied when both absent: {copied}"

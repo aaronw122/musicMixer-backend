@@ -921,6 +921,20 @@ class single_flight:
         self._lock.release()
 
 
+def cached_stems_exist(video_id: str, role: SongRole) -> bool:
+    """Return True if valid cached stems exist on disk for (video_id, role).
+
+    Non-mutating existence/validity check using the SAME role-aware identity
+    logic ``get_cached_stems`` gates on (``_stems_valid_for_role``), so a
+    "validate" and a subsequent "copy" can never disagree. Copies nothing —
+    callers can confirm presence before mutating any session dir.
+    """
+    cache_dir = settings.song_cache_dir / video_id / role
+    if not cache_dir.is_dir():
+        return False
+    return _stems_valid_for_role(role, list(cache_dir.glob("*.wav")))
+
+
 def get_cached_stems(video_id: str, role: SongRole, output_dir: Path) -> bool:
     """Copy cached stems to output_dir. Returns True if stems were found.
 
