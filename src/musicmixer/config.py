@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # LLM (Day 3)
     anthropic_api_key: str = ""  # ANTHROPIC_API_KEY env var
-    llm_model: str = "claude-sonnet-4-20250514"
+    llm_model: str = "claude-sonnet-4-6"
     llm_timeout_seconds: int = 20
     llm_max_retries: int = 1
 

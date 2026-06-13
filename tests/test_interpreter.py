@@ -505,7 +505,7 @@ class TestInterpretPromptCaching:
         mock_response = MagicMock()
         mock_response.stop_reason = "tool_use"
         mock_response.content = [mock_tool_use]
-        mock_response.model = "claude-sonnet-4-20250514"
+        mock_response.model = "claude-sonnet-4-6"
         mock_response.usage = MagicMock()
         mock_response.usage.cache_read_input_tokens = 1000
         mock_response.usage.cache_creation_input_tokens = 5000
@@ -514,7 +514,7 @@ class TestInterpretPromptCaching:
              patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
             mock_settings.stem_backend = "modal"
             mock_settings.anthropic_api_key = "test-key"
-            mock_settings.llm_model = "claude-sonnet-4-20250514"
+            mock_settings.llm_model = "claude-sonnet-4-6"
             mock_settings.llm_timeout_seconds = 30
             mock_settings.llm_max_retries = 1
 
@@ -577,7 +577,7 @@ class TestInterpretPromptCaching:
         mock_response = MagicMock()
         mock_response.stop_reason = "tool_use"
         mock_response.content = [mock_tool_use]
-        mock_response.model = "claude-sonnet-4-20250514"
+        mock_response.model = "claude-sonnet-4-6"
         # Simulate old SDK without cache fields -- use a plain object
         mock_usage = type("Usage", (), {"input_tokens": 100, "output_tokens": 50})()
         mock_response.usage = mock_usage
@@ -586,7 +586,7 @@ class TestInterpretPromptCaching:
              patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
             mock_settings.stem_backend = "modal"
             mock_settings.anthropic_api_key = "test-key"
-            mock_settings.llm_model = "claude-sonnet-4-20250514"
+            mock_settings.llm_model = "claude-sonnet-4-6"
             mock_settings.llm_timeout_seconds = 30
             mock_settings.llm_max_retries = 1
 
@@ -987,7 +987,7 @@ def _mock_response(stop_reason: str, plan_input: dict | None = None,
     resp = MagicMock()
     resp.stop_reason = stop_reason
     resp.content = content
-    resp.model = "claude-sonnet-4-20250514"
+    resp.model = "claude-sonnet-4-6"
     resp.usage = MagicMock()
     resp.usage.input_tokens = input_tokens
     resp.usage.output_tokens = output_tokens
@@ -1005,7 +1005,7 @@ def _interpret_with_mock(mock_responses):
          patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
         mock_settings.stem_backend = "modal"
         mock_settings.anthropic_api_key = "test-key"
-        mock_settings.llm_model = "claude-sonnet-4-20250514"
+        mock_settings.llm_model = "claude-sonnet-4-6"
         mock_settings.llm_timeout_seconds = 30
         mock_settings.llm_max_retries = 1
 
@@ -1072,7 +1072,7 @@ class TestRetryMessageReplacement:
              patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
             mock_settings.stem_backend = "modal"
             mock_settings.anthropic_api_key = "test-key"
-            mock_settings.llm_model = "claude-sonnet-4-20250514"
+            mock_settings.llm_model = "claude-sonnet-4-6"
             mock_settings.llm_timeout_seconds = 30
             mock_settings.llm_max_retries = 1
 
@@ -1105,7 +1105,7 @@ class TestRetryMessageReplacement:
              patch("musicmixer.services.interpreter.anthropic") as mock_anthropic:
             mock_settings.stem_backend = "modal"
             mock_settings.anthropic_api_key = "test-key"
-            mock_settings.llm_model = "claude-sonnet-4-20250514"
+            mock_settings.llm_model = "claude-sonnet-4-6"
             mock_settings.llm_timeout_seconds = 30
             mock_settings.llm_max_retries = 1
 
