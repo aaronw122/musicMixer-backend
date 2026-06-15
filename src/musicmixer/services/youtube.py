@@ -432,16 +432,13 @@ async def download_youtube_audio(
     # --- SSRF validation (must happen before yt-dlp touches the URL) ---
     validate_youtube_url(url)
 
-    # No cache key → always download (back-compat bypass for callers w/o video_id).
     if video_id is None:
         return await _download_youtube_audio_uncached(url, output_dir, progress_callback)
 
-    # Fast path: cache hit before taking the single-flight lock.
     cached = _cached_audio_result(video_id, output_dir, progress_callback)
     if cached is not None:
         return cached
 
-    # Otherwise serialize concurrent same-video requests and download once.
     return await _download_with_single_flight(url, output_dir, progress_callback, video_id)
 
 
