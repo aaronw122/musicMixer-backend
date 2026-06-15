@@ -413,6 +413,60 @@ def _try_run_fully_cached_youtube_remix(
     return True
 
 
+# Structured-error wire contract (producer side; consumer is frontend PR #76).
+# The SSE `error` event carries two OPTIONAL fields alongside {step, detail,
+# progress}: `error_class` ("transient" | "permanent") and `failed_song`
+# ("A" | "B"). Field names and values (snake_case, exact strings) must match
+# the frontend. Built by `_build_error_event`.
+
+# Attribute used to carry "which song failed" on a download exception until the
+# top-level error handler reads it. Set by `_tag_failed_song`.
+_FAILED_SONG_ATTR = "_mm_failed_song"
+
+
+def _tag_failed_song(exc: BaseException, song: str) -> None:
+    """Tag an in-flight download exception with the song slot that failed.
+
+    `song` is "A" or "B". Best-effort: if the exception object can't carry an
+    attribute (rare), we silently skip — the error still surfaces, just without
+    `failed_song`.
+    """
+    try:
+        setattr(exc, _FAILED_SONG_ATTR, song)
+    except Exception:
+        pass
+
+
+def _build_error_event(exc: BaseException) -> dict:
+    """Build the SSE `error` event payload from a pipeline exception.
+
+    Emits the structured-error wire contract (frontend PR #76):
+      - `error_class`: read from a `YouTubeDownloadError.error_class` if present,
+        else omitted (the frontend treats a missing class as permanent).
+      - `failed_song`: read from the `_tag_failed_song` attribute if the failure
+        was attributable to a specific download, else omitted.
+    """
+    from musicmixer.services.youtube import YouTubeDownloadError
+
+    event: dict = {
+        "step": "error",
+        "detail": str(exc),
+        "progress": 0,
+    }
+
+    # error_class — only YouTube download failures carry one today.
+    error_class = getattr(exc, "error_class", None)
+    if isinstance(exc, YouTubeDownloadError) and error_class:
+        event["error_class"] = error_class
+
+    # failed_song — omit when the failure isn't attributable to one download.
+    failed_song = getattr(exc, _FAILED_SONG_ATTR, None)
+    if failed_song in ("A", "B"):
+        event["failed_song"] = failed_song
+
+    return event
+
+
 def _youtube_pipeline_wrapper(
     session_id: str,
     url_a: str,
@@ -525,22 +579,27 @@ def _youtube_pipeline_wrapper(
             ))
 
         # --- Parallel downloads ---
+        # song_a_future → url_a → Song "A"; song_b_future → url_b → Song "B".
+        # On failure we tag the exception with its slot so the SSE error handler
+        # can emit `failed_song` to the frontend (PR #76).
         with ThreadPoolExecutor(max_workers=2) as dl_executor:
-            future_a = dl_executor.submit(_download_a)
-            future_b = dl_executor.submit(_download_b)
+            song_a_future = dl_executor.submit(_download_a)
+            song_b_future = dl_executor.submit(_download_b)
 
             try:
-                result_a = future_a.result(timeout=300)
-            except Exception:
+                result_a = song_a_future.result(timeout=300)
+            except Exception as exc:
                 # If Song A fails, cancel Song B and re-raise
-                future_b.cancel()
+                _tag_failed_song(exc, "A")
+                song_b_future.cancel()
                 dl_executor.shutdown(wait=False, cancel_futures=True)
                 raise
 
             try:
-                result_b = future_b.result(timeout=300)
-            except Exception:
+                result_b = song_b_future.result(timeout=300)
+            except Exception as exc:
                 # Song B failed after Song A succeeded
+                _tag_failed_song(exc, "B")
                 dl_executor.shutdown(wait=False, cancel_futures=True)
                 raise
 
@@ -639,11 +698,7 @@ def _youtube_pipeline_wrapper(
     except BaseException as exc:
         logger.exception("Session %s: YouTube pipeline failed", session_id)
         session.status = "error"
-        emit_progress(session.events, {
-            "step": "error",
-            "detail": str(exc),
-            "progress": 0,
-        }, session=session)
+        emit_progress(session.events, _build_error_event(exc), session=session)
     finally:
         processing_lock.release()
         _process_next_queued(app_state)
