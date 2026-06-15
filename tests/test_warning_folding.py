@@ -22,8 +22,7 @@ def _plan(explanation: str = "Base description."):
 
 
 def test_key_shift_folds_positive_note_no_warning():
-    """A successful key shift (Uptown Funk case: C major vs E minor) adds an
-    upbeat line to the description and emits NO key-clash warning."""
+    """Uptown Funk case: C major vs E minor — keys converge via pitch shift."""
     plan = _plan()
     session = SimpleNamespace(key_warning=None)
 
@@ -53,8 +52,6 @@ def test_same_key_adds_no_note():
 
 
 def test_large_tempo_gap_keeps_major_warning_drops_minor():
-    """An unstretchable tempo gap keeps its warning; the minor-distortion note
-    (auto-handled) is never surfaced."""
     plan = _plan()
     session = SimpleNamespace(key_warning=None)
 
