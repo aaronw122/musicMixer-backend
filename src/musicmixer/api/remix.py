@@ -330,7 +330,6 @@ def _try_run_fully_cached_youtube_remix(
     from musicmixer.services.song_cache import cached_stems_exist, get_cached_stems
     from musicmixer.models import AnalyzedSongs
 
-    # Skip downloads + analysis — jump straight to remix with cached data
     logger.info("Session %s: Both songs fully cached, skipping downloads + analysis", session_id)
     emit_progress(session.events, {
         "step": "downloading",
@@ -343,36 +342,26 @@ def _try_run_fully_cached_youtube_remix(
     assert cached_song_a is not None
     assert cached_song_b is not None
 
-    # Copy cached stems to session directory
     stems_dir = settings.data_dir / "stems" / session_id
     song_a_stems_dir = stems_dir / "song_a"
     song_b_stems_dir = stems_dir / "song_b"
     from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
 
-    # Validate-before-mutate: confirm BOTH songs' cached stems are present/valid
-    # on disk before copying either. get_cached_stems() copies as a side effect,
-    # so a short-circuited "A ok and B missing" would orphan A's freshly-copied
-    # stems in the session dir before falling back. Checking both first means the
-    # fallback path copies nothing.
+    # get_cached_stems copies as a side effect, so confirm BOTH are present before
+    # copying either — otherwise "A ok, B missing" orphans A's stems on fallback.
     if not (
         cached_stems_exist(cached_song_a.video_id, ROLE_VOCAL)
         and cached_stems_exist(cached_song_b.video_id, ROLE_INSTRUMENTAL)
     ):
-        # Stems gone from disk — signal caller to fall back to normal download path
         logger.warning("Session %s: Cached stems missing, falling back to full pipeline", session_id)
         return False
 
-    # Both confirmed present — now perform the copies.
     get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
     get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
 
-    # Build stem path dicts dynamically from whatever WAVs exist on disk.
-    # Song A may have 3 stems (lead_vocals, backing_vocals, instrumental)
-    # or 6 legacy stems; Song B always has 6.
     song_a_stems = {f.stem: f for f in song_a_stems_dir.glob("*.wav")}
     song_b_stems = {f.stem: f for f in song_b_stems_dir.glob("*.wav")}
 
-    # Measure LUFS from restored stems
     vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(
         session_id, song_a_stems_dir, song_b_stems_dir,
     )
@@ -513,10 +502,7 @@ def _youtube_pipeline_wrapper(
             else:
                 _emit_monotonic("Grabbing your second song...", progress)
 
-        # --- Resolve video IDs up-front so the audio cache + single-flight can key
-        #     on them (Tier 2/3: a cached download skips YouTube; single-flight
-        #     dedups concurrent same-video requests, incl. the future_a/future_b
-        #     pair in inverse-songs mixes).
+        # Resolve video IDs up-front so the audio cache + single-flight can key on them.
         from musicmixer.api.shelf import _extract_video_id as _yt_extract_vid_dl
         _dl_vid_a = _yt_extract_vid_dl(url_a)
         _dl_vid_b = _yt_extract_vid_dl(url_b)
@@ -612,14 +598,8 @@ def _youtube_pipeline_wrapper(
             cached_lyrics_b=cached_song_b.lyrics if cached_song_b else None,
         )
 
-        # --- Per-song checkpoint (Part A resumability) ---
-        # Persist each song's stems + metadata to the cache NOW — immediately
-        # after separation/analysis completes and BEFORE the expensive remix /
-        # render phase. This is per-song and failure-isolated: a crash or cache
-        # failure for one song never discards the other's already-persisted work,
-        # so a retry resumes at song granularity instead of re-separating both.
-        # Songs that arrived via the medium-cache path (cached_song_* set) already
-        # have metadata cached, so only their stems are (re-)written for the role.
+        # Checkpoint each song's stems + metadata before the expensive remix/render,
+        # failure-isolated so a crash resumes at song granularity, not from scratch.
         from musicmixer.api.shelf import _extract_video_id
         from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
 

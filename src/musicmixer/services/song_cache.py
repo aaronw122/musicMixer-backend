@@ -643,11 +643,8 @@ def _write_song_metadata(
     cached_at = datetime.now(timezone.utc).isoformat()
     mapping = _build_meta_mapping(title, artist, meta, lyrics, cached_at)
 
-    # 1. Disk first — the source of truth. A failure here must abort (don't leave
-    #    Redis fresh while disk is stale/absent).
     _atomic_write_text(_meta_path(video_id), json.dumps(mapping))
 
-    # 2. Redis accelerator. Best-effort: disk already holds the truth.
     try:
         _write_redis_meta(video_id, mapping)
     except redis.RedisError:
@@ -740,12 +737,6 @@ def cache_song_stems(video_id: str, role: SongRole, stems_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Audio cache (role-agnostic raw download, by video_id)
 # ---------------------------------------------------------------------------
-#
-# The audio cache stores the raw downloaded audio ONCE per video_id, independent
-# of role: data/song_cache/{video_id}/audio.mp3. This is the role-agnostic
-# invariant — one download per video, re-separated per required role. It is the
-# Tier-3→Tier-2 bridge: a Tier-2 hit (audio cached, stems missing for the role)
-# avoids YouTube entirely and only re-runs separation.
 
 _AUDIO_FILENAME = "audio.mp3"
 _AUDIO_META_FILENAME = "audio_meta.json"
@@ -801,9 +792,8 @@ def cache_audio(video_id: str, audio_bytes: bytes, meta: dict[str, Any] | None =
     """Atomically persist raw downloaded audio bytes (+ sidecar meta) for ``video_id``.
 
     Writes via temp + os.replace so a crash mid-write never leaves a truncated
-    file that would pass an existence-only check (Part 0 atomic-write contract).
-    The audio file is written LAST so the sidecar is never newer than the audio
-    it describes. Returns the cache path.
+    file that would pass an existence-only check. The audio file is written LAST
+    so the sidecar is never newer than the audio it describes. Returns the path.
     """
     if meta is not None:
         _atomic_write_text(_audio_meta_path(video_id), json.dumps(meta))
@@ -815,15 +805,12 @@ def cache_audio(video_id: str, audio_bytes: bytes, meta: dict[str, Any] | None =
 
 
 def _enforce_audio_cache_size_cap(protected_video_id: str | None = None) -> None:
-    """Evict oldest cached audio files when total size exceeds the configured cap.
+    """Evict oldest cached audio files (least-recently-modified first) when total
+    size exceeds the configured cap.
 
-    Conservative policy (see plan Open decisions):
-    - Only audio.mp3 files are eligible for eviction — meta.json and stem dirs are
-      NEVER touched, so a Tier-1 stems hit is never dropped while leaving a
-      dangling audio reference, and meta.json (source of truth) always survives.
-    - ``protected_video_id`` (the just-written or in-flight video) is never
-      evicted, so a concurrent separation that is about to read it is safe.
-    - Eviction is least-recently-modified first.
+    Only audio.mp3 files are eligible — meta.json and stem dirs are never touched,
+    and ``protected_video_id`` (the just-written or in-flight video) is never
+    evicted, so a concurrent separation about to read it is safe.
     """
     cap_gb = settings.audio_cache_max_gb
     if cap_gb <= 0:
@@ -868,12 +855,7 @@ def _enforce_audio_cache_size_cap(protected_video_id: str | None = None) -> None
 # ---------------------------------------------------------------------------
 # Single-flight dedup (per video_id)
 # ---------------------------------------------------------------------------
-#
-# Two concurrent requests for the same video_id (cross-session, or the intra-
-# request future_a/future_b pair in inverse-songs mixes) must not both
-# download/separate. The second waits on a per-video_id lock and reuses the
-# first's cached result. We use an in-process lock registry (the backend runs a
-# single process); a multi-process deployment would swap this for a Redis lock.
+# In-process lock registry; a multi-process deployment would swap this for Redis.
 
 _single_flight_lock = threading.Lock()
 _video_locks: dict[str, threading.Lock] = {}

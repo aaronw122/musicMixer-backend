@@ -98,7 +98,7 @@ def clean_disk_cache():
 
 
 # ---------------------------------------------------------------------------
-# Part 0: meta.json source of truth + Redis-flush fallback
+# meta.json source of truth + Redis-flush fallback
 # ---------------------------------------------------------------------------
 
 class TestMetaOnDiskFallback:
@@ -107,12 +107,9 @@ class TestMetaOnDiskFallback:
         clean_disk_cache.append(vid)
         cache_song_metadata(vid, "Title", "Artist", _make_meta(), None)
 
-        # Disk source of truth exists.
         assert _meta_path(vid).is_file()
         disk = _load_meta_from_disk(vid)
         assert disk is not None and disk["title"] == "Title"
-
-        # Redis accelerator was populated too.
         assert clean_redis.exists(_meta_key(vid)) == 1
 
     def test_fallback_to_disk_after_redis_flush(self, clean_redis, clean_disk_cache):
@@ -132,9 +129,7 @@ class TestMetaOnDiskFallback:
         assert result is not None, "stems on disk must remain reachable after a flush"
         assert result.meta.bpm == 128.0
         assert result.has_stems is True
-
-        # Redis was re-warmed from disk for next time.
-        assert clean_redis.exists(_meta_key(vid)) == 1
+        assert clean_redis.exists(_meta_key(vid)) == 1, "disk fallback should re-warm Redis"
 
     def test_disk_wins_on_divergence(self, clean_redis, clean_disk_cache):
         """When disk and Redis disagree, the disk copy is authoritative on a fallback."""
@@ -146,7 +141,6 @@ class TestMetaOnDiskFallback:
         clean_redis.delete(_meta_key(vid))
         disk = _load_meta_from_disk(vid)
         assert disk is not None
-        # Disk still holds the real value.
         restored = _deserialize_helper(disk["meta"])
         assert restored.bpm == 100.0
 
@@ -162,7 +156,7 @@ def _deserialize_helper(meta_json: str) -> AudioMetadata:
 
 
 # ---------------------------------------------------------------------------
-# Part 0: atomic stem-dir writes (no half-filled cache)
+# Atomic stem-dir writes (no half-filled cache)
 # ---------------------------------------------------------------------------
 
 class TestAtomicStemWrites:
@@ -172,7 +166,6 @@ class TestAtomicStemWrites:
         clean_disk_cache.append(vid)
         cache_song_metadata(vid, "S", "", _make_meta(), None)
 
-        # First cache: full 6-stem instrumental.
         cache_song_stems(vid, ROLE_INSTRUMENTAL, _make_named_dir(tmp_path / "s1", STEM_NAMES))
         cache_dir = _stems_dir_for(vid, ROLE_INSTRUMENTAL)
         assert {f.stem for f in cache_dir.glob("*.wav")} == set(STEM_NAMES)
@@ -203,13 +196,12 @@ class TestAtomicStemWrites:
 
         stems_path = clean_redis.get(_stems_key(vid, ROLE_VOCAL))
         assert stems_path is not None
-        # The key points at the deterministic cache dir, which is fully populated.
         assert Path(stems_path) == _stems_dir_for(vid, ROLE_VOCAL)
         assert {f.stem for f in Path(stems_path).glob("*.wav")} == set(VOCAL_STEM_NAMES)
 
 
 # ---------------------------------------------------------------------------
-# Part A: audio cache (atomic, by video_id, role-agnostic)
+# Audio cache (atomic, by video_id, role-agnostic)
 # ---------------------------------------------------------------------------
 
 class TestAudioCache:
@@ -262,7 +254,7 @@ class TestAudioCache:
 
 
 # ---------------------------------------------------------------------------
-# Part A: size-cap eviction
+# Size-cap eviction
 # ---------------------------------------------------------------------------
 
 class TestAudioCacheEviction:
@@ -280,14 +272,11 @@ class TestAudioCacheEviction:
             t = time.time() - (100 - i * 10)
             os.utime(_audio_path(vid), (t, t))
 
-        # Trigger the cap check by writing one more.
         clean_disk_cache.append("test_cc_evD")
         cache_audio("test_cc_evD", big)
 
-        # The oldest (A) should be gone; the newest (D) is protected.
-        assert _audio_path("test_cc_evD").exists()
-        # At least the oldest was evicted to get back under cap.
-        assert not _audio_path("test_cc_evA").exists()
+        assert _audio_path("test_cc_evD").exists(), "newest must be protected"
+        assert not _audio_path("test_cc_evA").exists(), "oldest must be evicted under cap"
 
     def test_eviction_never_touches_meta_or_stems(self, clean_redis, clean_disk_cache, monkeypatch, tmp_path):
         """Size-cap eviction only deletes audio.mp3 — never meta.json or stems."""
@@ -303,8 +292,7 @@ class TestAudioCacheEviction:
         old = time.time() - 1000
         os.utime(_audio_path(vid), (old, old))
 
-        # Force over-cap with a newer file; vid's audio may be evicted but its
-        # meta.json + stems must survive.
+        # Over-cap with a newer file; vid's audio may go but its meta + stems must not.
         other = "test_cc_ev_new"
         clean_disk_cache.append(other)
         cache_audio(other, big)
@@ -332,7 +320,7 @@ class TestAudioCacheEviction:
 
 
 # ---------------------------------------------------------------------------
-# Part A: single-flight dedup
+# Single-flight dedup
 # ---------------------------------------------------------------------------
 
 class TestSingleFlight:
@@ -390,7 +378,7 @@ class TestSingleFlight:
 
 
 # ---------------------------------------------------------------------------
-# Part A: tiered lookup selection (via download_youtube_audio + audio cache)
+# Tiered lookup selection (via download_youtube_audio + audio cache)
 # ---------------------------------------------------------------------------
 
 class TestTieredLookup:
@@ -405,7 +393,6 @@ class TestTieredLookup:
                     meta={"title": "Cached Song", "duration_seconds": 33.0,
                           "source_codec": "opus", "source_bitrate": 160})
 
-        # Any real download attempt should fail the test.
         async def _boom(*a, **k):
             raise AssertionError("download was attempted despite an audio-cache hit")
         monkeypatch.setattr(yt, "_download_youtube_audio_uncached", _boom)
@@ -583,8 +570,7 @@ class TestFullyCachedFastPath:
         assert result is False, "missing B stems must signal fall-through"
         assert fast_path_env["run_remix"] == 0, "remix must not run on fall-through"
 
-        # The orphaned-copy bug: A's stems must NOT have been copied. The session
-        # song_a dir must be absent/empty (nothing copied before the False return).
+        # Orphaned-copy regression: A's stems must not be copied before the False return.
         song_a_session = settings.data_dir / "stems" / session_id / "song_a"
         copied = list(song_a_session.glob("*.wav")) if song_a_session.exists() else []
         assert copied == [], f"song A stems were orphaned into session dir: {copied}"
@@ -593,7 +579,6 @@ class TestFullyCachedFastPath:
         """Both stem sets missing -> False, nothing copied, no remix."""
         session_id = "sess_fastpath_both_missing"
         vid_a, vid_b = "test_cc_fp_a3", "test_cc_fp_b3"
-        # Neither written to disk.
 
         result = self._run(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
 
