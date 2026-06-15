@@ -18,9 +18,13 @@ import pytest
 from musicmixer.services.youtube import (
     YouTubeAudioResult,
     YouTubeDownloadError,
+    ERROR_CLASS_TRANSIENT,
+    ERROR_CLASS_PERMANENT,
+    classify_youtube_error,
     validate_youtube_url,
     _is_ip_literal,
     _map_ytdlp_error,
+    _download_via_proxy,
     download_youtube_audio,
 )
 
@@ -702,3 +706,241 @@ class TestYouTubeAudioResult:
         assert result.duration_seconds == 180.0
         assert result.source_codec == "opus"
         assert result.source_bitrate == 128
+
+
+# ===========================================================================
+# Transient vs permanent classification (structured-error wire contract)
+# ===========================================================================
+
+
+class TestClassifyYouTubeError:
+    """classify_youtube_error → "transient" | "permanent" (frontend PR #76)."""
+
+    # --- Transient: retryable (403 / throttle / timeout / 5xx) ---
+
+    def test_403_forbidden_detail_is_transient(self) -> None:
+        assert (
+            classify_youtube_error(status_code=400, detail="HTTP Error 403: Forbidden")
+            == ERROR_CLASS_TRANSIENT
+        )
+
+    def test_throttle_detail_is_transient(self) -> None:
+        assert (
+            classify_youtube_error(status_code=400, detail="Throttled by YouTube")
+            == ERROR_CLASS_TRANSIENT
+        )
+
+    def test_429_rate_limit_is_transient(self) -> None:
+        assert (
+            classify_youtube_error(status_code=429, detail="Too Many Requests")
+            == ERROR_CLASS_TRANSIENT
+        )
+
+    def test_timeout_detail_is_transient(self) -> None:
+        assert (
+            classify_youtube_error(status_code=None, detail="Connection timed out")
+            == ERROR_CLASS_TRANSIENT
+        )
+
+    def test_5xx_status_is_transient(self) -> None:
+        assert (
+            classify_youtube_error(status_code=503, detail="Download failed")
+            == ERROR_CLASS_TRANSIENT
+        )
+
+    def test_generic_proxy_400_biases_transient(self) -> None:
+        # The real incident: yt-dlp 403 collapsed into the proxy's generic
+        # HTTPException(400, "Failed to download from YouTube"). Bias toward
+        # transient so the recoverable case is retried.
+        assert (
+            classify_youtube_error(
+                status_code=400, detail="Failed to download from YouTube"
+            )
+            == ERROR_CLASS_TRANSIENT
+        )
+
+    # --- Permanent: not retryable (unavailable/private/removed/age/geo) ---
+
+    def test_video_unavailable_is_permanent(self) -> None:
+        assert (
+            classify_youtube_error(status_code=400, detail="Video unavailable")
+            == ERROR_CLASS_PERMANENT
+        )
+
+    def test_private_video_is_permanent(self) -> None:
+        assert (
+            classify_youtube_error(status_code=400, detail="This video is private")
+            == ERROR_CLASS_PERMANENT
+        )
+
+    def test_removed_video_is_permanent(self) -> None:
+        assert (
+            classify_youtube_error(
+                status_code=400, detail="This video has been removed by the user"
+            )
+            == ERROR_CLASS_PERMANENT
+        )
+
+    def test_age_restricted_is_permanent(self) -> None:
+        assert (
+            classify_youtube_error(
+                status_code=400, detail="Sign in to confirm your age"
+            )
+            == ERROR_CLASS_PERMANENT
+        )
+
+    def test_live_stream_is_permanent(self) -> None:
+        assert (
+            classify_youtube_error(
+                status_code=400, detail="This live event will begin soon"
+            )
+            == ERROR_CLASS_PERMANENT
+        )
+
+    def test_geo_blocked_is_permanent(self) -> None:
+        assert (
+            classify_youtube_error(
+                status_code=400, detail="Not available in your country"
+            )
+            == ERROR_CLASS_PERMANENT
+        )
+
+    def test_unknown_with_no_status_is_permanent(self) -> None:
+        # Safe default: don't promise a retry we can't justify.
+        assert (
+            classify_youtube_error(status_code=None, detail="something weird")
+            == ERROR_CLASS_PERMANENT
+        )
+
+    def test_permanent_signal_wins_over_transient_token(self) -> None:
+        # A detail string containing both a permanent ("unavailable") and a
+        # transient-looking token ("403") must classify permanent.
+        assert (
+            classify_youtube_error(
+                status_code=400, detail="Video unavailable (was 403 earlier)"
+            )
+            == ERROR_CLASS_PERMANENT
+        )
+
+
+class TestYouTubeDownloadErrorClass:
+    """YouTubeDownloadError carries an error_class (default permanent)."""
+
+    def test_default_class_is_permanent(self) -> None:
+        err = YouTubeDownloadError("boom")
+        assert err.error_class == ERROR_CLASS_PERMANENT
+        assert str(err) == "boom"
+
+    def test_explicit_transient_class(self) -> None:
+        err = YouTubeDownloadError("boom", error_class=ERROR_CLASS_TRANSIENT)
+        assert err.error_class == ERROR_CLASS_TRANSIENT
+
+
+# ===========================================================================
+# Proxy download path attaches error_class on failure
+# ===========================================================================
+
+
+def _mock_proxy_response(status_code: int, detail: str):
+    """Build a MagicMock httpx-style response with a JSON detail body."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.headers = {"content-type": "application/json"}
+    resp.json.return_value = {"detail": detail}
+    return resp
+
+
+class TestDownloadViaProxyClassification:
+    @pytest.mark.asyncio
+    async def test_proxy_403_raises_transient(self, tmp_path: Path) -> None:
+        resp = _mock_proxy_response(400, "HTTP Error 403: Forbidden")
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = MagicMock(return_value=mock_client)
+
+        async def _aenter(*a, **k):
+            return mock_client
+
+        async def _aexit(*a, **k):
+            return False
+
+        async def _post(*a, **k):
+            return resp
+
+        mock_client.__aenter__ = _aenter
+        mock_client.__aexit__ = _aexit
+        mock_client.post = _post
+
+        with (
+            patch("musicmixer.services.youtube.httpx.AsyncClient", return_value=mock_client),
+            patch("musicmixer.services.youtube.settings") as mock_settings,
+        ):
+            mock_settings.youtube_proxy_service_url = "https://proxy.example"
+            mock_settings.youtube_proxy_api_key = "k"
+            mock_settings.youtube_max_duration_seconds = 600
+
+            with pytest.raises(YouTubeDownloadError) as ei:
+                await _download_via_proxy("https://youtube.com/watch?v=x", tmp_path)
+            assert ei.value.error_class == ERROR_CLASS_TRANSIENT
+
+    @pytest.mark.asyncio
+    async def test_proxy_unavailable_raises_permanent(self, tmp_path: Path) -> None:
+        resp = _mock_proxy_response(400, "Video unavailable")
+
+        mock_client = MagicMock()
+
+        async def _aenter(*a, **k):
+            return mock_client
+
+        async def _aexit(*a, **k):
+            return False
+
+        async def _post(*a, **k):
+            return resp
+
+        mock_client.__aenter__ = _aenter
+        mock_client.__aexit__ = _aexit
+        mock_client.post = _post
+
+        with (
+            patch("musicmixer.services.youtube.httpx.AsyncClient", return_value=mock_client),
+            patch("musicmixer.services.youtube.settings") as mock_settings,
+        ):
+            mock_settings.youtube_proxy_service_url = "https://proxy.example"
+            mock_settings.youtube_proxy_api_key = "k"
+            mock_settings.youtube_max_duration_seconds = 600
+
+            with pytest.raises(YouTubeDownloadError) as ei:
+                await _download_via_proxy("https://youtube.com/watch?v=x", tmp_path)
+            assert ei.value.error_class == ERROR_CLASS_PERMANENT
+
+    @pytest.mark.asyncio
+    async def test_proxy_request_error_is_transient(self, tmp_path: Path) -> None:
+        import httpx as _httpx
+
+        mock_client = MagicMock()
+
+        async def _aenter(*a, **k):
+            return mock_client
+
+        async def _aexit(*a, **k):
+            return False
+
+        async def _post(*a, **k):
+            raise _httpx.ConnectError("connection refused")
+
+        mock_client.__aenter__ = _aenter
+        mock_client.__aexit__ = _aexit
+        mock_client.post = _post
+
+        with (
+            patch("musicmixer.services.youtube.httpx.AsyncClient", return_value=mock_client),
+            patch("musicmixer.services.youtube.settings") as mock_settings,
+        ):
+            mock_settings.youtube_proxy_service_url = "https://proxy.example"
+            mock_settings.youtube_proxy_api_key = "k"
+            mock_settings.youtube_max_duration_seconds = 600
+
+            with pytest.raises(YouTubeDownloadError) as ei:
+                await _download_via_proxy("https://youtube.com/watch?v=x", tmp_path)
+            assert ei.value.error_class == ERROR_CLASS_TRANSIENT
