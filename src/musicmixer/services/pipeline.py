@@ -1004,9 +1004,6 @@ def _step_trim_filter_eq(
                 "Session %s: Excluding near-silent %s stems: %s",
                 session_id, stem_group, inactive_desc,
             )
-            plan.warnings.append(
-                f"Ignored near-silent {stem_group} stem(s): {', '.join(name for name, _ in inactive)}"
-            )
         return active
 
     vocal_audio = _filter_inactive(vocal_audio, "vocal")
@@ -1141,6 +1138,21 @@ def _step_trim_filter_eq(
     return vocal_audio, inst_audio
 
 
+# Fragment of the auto-handled tempo warning (text owned by processor.py). The
+# minor "stretched, slight distortion" note is corrected silently and not shown;
+# only the unstretchable-gap warning reaches the listener.
+_AUTO_HANDLED_TEMPO_WARNING_FRAGMENT = "minor distortions"
+
+
+def _add_key_match_note(plan) -> None:
+    """Fold a light, positive note into the description after a successful key
+    shift, instead of surfacing a key-clash warning the listener can't act on."""
+    plan.explanation = (
+        (plan.explanation or "").rstrip()
+        + " The two tracks were tuned to a shared key for a smoother blend."
+    )
+
+
 def _step_compute_tempo_and_key_plan(
     session_id: str,
     meta_a, meta_b,
@@ -1163,7 +1175,9 @@ def _step_compute_tempo_and_key_plan(
     target_bpm, stretch_vocals, stretch_instrumentals, tempo_warnings, stretch_pct = compute_tempo_plan(
         meta_a.bpm, meta_b.bpm, plan.tempo_source,
     )
-    plan.warnings.extend(tempo_warnings)
+    plan.warnings.extend(
+        w for w in tempo_warnings if _AUTO_HANDLED_TEMPO_WARNING_FRAGMENT not in w
+    )
     logger.info(
         "Session %s: Target BPM=%.1f, stretch_vocals=%s, stretch_inst=%s",
         session_id, target_bpm, stretch_vocals, stretch_instrumentals,
@@ -1210,6 +1224,8 @@ def _step_compute_tempo_and_key_plan(
         )
         vocal_semitones = 0
         inst_semitones = 0
+    elif key_plan.action == "shift":
+        _add_key_match_note(plan)
 
     # Determine which stems need rubberband processing (tempo stretch OR key shift)
     need_vocal_rb = stretch_vocals or vocal_semitones != 0

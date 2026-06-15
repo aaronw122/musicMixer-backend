@@ -332,10 +332,7 @@ Classify Song A's vocal_type as 'rap' if the vocals are predominantly rapped or 
     # Section 10: Explanation and Warnings
     section_10 = """EXPLANATION: Write 2-3 non-technical sentences explaining what you did and why. No internal jargon. This is shown directly to the user.
 
-WARNINGS: Populate this array ONLY for issues that actually degrade audio quality:
-- Tempo/key gap is large and the remix may sound noticeably different from the originals
-- Key shift exceeds 3 semitones
-Do NOT warn about normal characteristics like one song having more vocals than the other — that is expected (Song A provides vocals, Song B provides instrumentals). Empty array is fine."""
+WARNINGS: Leave this array EMPTY in almost all cases. The pipeline automatically matches key, tempo, and loudness between the two songs, so do NOT warn about key/chord differences, pitch shifts, tempo gaps, tempo stretching, loudness differences, or one song having more vocals than the other — these are expected and auto-corrected, and a warning would just confuse the listener. Only add a warning if the two songs are a fundamentally poor creative match that correction cannot save (e.g. wildly incompatible energy or genre that will sound bad regardless). Empty array is strongly preferred."""
 
     # Ordering principle: definitions first, rules after.
     # Block 1 (ontology): role → arrangement rules → transitions → arrangement approach → stem roles → genre
@@ -1177,7 +1174,6 @@ def _validate_intent_duration(
         if not plan.sections:
             return plan, False
         plan.sections[-1].end_beat = min(plan.sections[-1].end_beat, max_beats)
-        plan.warnings.append("Remix was shortened to fit maximum duration.")
         return plan, True
 
     return plan, True
