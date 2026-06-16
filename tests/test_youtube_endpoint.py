@@ -380,6 +380,117 @@ class TestYouTubeRemixEndpoint:
         assert response.status_code == 422
 
 
+class TestPreQueueUrlCacheHit:
+    """A pre-queue URL cache hit must return a completed session WITHOUT
+    consuming the processing slot or enqueuing work.
+
+    This is the sensitive bypass path described in the orchestration refactor
+    plan: same URLs + prompt -> served instantly, the pipeline wrapper is never
+    invoked, the processing lock is never acquired, and the wait queue stays
+    empty.
+    """
+
+    def test_cache_hit_returns_completed_session_without_slot(self, client, tmp_path):
+        # Pre-seed a cached remix file the endpoint will copy into the session dir.
+        cached_remix = tmp_path / "cached_remix.mp3"
+        cached_remix.write_bytes(b"cached-remix-bytes")
+
+        processing_lock = client.app.state.processing_lock
+        wait_queue = client.app.state.wait_queue
+        assert wait_queue.qsize() == 0
+
+        with patch("musicmixer.api.remix.settings") as mock_settings, \
+             patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper, \
+             patch("musicmixer.api.remix._enqueue_or_start") as mock_enqueue, \
+             patch(
+                 "musicmixer.services.remix_cache.compute_url_cache_key",
+                 return_value="urlkey123",
+             ), \
+             patch(
+                 "musicmixer.services.remix_cache.get_cached_remix",
+                 return_value=cached_remix,
+             ), \
+             patch(
+                 "musicmixer.services.remix_cache.get_cached_metadata",
+                 return_value={
+                     "explanation": "Cached explanation",
+                     "used_fallback": True,
+                     "warnings": ["w1"],
+                     "key_warning": "kw",
+                 },
+             ):
+            mock_settings.youtube_enabled = True
+            mock_settings.remix_cache_enabled = True
+            mock_settings.remix_cache_dir = tmp_path / "remix_cache"
+            mock_settings.data_dir = tmp_path
+
+            response = client.post(
+                "/api/remix/youtube",
+                json={
+                    "url_a": VALID_YT_URL_A,
+                    "url_b": VALID_YT_URL_B,
+                    "prompt": "test remix",
+                },
+            )
+
+        assert response.status_code == 200
+        session_id = response.json()["session_id"]
+
+        # The slot was never consumed and nothing was queued.
+        mock_wrapper.assert_not_called()
+        mock_enqueue.assert_not_called()
+        assert wait_queue.qsize() == 0
+        # Lock is still free (acquire returns True), confirming it was never held.
+        assert processing_lock.acquire(blocking=False) is True
+        processing_lock.release()
+
+        # The session is fully completed and carries the cached metadata.
+        session = client.app.state.sessions[session_id]
+        assert session.status == "complete"
+        assert session.explanation == "Cached explanation"
+        assert session.used_fallback is True
+        assert session.warnings == ["w1"]
+        assert session.key_warning == "kw"
+        assert session.remix_path is not None
+        # The cached remix was copied into the session output dir.
+        assert Path(session.remix_path).read_bytes() == b"cached-remix-bytes"
+
+    def test_cache_miss_falls_through_to_queue(self, client, tmp_path):
+        """A pre-queue cache MISS must fall through to the normal enqueue path."""
+        with patch("musicmixer.api.remix.settings") as mock_settings, \
+             patch("musicmixer.api.remix._enqueue_or_start") as mock_enqueue, \
+             patch(
+                 "musicmixer.services.remix_cache.compute_url_cache_key",
+                 return_value="urlkey123",
+             ), \
+             patch(
+                 "musicmixer.services.remix_cache.get_cached_remix",
+                 return_value=None,
+             ):
+            mock_settings.youtube_enabled = True
+            mock_settings.remix_cache_enabled = True
+            mock_settings.remix_cache_dir = tmp_path / "remix_cache"
+            mock_settings.data_dir = tmp_path
+
+            response = client.post(
+                "/api/remix/youtube",
+                json={
+                    "url_a": VALID_YT_URL_A,
+                    "url_b": VALID_YT_URL_B,
+                    "prompt": "test remix",
+                },
+            )
+
+        assert response.status_code == 200
+        session_id = response.json()["session_id"]
+        # Cache miss -> normal path: enqueue was called, session not pre-completed.
+        mock_enqueue.assert_called_once()
+        session = client.app.state.sessions[session_id]
+        assert session.status != "complete"
+        # The URL cache key is stashed for the pipeline to write an alias later.
+        assert session.url_cache_key == "urlkey123"
+
+
 class TestYouTubePipelineWrapper:
     """Test the _youtube_pipeline_wrapper function directly."""
 
