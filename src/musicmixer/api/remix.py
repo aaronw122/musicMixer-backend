@@ -23,9 +23,8 @@ import threading
 import time
 import re
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncGenerator, Callable
+from typing import AsyncGenerator, Callable
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -35,9 +34,11 @@ from musicmixer.config import settings
 from musicmixer.models import CachedSong, SessionState
 from musicmixer.services.cleanup import cleanup_expired_sessions
 from musicmixer.services.remix_stages import (
+    DownloadPairCallbacks,
     FullyCachedCallbacks,
     FullyCachedInputs,
     UploadTooLargeError,
+    download_youtube_pair,
     extension_allowed,
     probe_duration,
     restore_fully_cached_youtube_remix,
@@ -47,9 +48,6 @@ from musicmixer.services.remix_stages import (
     write_upload_file,
 )
 from musicmixer.api.shelf import ensure_on_shelf
-
-if TYPE_CHECKING:
-    from musicmixer.services.youtube import YouTubeAudioResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -66,29 +64,6 @@ def _update_avg_remix_duration(elapsed_seconds: float) -> None:
     with _avg_lock:
         # Exponential moving average (alpha=0.3 gives recent runs more weight)
         _AVG_REMIX_DURATION_S = 0.7 * _AVG_REMIX_DURATION_S + 0.3 * elapsed_seconds
-
-
-def _pre_trim_youtube_download(
-    download_result: "YouTubeAudioResult | None",
-    max_duration_seconds: int,
-) -> None:
-    """Trim long YouTube downloads before GPU-heavy processing."""
-    if download_result is None:
-        return
-
-    if download_result.duration_seconds <= max_duration_seconds:
-        return
-
-    from musicmixer.services.processor import pre_trim_for_processing
-
-    pre_trim_for_processing(
-        download_result.wav_path,
-        max_duration_seconds=max_duration_seconds,
-    )
-    download_result.duration_seconds = min(
-        download_result.duration_seconds,
-        max_duration_seconds,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +305,6 @@ def _youtube_pipeline_wrapper(
 
     try:
         session.status = "processing"
-        from musicmixer.services.youtube import download_youtube_audio
 
         upload_dir = settings.data_dir / "uploads" / session_id
         upload_dir.mkdir(parents=True, exist_ok=True)
@@ -397,10 +371,6 @@ def _youtube_pipeline_wrapper(
                 "progress": round(progress, 3),
             }, session=session)
 
-        # --- Emit initial downloading event ---
-        _emit_monotonic("Getting your songs ready...", 0.02)
-
-        # --- Progress callbacks ---
         def _progress_a(fraction: float, status: str) -> None:
             # Map fraction 0-1 to progress 0.02-0.06
             progress = 0.02 + fraction * 0.04
@@ -417,80 +387,28 @@ def _youtube_pipeline_wrapper(
             else:
                 _emit_monotonic("Grabbing your second song...", progress)
 
-        # Resolve video IDs up-front so the audio cache + single-flight can key on them.
-        from musicmixer.services.youtube import extract_video_id as _yt_extract_vid_dl
-        _dl_vid_a = _yt_extract_vid_dl(url_a)
-        _dl_vid_b = _yt_extract_vid_dl(url_b)
-
-        # --- Download helpers (run async fn in a fresh event loop per thread) ---
-        def _download_a():
-            return _run_sync(download_youtube_audio(
-                url=url_a,
-                output_dir=upload_dir,
-                progress_callback=_progress_a,
-                video_id=_dl_vid_a,
-            ))
-
-        def _download_b():
-            return _run_sync(download_youtube_audio(
-                url=url_b,
-                output_dir=upload_dir,
-                progress_callback=_progress_b,
-                video_id=_dl_vid_b,
-            ))
-
-        # --- Parallel downloads ---
-        # song_a_future → url_a → Song "A"; song_b_future → url_b → Song "B".
-        # On failure we tag the exception with its slot so the SSE error handler
-        # can emit `failed_song` to the frontend (PR #76).
-        with ThreadPoolExecutor(max_workers=2) as dl_executor:
-            song_a_future = dl_executor.submit(_download_a)
-            song_b_future = dl_executor.submit(_download_b)
-
-            try:
-                result_a = song_a_future.result(timeout=300)
-            except Exception as exc:
-                # If Song A fails, cancel Song B and re-raise
-                _tag_failed_song(exc, "A")
-                song_b_future.cancel()
-                dl_executor.shutdown(wait=False, cancel_futures=True)
-                raise
-
-            try:
-                result_b = song_b_future.result(timeout=300)
-            except Exception as exc:
-                # Song B failed after Song A succeeded
-                _tag_failed_song(exc, "B")
-                dl_executor.shutdown(wait=False, cancel_futures=True)
-                raise
-
-        _emit_monotonic("Got both songs!", 0.10)
-
-        max_processing_duration = settings.processing_max_duration_seconds
-        _pre_trim_youtube_download(result_a, max_processing_duration)
-        _pre_trim_youtube_download(result_b, max_processing_duration)
-
-        # Check cancellation before starting heavy pipeline work
         from musicmixer.services.pipeline import check_cancelled
-        check_cancelled(session)
 
-        logger.info(
-            "Session %s: YouTube downloads complete. A=%r (%ds, %s %dkbps), B=%r (%ds, %s %dkbps)",
-            session_id,
-            result_a.title, int(result_a.duration_seconds),
-            result_a.source_codec, result_a.source_bitrate,
-            result_b.title, int(result_b.duration_seconds),
-            result_b.source_codec, result_b.source_bitrate,
+        downloaded = download_youtube_pair(
+            url_a,
+            url_b,
+            session_id=session_id,
+            callbacks=DownloadPairCallbacks(
+                check_cancelled=lambda: check_cancelled(session),
+                tag_failed_song=_tag_failed_song,
+                on_download_start=lambda: _emit_monotonic("Getting your songs ready...", 0.02),
+                progress_a=_progress_a,
+                progress_b=_progress_b,
+                on_both_done=lambda: _emit_monotonic("Got both songs!", 0.10),
+            ),
+            cached_song_a=cached_song_a,
+            cached_song_b=cached_song_b,
+            settings=settings,
         )
-
-        # Build source quality strings for metadata propagation
-        source_quality_a = f"youtube-{result_a.source_codec}-{result_a.source_bitrate}kbps"
-        source_quality_b = f"youtube-{result_b.source_codec}-{result_b.source_bitrate}kbps"
-
-        logger.info(
-            "Session %s: Source quality: A=%s, B=%s",
-            session_id, source_quality_a, source_quality_b,
-        )
+        result_a = downloaded.result_a
+        result_b = downloaded.result_b
+        source_quality_a = downloaded.source_quality_a
+        source_quality_b = downloaded.source_quality_b
 
         # --- Analyze + remix (45-100%) ---
         _metrics = PipelineMetrics(session_id=session_id)
@@ -562,16 +480,6 @@ def _youtube_pipeline_wrapper(
     finally:
         processing_lock.release()
         _process_next_queued(app_state)
-
-
-def _run_sync(coro):
-    """Run an async coroutine synchronously from a thread (no running event loop)."""
-    import asyncio as _asyncio
-    loop = _asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
 
 
 # ---------------------------------------------------------------------------

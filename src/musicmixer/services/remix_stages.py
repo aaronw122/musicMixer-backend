@@ -11,14 +11,16 @@ import logging
 import shutil
 import subprocess
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Callable, Iterable
+from typing import TYPE_CHECKING, BinaryIO, Callable, Iterable, Literal
 
 if TYPE_CHECKING:
     from musicmixer.config import Settings
     from musicmixer.models import AnalyzedSongs, CachedSong
     from musicmixer.services.pipeline_metrics import PipelineMetrics
+    from musicmixer.services.youtube import YouTubeAudioResult
 
 logger = logging.getLogger("musicmixer.api.remix")
 
@@ -244,6 +246,194 @@ def restore_fully_cached_youtube_remix(
         source_quality_a=cached_song_a.meta.source_quality,
         source_quality_b=cached_song_b.meta.source_quality,
         restored_stems_dir=stems_dir,
+    )
+
+
+@dataclass
+class DownloadPairCallbacks:
+    """API-owned callbacks for the YouTube download-pair stage.
+
+    The stage never touches SSE payloads, the monotonic high-water mark, or the
+    structured-error contract directly. It reaches all of those through these
+    callbacks, whose implementations live in ``api/remix.py``:
+
+    - ``check_cancelled`` keeps cancellation ownership in the API.
+    - ``tag_failed_song`` wraps ``_tag_failed_song`` so a download failure carries
+      its "A"/"B" slot for ``_build_error_event``. The stage re-raises the
+      ORIGINAL exception object after tagging so ``error_class``/``failed_song``
+      survive byte-identically.
+    - ``on_download_start`` / ``progress_a`` / ``progress_b`` / ``on_both_done``
+      drive the existing mid-download progress events through API-owned event
+      construction (monotonic mapping included).
+    """
+
+    check_cancelled: Callable[[], None]
+    tag_failed_song: Callable[[BaseException, Literal["A", "B"]], None]
+    on_download_start: Callable[[], None]
+    progress_a: Callable[[float, str], None]
+    progress_b: Callable[[float, str], None]
+    on_both_done: Callable[[], None]
+
+
+@dataclass(frozen=True)
+class DownloadedPair:
+    """Result of the YouTube download-pair stage.
+
+    Carries the two download results plus the source-quality facts Slice 6's
+    analyze/checkpoint stage consumes (``source_quality_a``/``_b``). The wrapper
+    keeps ownership of analysis, checkpointing, and the final ``run_remix`` call.
+    """
+
+    result_a: "YouTubeAudioResult"
+    result_b: "YouTubeAudioResult"
+    source_quality_a: str
+    source_quality_b: str
+
+
+def _run_sync(coro):
+    """Run an async coroutine synchronously from a thread (no running event loop)."""
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _pre_trim_youtube_download(
+    download_result: "YouTubeAudioResult | None",
+    max_duration_seconds: int,
+) -> None:
+    """Trim long YouTube downloads before GPU-heavy processing."""
+    if download_result is None:
+        return
+
+    if download_result.duration_seconds <= max_duration_seconds:
+        return
+
+    from musicmixer.services.processor import pre_trim_for_processing
+
+    pre_trim_for_processing(
+        download_result.wav_path,
+        max_duration_seconds=max_duration_seconds,
+    )
+    download_result.duration_seconds = min(
+        download_result.duration_seconds,
+        max_duration_seconds,
+    )
+
+
+def download_youtube_pair(
+    url_a: str,
+    url_b: str,
+    *,
+    session_id: str,
+    callbacks: DownloadPairCallbacks,
+    cached_song_a: "CachedSong | None",
+    cached_song_b: "CachedSong | None",
+    settings: "Settings",
+) -> DownloadedPair:
+    """Download both YouTube songs concurrently, pre-trim, and tag failures.
+
+    Both downloads are independent so a 2-thread pool overlaps them. On failure
+    the offending exception is tagged with its "A"/"B" slot via
+    ``callbacks.tag_failed_song`` and re-raised unchanged so the wrapper's
+    ``_build_error_event`` still sees ``error_class``/``failed_song``.
+
+    Mid-download progress events flow through API-owned callbacks; this stage
+    never constructs SSE payloads. Cancellation stays with the API via
+    ``callbacks.check_cancelled``.
+
+    ``cached_song_a``/``_b`` are accepted for signature symmetry with the
+    wrapper's cache-aware path; the fully-cached short-circuit is handled before
+    this stage runs, so here both songs are always downloaded.
+    """
+    from musicmixer.services.youtube import (
+        download_youtube_audio,
+        extract_video_id,
+    )
+
+    upload_dir = settings.data_dir / "uploads" / session_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    callbacks.on_download_start()
+
+    # Resolve video IDs up-front so the audio cache + single-flight can key on them.
+    _dl_vid_a = extract_video_id(url_a)
+    _dl_vid_b = extract_video_id(url_b)
+
+    def _download_a():
+        return _run_sync(download_youtube_audio(
+            url=url_a,
+            output_dir=upload_dir,
+            progress_callback=callbacks.progress_a,
+            video_id=_dl_vid_a,
+        ))
+
+    def _download_b():
+        return _run_sync(download_youtube_audio(
+            url=url_b,
+            output_dir=upload_dir,
+            progress_callback=callbacks.progress_b,
+            video_id=_dl_vid_b,
+        ))
+
+    # song_a_future → url_a → Song "A"; song_b_future → url_b → Song "B".
+    # On failure we tag the exception with its slot so the SSE error handler
+    # can emit `failed_song` to the frontend (PR #76).
+    with ThreadPoolExecutor(max_workers=2) as dl_executor:
+        song_a_future = dl_executor.submit(_download_a)
+        song_b_future = dl_executor.submit(_download_b)
+
+        try:
+            result_a = song_a_future.result(timeout=300)
+        except Exception as exc:
+            # If Song A fails, cancel Song B and re-raise
+            callbacks.tag_failed_song(exc, "A")
+            song_b_future.cancel()
+            dl_executor.shutdown(wait=False, cancel_futures=True)
+            raise
+
+        try:
+            result_b = song_b_future.result(timeout=300)
+        except Exception as exc:
+            # Song B failed after Song A succeeded
+            callbacks.tag_failed_song(exc, "B")
+            dl_executor.shutdown(wait=False, cancel_futures=True)
+            raise
+
+    callbacks.on_both_done()
+
+    max_processing_duration = settings.processing_max_duration_seconds
+    _pre_trim_youtube_download(result_a, max_processing_duration)
+    _pre_trim_youtube_download(result_b, max_processing_duration)
+
+    # Check cancellation before starting heavy pipeline work
+    callbacks.check_cancelled()
+
+    logger.info(
+        "Session %s: YouTube downloads complete. A=%r (%ds, %s %dkbps), B=%r (%ds, %s %dkbps)",
+        session_id,
+        result_a.title, int(result_a.duration_seconds),
+        result_a.source_codec, result_a.source_bitrate,
+        result_b.title, int(result_b.duration_seconds),
+        result_b.source_codec, result_b.source_bitrate,
+    )
+
+    source_quality_a = f"youtube-{result_a.source_codec}-{result_a.source_bitrate}kbps"
+    source_quality_b = f"youtube-{result_b.source_codec}-{result_b.source_bitrate}kbps"
+
+    logger.info(
+        "Session %s: Source quality: A=%s, B=%s",
+        session_id, source_quality_a, source_quality_b,
+    )
+
+    return DownloadedPair(
+        result_a=result_a,
+        result_b=result_b,
+        source_quality_a=source_quality_a,
+        source_quality_b=source_quality_b,
     )
 
 
