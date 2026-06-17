@@ -19,10 +19,8 @@ import json
 import logging
 import queue
 import shutil
-import subprocess
 import threading
 import time
-import urllib.parse
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +34,14 @@ from pydantic import BaseModel
 from musicmixer.config import settings
 from musicmixer.models import CachedSong, SessionState
 from musicmixer.services.cleanup import cleanup_expired_sessions
+from musicmixer.services.remix_stages import (
+    UploadTooLargeError,
+    extension_allowed,
+    probe_duration,
+    thumbnail_from_youtube_url,
+    upload_extension,
+    write_upload_file,
+)
 from musicmixer.api.shelf import ensure_on_shelf
 
 if TYPE_CHECKING:
@@ -48,25 +54,6 @@ router = APIRouter()
 # Updated after each completed remix for better accuracy.
 _AVG_REMIX_DURATION_S = 600.0  # initial estimate: 10 minutes
 _avg_lock = threading.Lock()
-
-
-def _probe_duration(file_path: Path) -> float | None:
-    """Return audio duration in seconds via ffprobe, or None on failure."""
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(file_path),
-            ],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
-    except (subprocess.TimeoutExpired, ValueError, OSError):
-        pass
-    return None
 
 
 def _update_avg_remix_duration(elapsed_seconds: float) -> None:
@@ -178,25 +165,6 @@ def _pipeline_wrapper(
 # ---------------------------------------------------------------------------
 # YouTube URL validation (SSRF prevention)
 # ---------------------------------------------------------------------------
-
-
-def _thumbnail_from_youtube_url(url: str) -> str | None:
-    """Derive a YouTube thumbnail URL from a video URL. Returns None on failure."""
-    parsed = urllib.parse.urlparse(url)
-    hostname = parsed.hostname or ""
-    path_parts = [p for p in parsed.path.split("/") if p]
-
-    video_id = None
-    if hostname == "youtu.be" and path_parts:
-        video_id = path_parts[0]
-    else:
-        qs = urllib.parse.parse_qs(parsed.query)
-        if qs.get("v"):
-            video_id = qs["v"][0]
-        elif path_parts and path_parts[0] in {"shorts", "embed"} and len(path_parts) > 1:
-            video_id = path_parts[1]
-
-    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
 
 
 def _validate_youtube_url(url: str) -> None:
@@ -937,8 +905,8 @@ def create_youtube_remix(
                 session_id = str(uuid.uuid4())
                 session = SessionState()
                 session.status = "complete"
-                session.thumbnail_url_a = _thumbnail_from_youtube_url(body.url_a)
-                session.thumbnail_url_b = _thumbnail_from_youtube_url(body.url_b)
+                session.thumbnail_url_a = thumbnail_from_youtube_url(body.url_a)
+                session.thumbnail_url_b = thumbnail_from_youtube_url(body.url_b)
                 session.explanation = meta.get("explanation", "")
                 session.used_fallback = meta.get("used_fallback", False)
                 session.warnings = meta.get("warnings", [])
@@ -964,8 +932,8 @@ def create_youtube_remix(
 
     # Create session state with thumbnail URLs derived from YouTube video IDs
     session = SessionState()
-    session.thumbnail_url_a = _thumbnail_from_youtube_url(body.url_a)
-    session.thumbnail_url_b = _thumbnail_from_youtube_url(body.url_b)
+    session.thumbnail_url_a = thumbnail_from_youtube_url(body.url_a)
+    session.thumbnail_url_b = thumbnail_from_youtube_url(body.url_b)
     # Store URL cache key so the pipeline can write an alias after the content-based cache
     if settings.remix_cache_enabled:
         try:
@@ -1014,8 +982,8 @@ def create_remix(
 
     # Validate extensions
     for label, file in [("song_a", song_a), ("song_b", song_b)]:
-        ext = Path(file.filename or "").suffix.lower()
-        if ext not in settings.allowed_extensions:
+        if not extension_allowed(file.filename, settings.allowed_extensions):
+            ext = upload_extension(file.filename)
             raise HTTPException(
                 422,
                 f"Invalid file type for {label}: '{ext}'. "
@@ -1036,8 +1004,8 @@ def create_remix(
     song_a_original_filename = song_a.filename or ""
     song_b_original_filename = song_b.filename or ""
 
-    song_a_ext = Path(song_a.filename or "song_a.mp3").suffix.lower()
-    song_b_ext = Path(song_b.filename or "song_b.mp3").suffix.lower()
+    song_a_ext = upload_extension(song_a.filename or "song_a.mp3")
+    song_b_ext = upload_extension(song_b.filename or "song_b.mp3")
 
     song_a_path = upload_dir / f"song_a{song_a_ext}"
     song_b_path = upload_dir / f"song_b{song_b_ext}"
@@ -1046,22 +1014,13 @@ def create_remix(
         ("song_a", song_a, song_a_path),
         ("song_b", song_b, song_b_path),
     ]:
-        file.file.seek(0)
-        chunks = []
-        total = 0
-        while True:
-            chunk = file.file.read(1024 * 1024)  # 1 MB chunks
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise HTTPException(
-                    413,
-                    f"{label} exceeds {settings.max_file_size_mb}MB limit",
-                )
-            chunks.append(chunk)
-        data = b"".join(chunks)
-        dest.write_bytes(data)
+        try:
+            write_upload_file(file.file, dest, max_bytes)
+        except UploadTooLargeError:
+            raise HTTPException(
+                413,
+                f"{label} exceeds {settings.max_file_size_mb}MB limit",
+            )
 
     logger.info(
         "Session %s: saved uploads (%s, %s)",
@@ -1073,7 +1032,7 @@ def create_remix(
     # Validate duration via ffprobe
     max_dur = settings.max_upload_duration_seconds
     for label, path in [("song_a", song_a_path), ("song_b", song_b_path)]:
-        duration = _probe_duration(path)
+        duration = probe_duration(path)
         if duration is not None and duration > max_dur:
             shutil.rmtree(upload_dir, ignore_errors=True)
             raise HTTPException(
