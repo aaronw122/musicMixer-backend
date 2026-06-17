@@ -723,6 +723,86 @@ class TestYouTubePipelineWrapper:
         assert "Download failed" in error_events[-1]["detail"]
 
 
+class TestAnalyzeAndCheckpointStage:
+    """Test the analyze/checkpoint stage in isolation (Slice 6)."""
+
+    def _downloaded_pair(self, tmp_path):
+        from musicmixer.services.remix_stages import DownloadedPair
+
+        wav_a = tmp_path / "song_a.wav"
+        wav_b = tmp_path / "song_b.wav"
+        wav_a.write_bytes(b"a")
+        wav_b.write_bytes(b"b")
+        result_a = FakeYouTubeAudioResult(
+            wav_path=wav_a, title="Song A Title",
+            duration_seconds=180.0, source_codec="opus", source_bitrate=128,
+        )
+        result_b = FakeYouTubeAudioResult(
+            wav_path=wav_b, title="Song B Title",
+            duration_seconds=200.0, source_codec="aac", source_bitrate=128,
+        )
+        return DownloadedPair(
+            result_a=result_a,
+            result_b=result_b,
+            source_quality_a="youtube-opus-128kbps",
+            source_quality_b="youtube-aac-128kbps",
+        )
+
+    def test_returns_analysis_metrics_source_quality_and_checkpoints_both(self, tmp_path):
+        """Stage runs analyze_songs, checkpoints A and B, and returns the remix inputs."""
+        from musicmixer.models import SessionState
+        from musicmixer.services.remix_stages import (
+            AnalyzedRemix,
+            analyze_and_checkpoint_youtube_pair,
+        )
+
+        session = SessionState()
+        downloaded = self._downloaded_pair(tmp_path)
+
+        fake_analysis = MagicMock()
+        fake_analysis.song_a_stems_dir = tmp_path / "stems" / "a"
+        fake_analysis.song_b_stems_dir = tmp_path / "stems" / "b"
+
+        with patch("musicmixer.services.pipeline.analyze_songs", return_value=fake_analysis) as mock_analyze, \
+             patch("musicmixer.services.remix_stages._checkpoint_song") as mock_checkpoint, \
+             patch("musicmixer.services.pipeline.run_remix") as mock_remix:
+            result = analyze_and_checkpoint_youtube_pair(
+                downloaded,
+                url_a=VALID_YT_URL_A,
+                url_b=VALID_YT_URL_B,
+                session_id="test-session",
+                event_queue=session.events,
+                session=session,
+                cached_song_a=None,
+                cached_song_b=None,
+            )
+
+        assert isinstance(result, AnalyzedRemix)
+        assert result.analysis is fake_analysis
+        assert result.source_quality_a == "youtube-opus-128kbps"
+        assert result.source_quality_b == "youtube-aac-128kbps"
+
+        # Video IDs populated from the URLs on the returned metrics
+        assert result.metrics.song_a_video_id == "dQw4w9WgXcQ"
+        assert result.metrics.song_b_video_id == "9bZkp7q19f0"
+
+        # analyze_songs was given the downloaded pair's paths/quality
+        mock_analyze.assert_called_once()
+        kwargs = mock_analyze.call_args.kwargs
+        assert kwargs["song_a_original_filename"] == "Song A Title"
+        assert kwargs["song_b_original_filename"] == "Song B Title"
+        assert kwargs["source_quality_a"] == "youtube-opus-128kbps"
+        assert kwargs["source_quality_b"] == "youtube-aac-128kbps"
+
+        # Both songs checkpointed (A then B)
+        assert mock_checkpoint.call_count == 2
+        roles = [c.kwargs["url"] for c in mock_checkpoint.call_args_list]
+        assert roles == [VALID_YT_URL_A, VALID_YT_URL_B]
+
+        # The stage must NOT render the remix
+        mock_remix.assert_not_called()
+
+
 class TestYouTubeProgressFlow:
     """Test that download progress events flow through the existing SSE mechanism."""
 
