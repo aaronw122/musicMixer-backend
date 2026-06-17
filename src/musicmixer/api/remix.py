@@ -120,23 +120,17 @@ def _pipeline_wrapper(
     except CancelledError:
         logger.info("Session %s: pipeline cancelled by user", session_id)
         session.status = "cancelled"
-        from musicmixer.services.pipeline import emit_progress
+        from musicmixer.services.pipeline import emit_progress, progress_event
 
-        emit_progress(session.events, {
-            "step": "cancelled",
-            "detail": "Remix cancelled",
-            "progress": 0,
-        }, session=session)
+        emit_progress(session.events, progress_event(
+            "cancelled", "Remix cancelled", 0,
+        ), session=session)
     except BaseException as exc:
         logger.exception("Session %s: pipeline failed", session_id)
         session.status = "error"
         from musicmixer.services.pipeline import emit_progress
 
-        emit_progress(session.events, {
-            "step": "error",
-            "detail": str(exc),
-            "progress": 0,
-        }, session=session)
+        emit_progress(session.events, _plain_error_event(str(exc)), session=session)
     finally:
         processing_lock.release()
         _process_next_queued(app_state)
@@ -205,6 +199,15 @@ def _tag_failed_song(exc: BaseException, song: str) -> None:
         pass
 
 
+def _plain_error_event(detail: str) -> dict:
+    """Build a plain terminal `error` event payload (no structured fields).
+
+    For failures not attributable to a YouTube download; the structured variant
+    is `_build_error_event`.
+    """
+    return {"step": "error", "detail": detail, "progress": 0}
+
+
 def _build_error_event(exc: BaseException) -> dict:
     """Build the SSE `error` event payload from a pipeline exception.
 
@@ -257,7 +260,7 @@ def _youtube_pipeline_wrapper(
     """
     pipeline_start = time.monotonic()
     from musicmixer.services.pipeline import (
-        CancelledError, emit_progress, run_remix,
+        CancelledError, emit_progress, progress_event, run_remix,
     )
 
     try:
@@ -276,11 +279,9 @@ def _youtube_pipeline_wrapper(
             from musicmixer.services.pipeline import check_cancelled
 
             def _on_cache_skip() -> None:
-                emit_progress(session.events, {
-                    "step": "downloading",
-                    "detail": "Both songs cached — skipping download!",
-                    "progress": 0.10,
-                }, session=session)
+                emit_progress(session.events, progress_event(
+                    "downloading", "Both songs cached — skipping download!", 0.10,
+                ), session=session)
 
             cached = restore_fully_cached_youtube_remix(
                 FullyCachedInputs(
@@ -322,11 +323,9 @@ def _youtube_pipeline_wrapper(
                 if progress <= _progress_hwm:
                     return
                 _progress_hwm = progress
-            emit_progress(session.events, {
-                "step": "downloading",
-                "detail": detail,
-                "progress": round(progress, 3),
-            }, session=session)
+            emit_progress(session.events, progress_event(
+                "downloading", detail, round(progress, 3),
+            ), session=session)
 
         def _progress_a(fraction: float, status: str) -> None:
             # Map fraction 0-1 to progress 0.02-0.06
@@ -389,11 +388,9 @@ def _youtube_pipeline_wrapper(
     except CancelledError:
         logger.info("Session %s: YouTube pipeline cancelled by user", session_id)
         session.status = "cancelled"
-        emit_progress(session.events, {
-            "step": "cancelled",
-            "detail": "Remix cancelled",
-            "progress": 0,
-        }, session=session)
+        emit_progress(session.events, progress_event(
+            "cancelled", "Remix cancelled", 0,
+        ), session=session)
     except BaseException as exc:
         logger.exception("Session %s: YouTube pipeline failed", session_id)
         session.status = "error"
@@ -414,7 +411,7 @@ def _process_next_queued(app_state) -> None:
     Skips items whose SSE clients have disconnected or that have exceeded
     the queue entry TTL.
     """
-    from musicmixer.services.pipeline import emit_progress
+    from musicmixer.services.pipeline import emit_progress, progress_event
 
     queue_entry_ttl_s = settings.queue_entry_ttl_minutes * 60
 
@@ -435,11 +432,9 @@ def _process_next_queued(app_state) -> None:
                 time.monotonic() - item.enqueued_at,
             )
             item.session.status = "error"
-            emit_progress(item.session.events, {
-                "step": "error",
-                "detail": "Queue wait time exceeded, please try again",
-                "progress": 0,
-            }, session=item.session)
+            emit_progress(item.session.events, _plain_error_event(
+                "Queue wait time exceeded, please try again",
+            ), session=item.session)
             continue
 
         # Check if session was cancelled or abandoned while queued
@@ -464,19 +459,15 @@ def _process_next_queued(app_state) -> None:
                 app_state.wait_queue.put_nowait(item)
             except queue.Full:
                 item.session.status = "error"
-                emit_progress(item.session.events, {
-                    "step": "error",
-                    "detail": "Server overloaded, please try again",
-                    "progress": 0,
-                }, session=item.session)
+                emit_progress(item.session.events, _plain_error_event(
+                    "Server overloaded, please try again",
+                ), session=item.session)
             return
 
         # Emit processing_started event
-        emit_progress(item.session.events, {
-            "step": "processing_started",
-            "detail": "Your remix is starting now",
-            "progress": 0,
-        }, session=item.session)
+        emit_progress(item.session.events, progress_event(
+            "processing_started", "Your remix is starting now", 0,
+        ), session=item.session)
 
         try:
             app_state.executor.submit(item.run_fn)
@@ -484,11 +475,9 @@ def _process_next_queued(app_state) -> None:
             app_state.processing_lock.release()
             logger.exception("Session %s: failed to submit queued pipeline", item.session_id)
             item.session.status = "error"
-            emit_progress(item.session.events, {
-                "step": "error",
-                "detail": "Failed to start pipeline",
-                "progress": 0,
-            }, session=item.session)
+            emit_progress(item.session.events, _plain_error_event(
+                "Failed to start pipeline",
+            ), session=item.session)
             continue
         return
 
@@ -511,7 +500,7 @@ def _get_queue_position(app_state, session_id: str) -> tuple[int, int]:
 
 def _broadcast_queue_positions(app_state) -> None:
     """Send updated queue_position events to all queued sessions."""
-    from musicmixer.services.pipeline import emit_progress
+    from musicmixer.services.pipeline import emit_progress, progress_event
 
     with app_state.queue_lock:
         items = list(app_state.wait_queue.queue)
@@ -519,19 +508,14 @@ def _broadcast_queue_positions(app_state) -> None:
     for i, item in enumerate(items):
         position = i + 1
         total = len(items)
-        emit_progress(item.session.events, {
-            "step": "queue_position",
-            "detail": f"Position {position} of {total}",
-            "position": position,
-            "total": total,
-            "progress": 0,
-        }, session=item.session)
-        emit_progress(item.session.events, {
-            "step": "queue_estimate",
-            "detail": f"Estimated wait: {int(position * _AVG_REMIX_DURATION_S)}s",
-            "wait_seconds": int(position * _AVG_REMIX_DURATION_S),
-            "progress": 0,
-        }, session=item.session)
+        emit_progress(item.session.events, progress_event(
+            "queue_position", f"Position {position} of {total}", 0,
+            position=position, total=total,
+        ), session=item.session)
+        emit_progress(item.session.events, progress_event(
+            "queue_estimate", f"Estimated wait: {int(position * _AVG_REMIX_DURATION_S)}s", 0,
+            wait_seconds=int(position * _AVG_REMIX_DURATION_S),
+        ), session=item.session)
 
 
 def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn: Callable[[], None]) -> None:
@@ -539,17 +523,15 @@ def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn:
 
     Raises HTTPException(503) if the queue is full.
     """
-    from musicmixer.services.pipeline import emit_progress
+    from musicmixer.services.pipeline import emit_progress, progress_event
 
     processing_lock = app_state.processing_lock
 
     if processing_lock.acquire(blocking=False):
         # Slot available — submit immediately
-        emit_progress(session.events, {
-            "step": "processing_started",
-            "detail": "Your remix is starting now",
-            "progress": 0,
-        }, session=session)
+        emit_progress(session.events, progress_event(
+            "processing_started", "Your remix is starting now", 0,
+        ), session=session)
         try:
             app_state.executor.submit(run_fn)
         except Exception:
@@ -571,19 +553,14 @@ def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn:
 
     # Get position and send queue events
     position, total = _get_queue_position(app_state, session_id)
-    emit_progress(session.events, {
-        "step": "queue_position",
-        "detail": f"Position {position} of {total}",
-        "position": position,
-        "total": total,
-        "progress": 0,
-    }, session=session)
-    emit_progress(session.events, {
-        "step": "queue_estimate",
-        "detail": f"Estimated wait: {int(position * _AVG_REMIX_DURATION_S)}s",
-        "wait_seconds": int(position * _AVG_REMIX_DURATION_S),
-        "progress": 0,
-    }, session=session)
+    emit_progress(session.events, progress_event(
+        "queue_position", f"Position {position} of {total}", 0,
+        position=position, total=total,
+    ), session=session)
+    emit_progress(session.events, progress_event(
+        "queue_estimate", f"Estimated wait: {int(position * _AVG_REMIX_DURATION_S)}s", 0,
+        wait_seconds=int(position * _AVG_REMIX_DURATION_S),
+    ), session=session)
 
     logger.info(
         "Session %s: queued at position %d/%d",
@@ -824,12 +801,10 @@ async def cancel_remix(session_id: str, request: Request):
 
     if session.status == "queued":
         session.status = "cancelled"
-        from musicmixer.services.pipeline import emit_progress
-        emit_progress(session.events, {
-            "step": "cancelled",
-            "detail": "Remix cancelled",
-            "progress": 0,
-        }, session=session)
+        from musicmixer.services.pipeline import emit_progress, progress_event
+        emit_progress(session.events, progress_event(
+            "cancelled", "Remix cancelled", 0,
+        ), session=session)
 
     return {"status": "cancelling", "message": "Cancel signal sent"}
 
@@ -956,6 +931,8 @@ async def _event_stream(
     appears frozen.  Nudges are capped at the current step's ceiling
     so progress can't drift into the next step's range.
     """
+    from musicmixer.services.pipeline import progress_event
+
     loop = asyncio.get_running_loop()
     start = time.monotonic()
     last_heartbeat = time.monotonic()
@@ -1005,11 +982,9 @@ async def _event_stream(
                 ceiling = _STEP_PROGRESS_CEILING.get(last_step, 0.98)
                 if last_progress < ceiling:
                     last_progress = min(last_progress + 0.008, ceiling)
-                    nudge = {
-                        "step": last_step,
-                        "detail": last_detail,
-                        "progress": round(last_progress, 3),
-                    }
+                    nudge = progress_event(
+                        last_step, last_detail, round(last_progress, 3),
+                    )
                     yield f"data: {json.dumps(nudge)}\n\n"
                 else:
                     # At ceiling — send keepalive to maintain connection
