@@ -7,14 +7,87 @@ translates results into HTTP responses, preserving the route's exact status
 codes and detail strings.
 """
 
+import logging
+import shutil
 import subprocess
 import urllib.parse
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Iterable
+
+logger = logging.getLogger("musicmixer.api.remix")
 
 
 class UploadTooLargeError(Exception):
     """Raised when an uploaded file exceeds the configured size limit."""
+
+
+@dataclass(frozen=True)
+class PreQueueCacheHit:
+    """A served-from-cache remix resolved before the queue/processing lock.
+
+    Carries the copied remix path and the metadata-derived session fields the
+    route applies to its ``SessionState``. The route owns session lifecycle and
+    the response; this is just the resolved data.
+    """
+
+    remix_path: str
+    explanation: str
+    used_fallback: bool
+    key_warning: str | None
+    warnings: list[str] = field(default_factory=list)
+
+
+def restore_prequeue_cached_remix(
+    url_a: str,
+    url_b: str,
+    prompt: str,
+    *,
+    session_id: str,
+    cache_dir: Path,
+    data_dir: Path,
+) -> PreQueueCacheHit | None:
+    """Resolve a URL-cache hit before queueing, or return ``None`` to fall through.
+
+    Same URLs + prompt always produce the same remix, so a hit can be served
+    instantly without consuming a processing slot. On a hit, the cached remix is
+    copied into the session's output dir and the metadata-derived fields are
+    returned. Any failure returns ``None`` so the route enqueues normally.
+    """
+    from musicmixer.services.remix_cache import (
+        compute_url_cache_key,
+        get_cached_remix,
+        get_cached_metadata,
+    )
+
+    try:
+        url_key = compute_url_cache_key(url_a, url_b, prompt)
+        cached_path = get_cached_remix(url_key, cache_dir)
+        if cached_path is None:
+            return None
+
+        logger.info(
+            "Pre-queue URL cache hit (key=%s), serving instantly", url_key[:12]
+        )
+        meta = get_cached_metadata(url_key, cache_dir) or {}
+
+        remix_dir = data_dir / "remixes" / session_id
+        remix_dir.mkdir(parents=True, exist_ok=True)
+        output_path = remix_dir / "remix.mp3"
+        shutil.copy2(cached_path, output_path)
+
+        return PreQueueCacheHit(
+            remix_path=str(output_path),
+            explanation=meta.get("explanation", ""),
+            used_fallback=meta.get("used_fallback", False),
+            key_warning=meta.get("key_warning"),
+            warnings=meta.get("warnings", []),
+        )
+    except Exception:
+        logger.debug(
+            "Pre-queue URL cache check failed, proceeding normally", exc_info=True
+        )
+        return None
 
 
 def thumbnail_from_youtube_url(url: str) -> str | None:
