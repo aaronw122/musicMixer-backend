@@ -179,14 +179,6 @@ def _pipeline_wrapper(
 # YouTube URL validation (SSRF prevention)
 # ---------------------------------------------------------------------------
 
-_YOUTUBE_ALLOWED_HOSTS = {
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "youtu.be",
-    "music.youtube.com",
-}
-
 
 def _thumbnail_from_youtube_url(url: str) -> str | None:
     """Derive a YouTube thumbnail URL from a video URL. Returns None on failure."""
@@ -207,45 +199,24 @@ def _thumbnail_from_youtube_url(url: str) -> str | None:
     return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
 
 
-def _validate_youtube_url(url: str) -> str:
-    """Validate a YouTube URL for SSRF safety. Returns the validated URL.
+def _validate_youtube_url(url: str) -> None:
+    """Route-level adapter around the canonical SSRF validator.
 
-    Validation order matters (step 3 before step 5 prevents userinfo bypass).
+    Delegates to ``services.youtube.validate_youtube_url`` and translates its
+    ``YouTubeDownloadError`` into the endpoint's existing 422 response shape, so
+    the service exception never leaks out of the FastAPI route.
 
     Raises HTTPException(422) on invalid URLs.
     """
-    # 1. Parse URL
+    from musicmixer.services.youtube import (
+        YouTubeDownloadError,
+        validate_youtube_url,
+    )
+
     try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception:
-        raise HTTPException(422, "Invalid URL format")
-
-    # 2. Reject non-https schemes (allow http, upgrade mentally but don't rewrite)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(422, "Only HTTP/HTTPS YouTube URLs are accepted")
-
-    # 3. Reject URLs containing @ in netloc (prevents userinfo bypass like youtube.com@evil.com)
-    if "@" in (parsed.netloc or ""):
-        raise HTTPException(422, "Invalid URL — only YouTube links are accepted")
-
-    # 4. Reject IP literals and non-standard ports
-    hostname = parsed.hostname
-    if hostname is None:
-        raise HTTPException(422, "Invalid URL — missing hostname")
-
-    if parsed.port is not None and parsed.port not in (80, 443):
-        raise HTTPException(422, "Invalid URL — only YouTube links are accepted")
-
-    # Check for IP literals (v4 and v6)
-    # Simple check: if hostname starts with digit or contains ':', it's likely an IP
-    if hostname[0].isdigit() or ":" in hostname:
-        raise HTTPException(422, "Invalid URL — only YouTube links are accepted")
-
-    # 5. Validate hostname against allowlist
-    if hostname not in _YOUTUBE_ALLOWED_HOSTS:
-        raise HTTPException(422, "Invalid URL — only YouTube links are accepted")
-
-    return url
+        validate_youtube_url(url)
+    except YouTubeDownloadError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -283,10 +254,10 @@ def _checkpoint_song(
     the role since separation always runs.
     """
     from pathlib import Path as _Path
-    from musicmixer.api.shelf import _extract_video_id
+    from musicmixer.services.youtube import extract_video_id
     from musicmixer.services.song_cache import cache_song_metadata, cache_song_stems
 
-    video_id = _extract_video_id(url)
+    video_id = extract_video_id(url)
     if video_id is None:
         return
     try:
@@ -557,7 +528,7 @@ def _youtube_pipeline_wrapper(
                 _emit_monotonic("Grabbing your second song...", progress)
 
         # Resolve video IDs up-front so the audio cache + single-flight can key on them.
-        from musicmixer.api.shelf import _extract_video_id as _yt_extract_vid_dl
+        from musicmixer.services.youtube import extract_video_id as _yt_extract_vid_dl
         _dl_vid_a = _yt_extract_vid_dl(url_a)
         _dl_vid_b = _yt_extract_vid_dl(url_b)
 
@@ -634,7 +605,7 @@ def _youtube_pipeline_wrapper(
         # --- Analyze + remix (45-100%) ---
         _metrics = PipelineMetrics(session_id=session_id)
         # Populate video IDs and titles for YouTube inputs
-        from musicmixer.api.shelf import _extract_video_id as _yt_extract_vid
+        from musicmixer.services.youtube import extract_video_id as _yt_extract_vid
         _vid_a = _yt_extract_vid(url_a)
         _vid_b = _yt_extract_vid(url_b)
         _metrics.song_a_video_id = _vid_a or ""
@@ -659,7 +630,6 @@ def _youtube_pipeline_wrapper(
 
         # Checkpoint each song's stems + metadata before the expensive remix/render,
         # failure-isolated so a crash resumes at song granularity, not from scratch.
-        from musicmixer.api.shelf import _extract_video_id
         from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
 
         _checkpoint_song(
@@ -925,11 +895,11 @@ def create_youtube_remix(
     _validate_youtube_url(body.url_b)
 
     # Check Redis song cache for each URL
-    from musicmixer.api.shelf import _extract_video_id
+    from musicmixer.services.youtube import extract_video_id
     from musicmixer.services.song_cache import get_cached_song, ROLE_VOCAL, ROLE_INSTRUMENTAL
 
-    video_id_a = _extract_video_id(body.url_a)
-    video_id_b = _extract_video_id(body.url_b)
+    video_id_a = extract_video_id(body.url_a)
+    video_id_b = extract_video_id(body.url_b)
     cached_a = get_cached_song(video_id_a, role=ROLE_VOCAL) if video_id_a else None
     cached_b = get_cached_song(video_id_b, role=ROLE_INSTRUMENTAL) if video_id_b else None
     if cached_a:

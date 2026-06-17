@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import yt_dlp
@@ -219,6 +219,29 @@ def validate_youtube_url(url: str) -> None:
         raise YouTubeDownloadError(
             "Invalid URL — only YouTube links are accepted"
         )
+
+
+def extract_video_id(url: str) -> str | None:
+    """Extract the YouTube video ID from a URL, or None if not derivable.
+
+    Canonical extractor (C1). Handles ``youtu.be/<id>`` shortlinks, the ``?v=``
+    query parameter, and ``shorts``/``embed`` path forms.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    path_parts = [part for part in parsed.path.split("/") if part]
+
+    if hostname == "youtu.be" and path_parts:
+        return path_parts[0]
+
+    query = parse_qs(parsed.query)
+    if query.get("v"):
+        return query["v"][0]
+
+    if path_parts and path_parts[0] in {"shorts", "embed"} and len(path_parts) > 1:
+        return path_parts[1]
+
+    return None
 
 
 def _is_ip_literal(hostname: str) -> bool:
