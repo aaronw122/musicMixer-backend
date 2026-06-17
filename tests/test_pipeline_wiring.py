@@ -873,3 +873,35 @@ class TestMediumCachePath:
         lyrics_b = result[5]
         assert lyrics_a is cached_lyrics
         assert lyrics_b is cached_lyrics
+
+
+class TestEventHelpers:
+    """Byte-identity checks for the Slice 8 event-builder helpers."""
+
+    def test_progress_event_with_extra(self):
+        from musicmixer.services.pipeline import progress_event
+
+        assert progress_event("x", "y", 0.5, position=3) == {
+            "step": "x",
+            "detail": "y",
+            "progress": 0.5,
+            "position": 3,
+        }
+
+    def test_progress_event_no_extra(self):
+        from musicmixer.services.pipeline import progress_event
+
+        assert progress_event("separating", "stems", 0.10) == {
+            "step": "separating",
+            "detail": "stems",
+            "progress": 0.10,
+        }
+
+    def test_plain_error_event(self):
+        from musicmixer.api.remix import _plain_error_event
+
+        assert _plain_error_event("boom") == {
+            "step": "error",
+            "detail": "boom",
+            "progress": 0,
+        }
