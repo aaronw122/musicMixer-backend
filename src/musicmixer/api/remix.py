@@ -38,6 +38,7 @@ from musicmixer.services.remix_stages import (
     UploadTooLargeError,
     extension_allowed,
     probe_duration,
+    restore_prequeue_cached_remix,
     thumbnail_from_youtube_url,
     upload_extension,
     write_upload_file,
@@ -889,43 +890,30 @@ def create_youtube_remix(
     # Same URLs + prompt always produce the same remix. Check before queueing
     # so cached remixes are served instantly without consuming a processing slot.
     if settings.remix_cache_enabled:
-        try:
-            from musicmixer.services.remix_cache import (
-                compute_url_cache_key,
-                get_cached_remix,
-                get_cached_metadata,
-            )
+        cache_session_id = str(uuid.uuid4())
+        cache_hit = restore_prequeue_cached_remix(
+            body.url_a,
+            body.url_b,
+            body.prompt,
+            session_id=cache_session_id,
+            cache_dir=settings.remix_cache_dir,
+            data_dir=settings.data_dir,
+        )
+        if cache_hit is not None:
+            session = SessionState()
+            session.status = "complete"
+            session.thumbnail_url_a = thumbnail_from_youtube_url(body.url_a)
+            session.thumbnail_url_b = thumbnail_from_youtube_url(body.url_b)
+            session.explanation = cache_hit.explanation
+            session.used_fallback = cache_hit.used_fallback
+            session.warnings = cache_hit.warnings
+            session.key_warning = cache_hit.key_warning
+            session.remix_path = cache_hit.remix_path
 
-            url_key = compute_url_cache_key(body.url_a, body.url_b, body.prompt)
-            cached_path = get_cached_remix(url_key, settings.remix_cache_dir)
-            if cached_path is not None:
-                logger.info("Pre-queue URL cache hit (key=%s), serving instantly", url_key[:12])
-                meta = get_cached_metadata(url_key, settings.remix_cache_dir) or {}
+            with request.app.state.sessions_lock:
+                request.app.state.sessions[cache_session_id] = session
 
-                session_id = str(uuid.uuid4())
-                session = SessionState()
-                session.status = "complete"
-                session.thumbnail_url_a = thumbnail_from_youtube_url(body.url_a)
-                session.thumbnail_url_b = thumbnail_from_youtube_url(body.url_b)
-                session.explanation = meta.get("explanation", "")
-                session.used_fallback = meta.get("used_fallback", False)
-                session.warnings = meta.get("warnings", [])
-                session.key_warning = meta.get("key_warning")
-
-                # Copy cached remix to session output dir
-                import shutil as _shutil
-                remix_dir = settings.data_dir / "remixes" / session_id
-                remix_dir.mkdir(parents=True, exist_ok=True)
-                output_path = remix_dir / "remix.mp3"
-                _shutil.copy2(cached_path, output_path)
-                session.remix_path = str(output_path)
-
-                with request.app.state.sessions_lock:
-                    request.app.state.sessions[session_id] = session
-
-                return {"session_id": session_id}
-        except Exception:
-            logger.debug("Pre-queue URL cache check failed, proceeding normally", exc_info=True)
+            return {"session_id": cache_session_id}
 
     # Generate session ID
     session_id = str(uuid.uuid4())
