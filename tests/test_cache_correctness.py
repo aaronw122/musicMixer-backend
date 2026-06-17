@@ -476,9 +476,15 @@ class TestTieredLookup:
 # ---------------------------------------------------------------------------
 
 class TestFullyCachedFastPath:
-    """`_try_run_fully_cached_youtube_remix` must confirm BOTH songs' cached
+    """`restore_fully_cached_youtube_remix` must confirm BOTH songs' cached
     stems exist on disk before copying either, so the degraded-cache fallback
     leaves no orphaned (half-restored) stems in the session dir.
+
+    Two-layer contract (Slice 4):
+    - the restore stage returns a typed cache-hit/cache-miss result and NEVER
+      calls ``run_remix``;
+    - the ``api/remix.py`` wrapper consumes a cache-hit result, visibly calls
+      ``run_remix``, updates the average duration, and returns.
 
     Role mapping (matches the production fast path): song A = ROLE_VOCAL,
     song B = ROLE_INSTRUMENTAL.
@@ -503,7 +509,10 @@ class TestFullyCachedFastPath:
     @pytest.fixture
     def fast_path_env(self, tmp_path, monkeypatch):
         """Isolate data_dir + song_cache_dir under tmp_path and stub the heavy
-        pipeline functions the helper lazily imports."""
+        pipeline functions the stage lazily imports.
+
+        ``run_remix`` is stubbed too so we can assert the STAGE never calls it.
+        """
         monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
         monkeypatch.setattr(settings, "song_cache_dir", tmp_path / "song_cache")
 
@@ -520,70 +529,143 @@ class TestFullyCachedFastPath:
 
         monkeypatch.setattr(pipeline, "run_remix", _fake_run_remix)
         monkeypatch.setattr(pipeline, "_step_measure_stem_lufs", _fake_lufs)
-        monkeypatch.setattr(pipeline, "emit_progress", lambda *a, **k: None)
-        monkeypatch.setattr(pipeline, "check_cancelled", lambda *a, **k: None)
         return calls
 
-    def _make_session(self):
-        from musicmixer.models import SessionState
-        return SessionState(status="processing")
-
-    def _run(self, session_id, song_a, song_b):
-        from musicmixer.api.remix import _try_run_fully_cached_youtube_remix
-        return _try_run_fully_cached_youtube_remix(
-            session_id=session_id,
-            prompt="test prompt",
-            session=self._make_session(),
-            cached_song_a=song_a,
-            cached_song_b=song_b,
-            pipeline_start=0.0,
+    def _run_stage(self, session_id, song_a, song_b):
+        """Invoke the restore stage directly with no-op API-owned callbacks."""
+        from musicmixer.services.remix_stages import (
+            FullyCachedCallbacks,
+            FullyCachedInputs,
+            restore_fully_cached_youtube_remix,
+        )
+        return restore_fully_cached_youtube_remix(
+            FullyCachedInputs(
+                session_id=session_id,
+                cached_song_a=song_a,
+                cached_song_b=song_b,
+            ),
+            callbacks=FullyCachedCallbacks(
+                check_cancelled=lambda: None,
+                on_cache_skip=lambda: None,
+            ),
+            settings=settings,
         )
 
-    def test_both_present_runs_remix(self, fast_path_env):
-        """Happy path: both stem sets present -> True, run_remix invoked, both
-        session stem dirs populated."""
+    def test_both_present_returns_hit_without_running_remix(self, fast_path_env):
+        """Happy path: both stem sets present -> typed cache HIT carrying the
+        restored analysis/metrics, both session stem dirs populated, and the
+        stage NEVER calls run_remix."""
         session_id = "sess_fastpath_both"
         vid_a, vid_b = "test_cc_fp_a1", "test_cc_fp_b1"
         self._write_cache_stems(vid_a, ROLE_VOCAL, VOCAL_STEM_NAMES)
         self._write_cache_stems(vid_b, ROLE_INSTRUMENTAL, STEM_NAMES)
 
-        result = self._run(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
+        result = self._run_stage(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
 
-        assert result is True
-        assert fast_path_env["run_remix"] == 1
+        assert result.used_cache is True
+        assert result.analysis is not None
+        assert result.metrics is not None
+        # source_quality is passed through verbatim from cached meta (None here).
+        assert result.source_quality_a == self._cached_song(vid_a).meta.source_quality
+        assert result.source_quality_b == self._cached_song(vid_b).meta.source_quality
+        assert fast_path_env["run_remix"] == 0, "stage must NOT call run_remix"
 
         stems_dir = settings.data_dir / "stems" / session_id
         assert (stems_dir / "song_a").is_dir()
         assert list((stems_dir / "song_a").glob("*.wav"))
         assert list((stems_dir / "song_b").glob("*.wav"))
 
-    def test_song_b_missing_falls_through_without_orphan_copy(self, fast_path_env):
-        """Regression: song A present, song B missing -> False (fall through) and
+    def test_song_b_missing_returns_miss_without_orphan_copy(self, fast_path_env):
+        """Regression: song A present, song B missing -> typed cache MISS and
         NO song-A stems were copied into the session dir (no orphaned work)."""
         session_id = "sess_fastpath_b_missing"
         vid_a, vid_b = "test_cc_fp_a2", "test_cc_fp_b2"
         # Song A cached/valid; song B intentionally NOT written to disk.
         self._write_cache_stems(vid_a, ROLE_VOCAL, VOCAL_STEM_NAMES)
 
-        result = self._run(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
+        result = self._run_stage(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
 
-        assert result is False, "missing B stems must signal fall-through"
-        assert fast_path_env["run_remix"] == 0, "remix must not run on fall-through"
+        assert result.used_cache is False, "missing B stems must signal a cache miss"
+        assert result.analysis is None
+        assert fast_path_env["run_remix"] == 0, "stage must NOT call run_remix"
 
-        # Orphaned-copy regression: A's stems must not be copied before the False return.
+        # Orphaned-copy regression: A's stems must not be copied before the miss.
         song_a_session = settings.data_dir / "stems" / session_id / "song_a"
         copied = list(song_a_session.glob("*.wav")) if song_a_session.exists() else []
         assert copied == [], f"song A stems were orphaned into session dir: {copied}"
 
-    def test_both_absent_falls_through(self, fast_path_env):
-        """Both stem sets missing -> False, nothing copied, no remix."""
+    def test_both_absent_returns_miss(self, fast_path_env):
+        """Both stem sets missing -> typed cache MISS, nothing copied, no remix."""
         session_id = "sess_fastpath_both_missing"
         vid_a, vid_b = "test_cc_fp_a3", "test_cc_fp_b3"
 
-        result = self._run(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
+        result = self._run_stage(session_id, self._cached_song(vid_a), self._cached_song(vid_b))
 
-        assert result is False
+        assert result.used_cache is False
         assert fast_path_env["run_remix"] == 0
         session_root = settings.data_dir / "stems" / session_id
         copied = list(session_root.rglob("*.wav")) if session_root.exists() else []
         assert copied == [], f"nothing should be copied when both absent: {copied}"
+
+    def test_wrapper_consumes_hit_and_runs_remix(self, fast_path_env):
+        """Wrapper layer: on a cache hit the `_youtube_pipeline_wrapper` visibly
+        calls run_remix, updates the average duration, and returns — owning the
+        control flow the stage does not."""
+        import musicmixer.api.remix as remix
+
+        session_id = "sess_fastpath_wrapper"
+        vid_a, vid_b = "test_cc_fp_w_a", "test_cc_fp_w_b"
+        self._write_cache_stems(vid_a, ROLE_VOCAL, VOCAL_STEM_NAMES)
+        self._write_cache_stems(vid_b, ROLE_INSTRUMENTAL, STEM_NAMES)
+
+        avg_calls: dict[str, int] = {"n": 0}
+        remix_calls: dict[str, dict] = {}
+
+        def _fake_run_remix(**kwargs):
+            remix_calls["kwargs"] = kwargs
+
+        def _fake_update_avg(elapsed):
+            avg_calls["n"] += 1
+
+        import musicmixer.services.pipeline as pipeline
+        # run_remix is resolved inside the wrapper via `from ... import run_remix`,
+        # so patch the name on the pipeline module before the wrapper imports it.
+        orig_run_remix = pipeline.run_remix
+        pipeline.run_remix = _fake_run_remix
+        orig_update_avg = remix._update_avg_remix_duration
+        remix._update_avg_remix_duration = _fake_update_avg
+        try:
+            from musicmixer.models import SessionState
+            session = SessionState(status="processing")
+            processing_lock = threading.Lock()
+            processing_lock.acquire()
+
+            import queue as _queue
+
+            class _AppState:
+                def __init__(self):
+                    self.wait_queue = _queue.Queue()
+                    self.processing_lock = processing_lock
+
+            app_state = _AppState()
+
+            remix._youtube_pipeline_wrapper(
+                session_id=session_id,
+                url_a="https://www.youtube.com/watch?v=" + vid_a,
+                url_b="https://www.youtube.com/watch?v=" + vid_b,
+                prompt="test prompt",
+                session=session,
+                processing_lock=processing_lock,
+                app_state=app_state,
+                cached_song_a=self._cached_song(vid_a),
+                cached_song_b=self._cached_song(vid_b),
+            )
+        finally:
+            pipeline.run_remix = orig_run_remix
+            remix._update_avg_remix_duration = orig_update_avg
+
+        assert "kwargs" in remix_calls, "wrapper must visibly call run_remix on a hit"
+        assert remix_calls["kwargs"]["session_id"] == session_id
+        assert remix_calls["kwargs"]["prompt"] == "test prompt"
+        assert remix_calls["kwargs"]["analysis"] is not None
+        assert avg_calls["n"] == 1, "wrapper must update average duration on a hit"
