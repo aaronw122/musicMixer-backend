@@ -19,7 +19,11 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from musicmixer.config import settings
-from musicmixer.services.youtube import YouTubeDownloadError, validate_youtube_url
+from musicmixer.services.youtube import (
+    YouTubeDownloadError,
+    extract_video_id as _extract_video_id,
+    validate_youtube_url,
+)
 
 router = APIRouter()
 
@@ -59,24 +63,6 @@ def _validate_for_api(url: str) -> None:
         validate_youtube_url(url)
     except YouTubeDownloadError as exc:
         raise HTTPException(422, str(exc)) from exc
-
-
-def _extract_video_id(url: str) -> str | None:
-    parsed = urllib.parse.urlparse(url)
-    hostname = parsed.hostname or ""
-    path_parts = [part for part in parsed.path.split("/") if part]
-
-    if hostname == "youtu.be" and path_parts:
-        return path_parts[0]
-
-    query = urllib.parse.parse_qs(parsed.query)
-    if query.get("v"):
-        return query["v"][0]
-
-    if path_parts and path_parts[0] in {"shorts", "embed"} and len(path_parts) > 1:
-        return path_parts[1]
-
-    return None
 
 
 def _normalize_youtube_url(url: str) -> str:

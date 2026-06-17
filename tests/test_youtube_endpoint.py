@@ -189,6 +189,35 @@ class TestYouTubeURLValidation:
         )
         assert response.status_code == 422
 
+    def test_rejects_http_scheme(self, client):
+        """http:// YouTube URLs are rejected (C2 tightening — only https allowed)."""
+        response = client.post(
+            "/api/remix/youtube",
+            json={
+                "url_a": "http://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "url_b": VALID_YT_URL_B,
+                "prompt": "test remix",
+            },
+        )
+        assert response.status_code == 422
+        assert "only YouTube links" in response.json()["detail"]
+
+    def test_invalid_url_preserves_422_body_shape(self, client):
+        """Invalid URLs keep the existing {"detail": "<message>"} 422 body shape."""
+        response = client.post(
+            "/api/remix/youtube",
+            json={
+                "url_a": "https://evil.com/watch?v=abc123",
+                "url_b": VALID_YT_URL_B,
+                "prompt": "test remix",
+            },
+        )
+        assert response.status_code == 422
+        body = response.json()
+        assert set(body.keys()) == {"detail"}
+        assert isinstance(body["detail"], str)
+        assert body["detail"] == "Invalid URL — only YouTube links are accepted"
+
     def test_rejects_javascript_scheme(self, client):
         """javascript: scheme should be rejected."""
         response = client.post(
