@@ -38,6 +38,7 @@ from musicmixer.services.remix_stages import (
     FullyCachedCallbacks,
     FullyCachedInputs,
     UploadTooLargeError,
+    analyze_and_checkpoint_youtube_pair,
     download_youtube_pair,
     extension_allowed,
     probe_duration,
@@ -180,49 +181,6 @@ class YouTubeRemixRequest(BaseModel):
 # YouTube pipeline wrapper (download + existing pipeline)
 # ---------------------------------------------------------------------------
 
-def _checkpoint_song(
-    *,
-    url: str,
-    role,
-    title: str,
-    meta,
-    lyrics,
-    stems_dir,
-    already_cached: bool,
-    session_id: str,
-) -> None:
-    """Persist one song's metadata + stems to the cache, failure-isolated.
-
-    Called per-song right after analysis (Part A per-song checkpoint). Any
-    exception is swallowed and logged: a cache write must never crash the
-    pipeline the user is waiting on, and one song's failure must not abort the
-    other song's checkpoint. Metadata is skipped when the song came from the
-    medium-cache path (it's already persisted); stems are always (re-)written for
-    the role since separation always runs.
-    """
-    from pathlib import Path as _Path
-    from musicmixer.services.youtube import extract_video_id
-    from musicmixer.services.song_cache import cache_song_metadata, cache_song_stems
-
-    video_id = extract_video_id(url)
-    if video_id is None:
-        return
-    try:
-        if not already_cached:
-            cache_song_metadata(
-                video_id=video_id, title=title, artist="", meta=meta, lyrics=lyrics,
-            )
-        cache_song_stems(video_id=video_id, role=role, stems_dir=_Path(stems_dir))
-        logger.info(
-            "Session %s: checkpointed song %s (role=%s) to cache", session_id, video_id, role,
-        )
-    except Exception:
-        logger.warning(
-            "Session %s: failed to checkpoint song %s (role=%s); continuing",
-            session_id, video_id, role, exc_info=True,
-        )
-
-
 # Structured-error wire contract (producer side; consumer is frontend PR #76).
 # The SSE `error` event carries two OPTIONAL fields alongside {step, detail,
 # progress}: `error_class` ("transient" | "permanent") and `failed_song`
@@ -299,9 +257,8 @@ def _youtube_pipeline_wrapper(
     """
     pipeline_start = time.monotonic()
     from musicmixer.services.pipeline import (
-        CancelledError, analyze_songs, emit_progress, run_remix, run_pipeline,
+        CancelledError, emit_progress, run_remix,
     )
-    from musicmixer.services.pipeline_metrics import PipelineMetrics
 
     try:
         session.status = "processing"
@@ -405,63 +362,27 @@ def _youtube_pipeline_wrapper(
             cached_song_b=cached_song_b,
             settings=settings,
         )
-        result_a = downloaded.result_a
-        result_b = downloaded.result_b
-        source_quality_a = downloaded.source_quality_a
-        source_quality_b = downloaded.source_quality_b
-
-        # --- Analyze + remix (45-100%) ---
-        _metrics = PipelineMetrics(session_id=session_id)
-        # Populate video IDs and titles for YouTube inputs
-        from musicmixer.services.youtube import extract_video_id as _yt_extract_vid
-        _vid_a = _yt_extract_vid(url_a)
-        _vid_b = _yt_extract_vid(url_b)
-        _metrics.song_a_video_id = _vid_a or ""
-        _metrics.song_b_video_id = _vid_b or ""
-
-        analysis = analyze_songs(
+        # --- Analyze + checkpoint (45-100%) ---
+        analyzed = analyze_and_checkpoint_youtube_pair(
+            downloaded,
+            url_a=url_a,
+            url_b=url_b,
             session_id=session_id,
-            song_a_path=str(result_a.wav_path),
-            song_b_path=str(result_b.wav_path),
             event_queue=session.events,
             session=session,
-            song_a_original_filename=result_a.title,
-            song_b_original_filename=result_b.title,
-            source_quality_a=source_quality_a,
-            source_quality_b=source_quality_b,
-            metrics=_metrics,
-            cached_meta_a=cached_song_a.meta if cached_song_a else None,
-            cached_meta_b=cached_song_b.meta if cached_song_b else None,
-            cached_lyrics_a=cached_song_a.lyrics if cached_song_a else None,
-            cached_lyrics_b=cached_song_b.lyrics if cached_song_b else None,
-        )
-
-        # Checkpoint each song's stems + metadata before the expensive remix/render,
-        # failure-isolated so a crash resumes at song granularity, not from scratch.
-        from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
-
-        _checkpoint_song(
-            url=url_a, role=ROLE_VOCAL, title=result_a.title,
-            meta=analysis.meta_a, lyrics=analysis.lyrics_a,
-            stems_dir=analysis.song_a_stems_dir,
-            already_cached=cached_song_a is not None, session_id=session_id,
-        )
-        _checkpoint_song(
-            url=url_b, role=ROLE_INSTRUMENTAL, title=result_b.title,
-            meta=analysis.meta_b, lyrics=analysis.lyrics_b,
-            stems_dir=analysis.song_b_stems_dir,
-            already_cached=cached_song_b is not None, session_id=session_id,
+            cached_song_a=cached_song_a,
+            cached_song_b=cached_song_b,
         )
 
         run_remix(
             session_id=session_id,
-            analysis=analysis,
+            analysis=analyzed.analysis,
             prompt=prompt,
             event_queue=session.events,
             session=session,
-            source_quality_a=source_quality_a,
-            source_quality_b=source_quality_b,
-            metrics=_metrics,
+            source_quality_a=analyzed.source_quality_a,
+            source_quality_b=analyzed.source_quality_b,
+            metrics=analyzed.metrics,
         )
         _update_avg_remix_duration(time.monotonic() - pipeline_start)
 
