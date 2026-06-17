@@ -13,7 +13,12 @@ import subprocess
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO, Iterable
+from typing import TYPE_CHECKING, BinaryIO, Callable, Iterable
+
+if TYPE_CHECKING:
+    from musicmixer.config import Settings
+    from musicmixer.models import AnalyzedSongs, CachedSong
+    from musicmixer.services.pipeline_metrics import PipelineMetrics
 
 logger = logging.getLogger("musicmixer.api.remix")
 
@@ -88,6 +93,158 @@ def restore_prequeue_cached_remix(
             "Pre-queue URL cache check failed, proceeding normally", exc_info=True
         )
         return None
+
+
+@dataclass(frozen=True)
+class FullyCachedInputs:
+    """Inputs for the fully-cached YouTube restore stage."""
+
+    session_id: str
+    cached_song_a: "CachedSong"
+    cached_song_b: "CachedSong"
+
+
+@dataclass
+class FullyCachedCallbacks:
+    """API-owned callbacks for the fully-cached restore stage.
+
+    ``check_cancelled`` lets ``api/remix.py`` keep cancellation ownership; the
+    stage only calls it. ``on_cache_skip`` lets the API emit its existing
+    "skipping download" progress event through API-owned event construction —
+    the stage never touches SSE payloads.
+    """
+
+    check_cancelled: Callable[[], None]
+    on_cache_skip: Callable[[], None]
+
+
+@dataclass(frozen=True)
+class FullyCachedRestore:
+    """Result of restoring a fully-cached YouTube remix.
+
+    A cache hit (``used_cache=True``) carries everything the visible
+    ``run_remix`` call in ``api/remix.py`` needs; a miss (``used_cache=False``)
+    carries no payload and signals the wrapper to fall back to the normal
+    download/separate pipeline. The stage never calls ``run_remix`` itself.
+    """
+
+    used_cache: bool
+    analysis: "AnalyzedSongs | None" = None
+    metrics: "PipelineMetrics | None" = None
+    source_quality_a: str | None = None
+    source_quality_b: str | None = None
+    restored_stems_dir: Path | None = None
+
+
+def restore_fully_cached_youtube_remix(
+    inputs: FullyCachedInputs,
+    *,
+    callbacks: FullyCachedCallbacks,
+    settings: "Settings",
+) -> FullyCachedRestore:
+    """Restore a fully-cached YouTube remix, or signal a cache miss.
+
+    Both songs' stems + metadata are already on disk, so this skips downloads
+    and analysis: it restores cached stems, measures per-stem LUFS, builds the
+    ``AnalyzedSongs`` and ``PipelineMetrics`` the remix needs, and returns them.
+
+    On a partial cache miss (one stem set missing) it returns a miss result
+    BEFORE copying either stem set, so a degraded cache cannot orphan a
+    half-restored stem dir. The wrapper owns the ``run_remix`` call and the
+    fallback decision.
+
+    Cancellation stays with ``api/remix.py`` via ``callbacks.check_cancelled``;
+    this stage owns no session lifecycle.
+    """
+    from musicmixer.models import AnalyzedSongs
+    from musicmixer.services.pipeline import _step_measure_stem_lufs
+    from musicmixer.services.pipeline_metrics import PipelineMetrics
+    from musicmixer.services.song_cache import (
+        ROLE_INSTRUMENTAL,
+        ROLE_VOCAL,
+        cached_stems_exist,
+        get_cached_stems,
+    )
+
+    session_id = inputs.session_id
+    cached_song_a = inputs.cached_song_a
+    cached_song_b = inputs.cached_song_b
+
+    logger.info(
+        "Session %s: Both songs fully cached, skipping downloads + analysis",
+        session_id,
+    )
+    callbacks.on_cache_skip()
+
+    callbacks.check_cancelled()
+
+    stems_dir = settings.data_dir / "stems" / session_id
+    song_a_stems_dir = stems_dir / "song_a"
+    song_b_stems_dir = stems_dir / "song_b"
+
+    # get_cached_stems copies as a side effect, so confirm BOTH are present before
+    # copying either — otherwise "A ok, B missing" orphans A's stems on fallback.
+    if not (
+        cached_stems_exist(cached_song_a.video_id, ROLE_VOCAL)
+        and cached_stems_exist(cached_song_b.video_id, ROLE_INSTRUMENTAL)
+    ):
+        logger.warning(
+            "Session %s: Cached stems missing, falling back to full pipeline",
+            session_id,
+        )
+        return FullyCachedRestore(used_cache=False)
+
+    get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
+    get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
+
+    song_a_stems = {f.stem: f for f in song_a_stems_dir.glob("*.wav")}
+    song_b_stems = {f.stem: f for f in song_b_stems_dir.glob("*.wav")}
+
+    vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(
+        session_id, song_a_stems_dir, song_b_stems_dir,
+    )
+
+    analysis = AnalyzedSongs(
+        meta_a=cached_song_a.meta,
+        meta_b=cached_song_b.meta,
+        song_a_stems=song_a_stems,
+        song_b_stems=song_b_stems,
+        song_a_stems_dir=song_a_stems_dir,
+        song_b_stems_dir=song_b_stems_dir,
+        lyrics_a=cached_song_a.lyrics,
+        lyrics_b=cached_song_b.lyrics,
+        vocal_stem_lufs=vocal_stem_lufs,
+        inst_stem_lufs=inst_stem_lufs,
+    )
+
+    metrics = PipelineMetrics(session_id=session_id)
+    metrics.song_a_title = cached_song_a.title
+    metrics.song_b_title = cached_song_b.title
+    metrics.song_a_video_id = cached_song_a.video_id
+    metrics.song_b_video_id = cached_song_b.video_id
+    metrics.song_a_cache_hit = True
+    metrics.song_b_cache_hit = True
+    metrics.bpm_a = cached_song_a.meta.bpm
+    metrics.bpm_b = cached_song_b.meta.bpm
+    metrics.key_a = cached_song_a.meta.key or ""
+    metrics.scale_a = cached_song_a.meta.scale or ""
+    metrics.key_b = cached_song_b.meta.key or ""
+    metrics.scale_b = cached_song_b.meta.scale or ""
+    metrics.key_confidence_a = cached_song_a.meta.key_confidence or 0.0
+    metrics.key_confidence_b = cached_song_b.meta.key_confidence or 0.0
+    metrics.duration_a_s = cached_song_a.meta.duration_seconds
+    metrics.duration_b_s = cached_song_b.meta.duration_seconds
+    metrics.log_input()
+    metrics.log_analysis()
+
+    return FullyCachedRestore(
+        used_cache=True,
+        analysis=analysis,
+        metrics=metrics,
+        source_quality_a=cached_song_a.meta.source_quality,
+        source_quality_b=cached_song_b.meta.source_quality,
+        restored_stems_dir=stems_dir,
+    )
 
 
 def thumbnail_from_youtube_url(url: str) -> str | None:

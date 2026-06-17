@@ -35,9 +35,12 @@ from musicmixer.config import settings
 from musicmixer.models import CachedSong, SessionState
 from musicmixer.services.cleanup import cleanup_expired_sessions
 from musicmixer.services.remix_stages import (
+    FullyCachedCallbacks,
+    FullyCachedInputs,
     UploadTooLargeError,
     extension_allowed,
     probe_duration,
+    restore_fully_cached_youtube_remix,
     restore_prequeue_cached_remix,
     thumbnail_from_youtube_url,
     upload_extension,
@@ -245,114 +248,6 @@ def _checkpoint_song(
         )
 
 
-def _try_run_fully_cached_youtube_remix(
-    session_id: str,
-    prompt: str,
-    session: SessionState,
-    cached_song_a: CachedSong | None,
-    cached_song_b: CachedSong | None,
-    pipeline_start: float,
-) -> bool:
-    """Fast path for when both songs are fully cached (stems + metadata on disk).
-
-    Restores cached stems, measures LUFS, builds ``AnalyzedSongs``, populates
-    metrics, and runs the remix — skipping downloads + analysis entirely.
-
-    Returns:
-        True if the remix was fully handled here. False if the cached stems were
-        missing from disk, signalling the caller to fall back to the normal
-        download/separate pipeline.
-    """
-    from musicmixer.services.pipeline import (
-        check_cancelled, emit_progress, run_remix, _step_measure_stem_lufs,
-    )
-    from musicmixer.services.pipeline_metrics import PipelineMetrics
-    from musicmixer.services.song_cache import cached_stems_exist, get_cached_stems
-    from musicmixer.models import AnalyzedSongs
-
-    logger.info("Session %s: Both songs fully cached, skipping downloads + analysis", session_id)
-    emit_progress(session.events, {
-        "step": "downloading",
-        "detail": "Both songs cached — skipping download!",
-        "progress": 0.10,
-    }, session=session)
-
-    check_cancelled(session)
-
-    assert cached_song_a is not None
-    assert cached_song_b is not None
-
-    stems_dir = settings.data_dir / "stems" / session_id
-    song_a_stems_dir = stems_dir / "song_a"
-    song_b_stems_dir = stems_dir / "song_b"
-    from musicmixer.services.song_cache import ROLE_VOCAL, ROLE_INSTRUMENTAL
-
-    # get_cached_stems copies as a side effect, so confirm BOTH are present before
-    # copying either — otherwise "A ok, B missing" orphans A's stems on fallback.
-    if not (
-        cached_stems_exist(cached_song_a.video_id, ROLE_VOCAL)
-        and cached_stems_exist(cached_song_b.video_id, ROLE_INSTRUMENTAL)
-    ):
-        logger.warning("Session %s: Cached stems missing, falling back to full pipeline", session_id)
-        return False
-
-    get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
-    get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
-
-    song_a_stems = {f.stem: f for f in song_a_stems_dir.glob("*.wav")}
-    song_b_stems = {f.stem: f for f in song_b_stems_dir.glob("*.wav")}
-
-    vocal_stem_lufs, inst_stem_lufs = _step_measure_stem_lufs(
-        session_id, song_a_stems_dir, song_b_stems_dir,
-    )
-
-    analysis = AnalyzedSongs(
-        meta_a=cached_song_a.meta,
-        meta_b=cached_song_b.meta,
-        song_a_stems=song_a_stems,
-        song_b_stems=song_b_stems,
-        song_a_stems_dir=song_a_stems_dir,
-        song_b_stems_dir=song_b_stems_dir,
-        lyrics_a=cached_song_a.lyrics,
-        lyrics_b=cached_song_b.lyrics,
-        vocal_stem_lufs=vocal_stem_lufs,
-        inst_stem_lufs=inst_stem_lufs,
-    )
-
-    _metrics = PipelineMetrics(session_id=session_id)
-    _metrics.song_a_title = cached_song_a.title
-    _metrics.song_b_title = cached_song_b.title
-    _metrics.song_a_video_id = cached_song_a.video_id
-    _metrics.song_b_video_id = cached_song_b.video_id
-    _metrics.song_a_cache_hit = True
-    _metrics.song_b_cache_hit = True
-    _metrics.bpm_a = cached_song_a.meta.bpm
-    _metrics.bpm_b = cached_song_b.meta.bpm
-    _metrics.key_a = cached_song_a.meta.key or ""
-    _metrics.scale_a = cached_song_a.meta.scale or ""
-    _metrics.key_b = cached_song_b.meta.key or ""
-    _metrics.scale_b = cached_song_b.meta.scale or ""
-    _metrics.key_confidence_a = cached_song_a.meta.key_confidence or 0.0
-    _metrics.key_confidence_b = cached_song_b.meta.key_confidence or 0.0
-    _metrics.duration_a_s = cached_song_a.meta.duration_seconds
-    _metrics.duration_b_s = cached_song_b.meta.duration_seconds
-    _metrics.log_input()
-    _metrics.log_analysis()
-
-    run_remix(
-        session_id=session_id,
-        analysis=analysis,
-        prompt=prompt,
-        event_queue=session.events,
-        session=session,
-        source_quality_a=cached_song_a.meta.source_quality,
-        source_quality_b=cached_song_b.meta.source_quality,
-        metrics=_metrics,
-    )
-    _update_avg_remix_duration(time.monotonic() - pipeline_start)
-    return True
-
-
 # Structured-error wire contract (producer side; consumer is frontend PR #76).
 # The SSE `error` event carries two OPTIONAL fields alongside {step, detail,
 # progress}: `error_class` ("transient" | "permanent") and `failed_song`
@@ -446,15 +341,41 @@ def _youtube_pipeline_wrapper(
             and cached_song_b is not None and cached_song_b.has_stems
         )
 
-        if both_fully_cached and _try_run_fully_cached_youtube_remix(
-            session_id=session_id,
-            prompt=prompt,
-            session=session,
-            cached_song_a=cached_song_a,
-            cached_song_b=cached_song_b,
-            pipeline_start=pipeline_start,
-        ):
-            return
+        if both_fully_cached:
+            from musicmixer.services.pipeline import check_cancelled
+
+            def _on_cache_skip() -> None:
+                emit_progress(session.events, {
+                    "step": "downloading",
+                    "detail": "Both songs cached — skipping download!",
+                    "progress": 0.10,
+                }, session=session)
+
+            cached = restore_fully_cached_youtube_remix(
+                FullyCachedInputs(
+                    session_id=session_id,
+                    cached_song_a=cached_song_a,
+                    cached_song_b=cached_song_b,
+                ),
+                callbacks=FullyCachedCallbacks(
+                    check_cancelled=lambda: check_cancelled(session),
+                    on_cache_skip=_on_cache_skip,
+                ),
+                settings=settings,
+            )
+            if cached.used_cache:
+                run_remix(
+                    session_id=session_id,
+                    analysis=cached.analysis,
+                    prompt=prompt,
+                    event_queue=session.events,
+                    session=session,
+                    source_quality_a=cached.source_quality_a,
+                    source_quality_b=cached.source_quality_b,
+                    metrics=cached.metrics,
+                )
+                _update_avg_remix_duration(time.monotonic() - pipeline_start)
+                return
 
         # --- Monotonic progress tracker ---
         # Both downloads report into the 0.02-0.10 range.  Song A maps to
