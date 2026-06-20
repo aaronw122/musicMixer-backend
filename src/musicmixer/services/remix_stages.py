@@ -1,10 +1,15 @@
-"""Pure, API-agnostic helpers for the remix endpoints.
+"""Route-independent stage helpers for the remix endpoints.
 
-These functions perform stage-adjacent input work (thumbnail derivation, upload
-validation/write, duration probing) with no FastAPI, SSE, or ``SessionState``
-coupling. They raise plain exceptions or return values; ``api/remix.py``
-translates results into HTTP responses, preserving the route's exact status
-codes and detail strings.
+Most stages perform input/stage work (thumbnail derivation, upload
+validation/write, duration probing, downloads, cache restore) and return data;
+they construct no SSE payloads and own no session lifecycle. ``api/remix.py``
+translates their results into HTTP responses, preserving the route's exact
+status codes and detail strings.
+
+The one exception is ``analyze_and_checkpoint_youtube_pair``: it passes the
+existing ``event_queue``/``session`` handles through to ``analyze_songs``, which
+still owns progress emission and cancellation. The bridge constructs no SSE
+payloads itself — it just threads those handles through.
 """
 
 import logging
@@ -25,6 +30,8 @@ if TYPE_CHECKING:
     from musicmixer.services.youtube import YouTubeAudioResult
 
 logger = logging.getLogger("musicmixer.api.remix")
+
+UPLOAD_CHUNK_SIZE_BYTES = 1024 * 1024
 
 
 class UploadTooLargeError(Exception):
@@ -264,24 +271,25 @@ class DownloadPairCallbacks:
       its "A"/"B" slot for ``_build_error_event``. The stage re-raises the
       ORIGINAL exception object after tagging so ``error_class``/``failed_song``
       survive byte-identically.
-    - ``on_download_start`` / ``progress_a`` / ``progress_b`` / ``on_both_done``
-      drive the existing mid-download progress events through API-owned event
-      construction (monotonic mapping included).
+    - ``on_download_pair_started`` / ``on_song_a_download_progress`` /
+      ``on_song_b_download_progress`` / ``on_download_pair_finished`` drive the
+      existing mid-download progress events through API-owned event construction
+      (monotonic mapping included).
     """
 
     check_cancelled: Callable[[], None]
     tag_failed_song: Callable[[BaseException, Literal["A", "B"]], None]
-    on_download_start: Callable[[], None]
-    progress_a: Callable[[float, str], None]
-    progress_b: Callable[[float, str], None]
-    on_both_done: Callable[[], None]
+    on_download_pair_started: Callable[[], None]
+    on_song_a_download_progress: Callable[[float, str], None]
+    on_song_b_download_progress: Callable[[float, str], None]
+    on_download_pair_finished: Callable[[], None]
 
 
 @dataclass(frozen=True)
 class DownloadedPair:
     """Result of the YouTube download-pair stage.
 
-    Carries the two download results plus the source-quality facts Slice 6's
+    Carries the two download results plus the source-quality facts the
     analyze/checkpoint stage consumes (``source_quality_a``/``_b``). The wrapper
     keeps ownership of analysis, checkpointing, and the final ``run_remix`` call.
     """
@@ -359,31 +367,31 @@ def download_youtube_pair(
     upload_dir = settings.data_dir / "uploads" / session_id
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    callbacks.on_download_start()
+    callbacks.on_download_pair_started()
 
     # Resolve video IDs up-front so the audio cache + single-flight can key on them.
-    _dl_vid_a = extract_video_id(url_a)
-    _dl_vid_b = extract_video_id(url_b)
+    video_id_a = extract_video_id(url_a)
+    video_id_b = extract_video_id(url_b)
 
     def _download_a():
         return _run_sync(download_youtube_audio(
             url=url_a,
             output_dir=upload_dir,
-            progress_callback=callbacks.progress_a,
-            video_id=_dl_vid_a,
+            progress_callback=callbacks.on_song_a_download_progress,
+            video_id=video_id_a,
         ))
 
     def _download_b():
         return _run_sync(download_youtube_audio(
             url=url_b,
             output_dir=upload_dir,
-            progress_callback=callbacks.progress_b,
-            video_id=_dl_vid_b,
+            progress_callback=callbacks.on_song_b_download_progress,
+            video_id=video_id_b,
         ))
 
     # song_a_future → url_a → Song "A"; song_b_future → url_b → Song "B".
     # On failure we tag the exception with its slot so the SSE error handler
-    # can emit `failed_song` to the frontend (PR #76).
+    # can emit `failed_song` to the frontend.
     with ThreadPoolExecutor(max_workers=2) as dl_executor:
         song_a_future = dl_executor.submit(_download_a)
         song_b_future = dl_executor.submit(_download_b)
@@ -405,7 +413,7 @@ def download_youtube_pair(
             dl_executor.shutdown(wait=False, cancel_futures=True)
             raise
 
-    callbacks.on_both_done()
+    callbacks.on_download_pair_finished()
 
     max_processing_duration = settings.processing_max_duration_seconds
     _pre_trim_youtube_download(result_a, max_processing_duration)
@@ -452,7 +460,7 @@ def _checkpoint_song(
 ) -> None:
     """Persist one song's metadata + stems to the cache, failure-isolated.
 
-    Called per-song right after analysis (Part A per-song checkpoint). Any
+    Called per-song right after analysis. Any
     exception is swallowed and logged: a cache write must never crash the
     pipeline the user is waiting on, and one song's failure must not abort the
     other song's checkpoint. Metadata is skipped when the song came from the
@@ -620,7 +628,7 @@ def extension_allowed(filename: str | None, allowed_extensions: Iterable[str]) -
 
 
 def write_upload_file(file: BinaryIO, dest: Path, max_bytes: int) -> None:
-    """Stream an uploaded file to ``dest`` in 1 MB chunks.
+    """Stream an uploaded file to ``dest`` in fixed-size chunks.
 
     Raises ``UploadTooLargeError`` if the cumulative size exceeds ``max_bytes``.
     The size check happens mid-stream so an oversized upload is rejected without
@@ -630,7 +638,7 @@ def write_upload_file(file: BinaryIO, dest: Path, max_bytes: int) -> None:
     chunks = []
     total = 0
     while True:
-        chunk = file.read(1024 * 1024)  # 1 MB chunks
+        chunk = file.read(UPLOAD_CHUNK_SIZE_BYTES)
         if not chunk:
             break
         total += len(chunk)

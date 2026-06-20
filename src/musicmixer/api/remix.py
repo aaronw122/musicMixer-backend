@@ -1,16 +1,4 @@
-"""Remix API endpoints.
-
-Day 2: Async pipeline with SSE progress events.
-- POST /api/remix          -- Accept uploads, start pipeline in background, return session_id
-- POST /api/remix/youtube  -- Accept YouTube URLs, download + pipeline in background
-- GET  /api/remix/{id}/progress -- SSE stream of pipeline progress events
-- GET  /api/remix/{id}/status   -- JSON snapshot of current session state
-- GET  /api/remix/{id}/audio    -- Serve the rendered remix MP3
-
-Day 3: Admin/debug stem endpoints.
-- GET  /api/remix/{id}/stems                    -- List available stems for both songs
-- GET  /api/remix/{id}/stems/{song}/{stem_name} -- Serve raw WAV stem file
-"""
+"""Route layer for remix creation, queueing, SSE progress, cancellation, and audio/stem serving."""
 
 import asyncio
 import dataclasses
@@ -67,10 +55,6 @@ def _update_avg_remix_duration(elapsed_seconds: float) -> None:
         _AVG_REMIX_DURATION_S = 0.7 * _AVG_REMIX_DURATION_S + 0.3 * elapsed_seconds
 
 
-# ---------------------------------------------------------------------------
-# Queue work item — what gets enqueued when all slots are busy
-# ---------------------------------------------------------------------------
-
 @dataclasses.dataclass
 class _QueueItem:
     """A queued remix request waiting for a processing slot."""
@@ -79,10 +63,6 @@ class _QueueItem:
     run_fn: Callable[[], None]  # callable that runs the pipeline (already bound)
     enqueued_at: float = dataclasses.field(default_factory=time.monotonic)
 
-
-# ---------------------------------------------------------------------------
-# Pipeline wrappers
-# ---------------------------------------------------------------------------
 
 def _pipeline_wrapper(
     session_id: str,
@@ -136,11 +116,6 @@ def _pipeline_wrapper(
         _process_next_queued(app_state)
 
 
-# ---------------------------------------------------------------------------
-# YouTube URL validation (SSRF prevention)
-# ---------------------------------------------------------------------------
-
-
 def _validate_youtube_url(url: str) -> None:
     """Route-level adapter around the canonical SSRF validator.
 
@@ -161,21 +136,13 @@ def _validate_youtube_url(url: str) -> None:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-# ---------------------------------------------------------------------------
-# YouTube remix request model
-# ---------------------------------------------------------------------------
-
 class YouTubeRemixRequest(BaseModel):
     url_a: str  # YouTube URL for song A
     url_b: str  # YouTube URL for song B
     prompt: str = ""  # Remix prompt (optional — defaults to deterministic plan)
 
 
-# ---------------------------------------------------------------------------
-# YouTube pipeline wrapper (download + existing pipeline)
-# ---------------------------------------------------------------------------
-
-# Structured-error wire contract (producer side; consumer is frontend PR #76).
+# Structured-error wire contract (producer side; the frontend is the consumer).
 # The SSE `error` event carries two OPTIONAL fields alongside {step, detail,
 # progress}: `error_class` ("transient" | "permanent") and `failed_song`
 # ("A" | "B"). Field names and values (snake_case, exact strings) must match
@@ -211,7 +178,7 @@ def _plain_error_event(detail: str) -> dict:
 def _build_error_event(exc: BaseException) -> dict:
     """Build the SSE `error` event payload from a pipeline exception.
 
-    Emits the structured-error wire contract (frontend PR #76):
+    Emits the structured-error wire contract:
       - `error_class`: read from a `YouTubeDownloadError.error_class` if present,
         else omitted (the frontend treats a missing class as permanent).
       - `failed_song`: read from the `_tag_failed_song` attribute if the failure
@@ -225,17 +192,68 @@ def _build_error_event(exc: BaseException) -> dict:
         "progress": 0,
     }
 
-    # error_class — only YouTube download failures carry one today.
     error_class = getattr(exc, "error_class", None)
     if isinstance(exc, YouTubeDownloadError) and error_class:
         event["error_class"] = error_class
 
-    # failed_song — omit when the failure isn't attributable to one download.
     failed_song = getattr(exc, _FAILED_SONG_ATTR, None)
     if failed_song in ("A", "B"):
         event["failed_song"] = failed_song
 
     return event
+
+
+@dataclasses.dataclass(frozen=True)
+class _DownloadProgressCallbacks:
+    on_download_pair_started: Callable[[], None]
+    on_song_a_download_progress: Callable[[float, str], None]
+    on_song_b_download_progress: Callable[[float, str], None]
+    on_download_pair_finished: Callable[[], None]
+
+
+def _build_download_progress_callbacks(session: SessionState) -> _DownloadProgressCallbacks:
+    """Build the four download-progress callbacks for the YouTube download pair.
+
+    Both downloads report into the 0.02-0.10 range. Song A maps to 0.02-0.06 and
+    Song B maps to 0.06-0.10 — but because they run concurrently, raw values can
+    arrive out of order, so a lock-guarded high-water mark only emits when a new
+    value exceeds the last emitted one.
+    """
+    from musicmixer.services.pipeline import emit_progress, progress_event
+
+    progress_lock = threading.Lock()
+    progress_hwm = 0.0  # high-water mark
+
+    def emit_monotonic(detail: str, progress: float) -> None:
+        nonlocal progress_hwm
+        with progress_lock:
+            if progress <= progress_hwm:
+                return
+            progress_hwm = progress
+        emit_progress(session.events, progress_event(
+            "downloading", detail, round(progress, 3),
+        ), session=session)
+
+    def on_song_a_download_progress(fraction: float, status: str) -> None:
+        progress = 0.02 + fraction * 0.04
+        if fraction >= 1.0:
+            emit_monotonic("Got the first song!", progress)
+        else:
+            emit_monotonic("Grabbing your first song...", progress)
+
+    def on_song_b_download_progress(fraction: float, status: str) -> None:
+        progress = 0.06 + fraction * 0.04
+        if fraction >= 1.0:
+            emit_monotonic("Got the second song!", progress)
+        else:
+            emit_monotonic("Grabbing your second song...", progress)
+
+    return _DownloadProgressCallbacks(
+        on_download_pair_started=lambda: emit_monotonic("Getting your songs ready...", 0.02),
+        on_song_a_download_progress=on_song_a_download_progress,
+        on_song_b_download_progress=on_song_b_download_progress,
+        on_download_pair_finished=lambda: emit_monotonic("Got both songs!", 0.10),
+    )
 
 
 def _youtube_pipeline_wrapper(
@@ -251,9 +269,8 @@ def _youtube_pipeline_wrapper(
 ) -> None:
     """Downloads YouTube audio in parallel, then runs the pipeline.
 
-    Both downloads are independent so we use a 2-thread pool to overlap them.
-    A lock-guarded monotonic progress tracker prevents progress values from
-    jumping backward when the two callbacks interleave.
+    Reads as the skeleton: try the full cache, download the pair, analyze and
+    checkpoint, run the remix, then update the average duration.
 
     Ownership note: after successful executor.submit(), this wrapper is the sole
     owner of the acquired processing slot and MUST release it on exit.
@@ -269,7 +286,6 @@ def _youtube_pipeline_wrapper(
         upload_dir = settings.data_dir / "uploads" / session_id
         upload_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Check if both songs are fully cached (stems + metadata) ---
         both_fully_cached = (
             cached_song_a is not None and cached_song_a.has_stems
             and cached_song_b is not None and cached_song_b.has_stems
@@ -309,42 +325,9 @@ def _youtube_pipeline_wrapper(
                 _update_avg_remix_duration(time.monotonic() - pipeline_start)
                 return
 
-        # --- Monotonic progress tracker ---
-        # Both downloads report into the 0.02-0.10 range.  Song A maps to
-        # 0.02-0.06 and Song B maps to 0.06-0.10 — but because they run
-        # concurrently, raw values can arrive out-of-order.  We only emit
-        # when the new value exceeds the high-water mark.
-        _progress_lock = threading.Lock()
-        _progress_hwm = 0.0  # high-water mark
-
-        def _emit_monotonic(detail: str, progress: float) -> None:
-            nonlocal _progress_hwm
-            with _progress_lock:
-                if progress <= _progress_hwm:
-                    return
-                _progress_hwm = progress
-            emit_progress(session.events, progress_event(
-                "downloading", detail, round(progress, 3),
-            ), session=session)
-
-        def _progress_a(fraction: float, status: str) -> None:
-            # Map fraction 0-1 to progress 0.02-0.06
-            progress = 0.02 + fraction * 0.04
-            if fraction >= 1.0:
-                _emit_monotonic("Got the first song!", progress)
-            else:
-                _emit_monotonic("Grabbing your first song...", progress)
-
-        def _progress_b(fraction: float, status: str) -> None:
-            # Map fraction 0-1 to progress 0.06-0.10
-            progress = 0.06 + fraction * 0.04
-            if fraction >= 1.0:
-                _emit_monotonic("Got the second song!", progress)
-            else:
-                _emit_monotonic("Grabbing your second song...", progress)
-
         from musicmixer.services.pipeline import check_cancelled
 
+        download_progress = _build_download_progress_callbacks(session)
         downloaded = download_youtube_pair(
             url_a,
             url_b,
@@ -352,16 +335,15 @@ def _youtube_pipeline_wrapper(
             callbacks=DownloadPairCallbacks(
                 check_cancelled=lambda: check_cancelled(session),
                 tag_failed_song=_tag_failed_song,
-                on_download_start=lambda: _emit_monotonic("Getting your songs ready...", 0.02),
-                progress_a=_progress_a,
-                progress_b=_progress_b,
-                on_both_done=lambda: _emit_monotonic("Got both songs!", 0.10),
+                on_download_pair_started=download_progress.on_download_pair_started,
+                on_song_a_download_progress=download_progress.on_song_a_download_progress,
+                on_song_b_download_progress=download_progress.on_song_b_download_progress,
+                on_download_pair_finished=download_progress.on_download_pair_finished,
             ),
             cached_song_a=cached_song_a,
             cached_song_b=cached_song_b,
             settings=settings,
         )
-        # --- Analyze + checkpoint (45-100%) ---
         analyzed = analyze_and_checkpoint_youtube_pair(
             downloaded,
             url_a=url_a,
@@ -399,10 +381,6 @@ def _youtube_pipeline_wrapper(
         processing_lock.release()
         _process_next_queued(app_state)
 
-
-# ---------------------------------------------------------------------------
-# Queue management
-# ---------------------------------------------------------------------------
 
 def _process_next_queued(app_state) -> None:
     """Pull the next valid item from the wait queue and submit it.
@@ -452,7 +430,6 @@ def _process_next_queued(app_state) -> None:
             )
             continue
 
-        # Acquire slot and start processing
         if not app_state.processing_lock.acquire(blocking=False):
             # Slot was taken (race condition); re-queue the item
             try:
@@ -464,7 +441,6 @@ def _process_next_queued(app_state) -> None:
                 ), session=item.session)
             return
 
-        # Emit processing_started event
         emit_progress(item.session.events, progress_event(
             "processing_started", "Your remix is starting now", 0,
         ), session=item.session)
@@ -528,7 +504,6 @@ def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn:
     processing_lock = app_state.processing_lock
 
     if processing_lock.acquire(blocking=False):
-        # Slot available — submit immediately
         emit_progress(session.events, progress_event(
             "processing_started", "Your remix is starting now", 0,
         ), session=session)
@@ -539,7 +514,6 @@ def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn:
             raise
         return
 
-    # All slots busy — enqueue
     item = _QueueItem(
         session_id=session_id,
         session=session,
@@ -551,7 +525,6 @@ def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn:
     except queue.Full:
         raise HTTPException(503, "Server is at capacity, please try again later")
 
-    # Get position and send queue events
     position, total = _get_queue_position(app_state, session_id)
     emit_progress(session.events, progress_event(
         "queue_position", f"Position {position} of {total}", 0,
@@ -567,10 +540,6 @@ def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn:
         session_id, position, total,
     )
 
-
-# ---------------------------------------------------------------------------
-# POST endpoints
-# ---------------------------------------------------------------------------
 
 @router.post("/remix/youtube")
 def create_youtube_remix(
@@ -613,7 +582,6 @@ def create_youtube_remix(
     # Clean up expired sessions before processing
     cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
 
-    # === PRE-QUEUE CACHE CHECK (URL-based, no file I/O) ===
     # Same URLs + prompt always produce the same remix. Check before queueing
     # so cached remixes are served instantly without consuming a processing slot.
     if settings.remix_cache_enabled:
@@ -642,10 +610,8 @@ def create_youtube_remix(
 
             return {"session_id": cache_session_id}
 
-    # Generate session ID
     session_id = str(uuid.uuid4())
 
-    # Create session state with thumbnail URLs derived from YouTube video IDs
     session = SessionState()
     session.thumbnail_url_a = thumbnail_from_youtube_url(body.url_a)
     session.thumbnail_url_b = thumbnail_from_youtube_url(body.url_b)
@@ -662,7 +628,6 @@ def create_youtube_remix(
     app_state = request.app.state
     processing_lock = app_state.processing_lock
 
-    # Build the run function (binds all args for deferred execution)
     def run_fn():
         _youtube_pipeline_wrapper(
             session_id,
@@ -708,10 +673,8 @@ def create_remix(
     # Clean up expired sessions before processing
     cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
 
-    # Generate session ID
     session_id = str(uuid.uuid4())
 
-    # Save uploaded files
     upload_dir = settings.data_dir / "uploads" / session_id
     upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -744,7 +707,6 @@ def create_remix(
         song_b_path.name,
     )
 
-    # Validate duration via ffprobe
     max_dur = settings.max_upload_duration_seconds
     for label, path in [("song_a", song_a_path), ("song_b", song_b_path)]:
         duration = probe_duration(path)
@@ -756,7 +718,6 @@ def create_remix(
                 f"{max_dur // 60} minute limit",
             )
 
-    # Create session state
     session = SessionState()
     with request.app.state.sessions_lock:
         request.app.state.sessions[session_id] = session
@@ -764,7 +725,6 @@ def create_remix(
     app_state = request.app.state
     processing_lock = app_state.processing_lock
 
-    # Build the run function (binds all args for deferred execution)
     def run_fn():
         _pipeline_wrapper(
             session_id,
@@ -808,10 +768,6 @@ async def cancel_remix(session_id: str, request: Request):
 
     return {"status": "cancelling", "message": "Cancel signal sent"}
 
-
-# ---------------------------------------------------------------------------
-# SMS notification registration
-# ---------------------------------------------------------------------------
 
 # E.164: '+' followed by 10-15 digits
 _E164_RE = re.compile(r"^\+\d{10,15}$")
