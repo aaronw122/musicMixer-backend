@@ -89,7 +89,8 @@ def emit_progress(
 
 
 def progress_event(step: str, detail: str, progress: float, **extra: Any) -> dict:
-    """Build a progress event payload. ``**extra`` carries divergent metadata
+    """Build a progress event payload — a plain dict builder used by both API and
+    pipeline code, not a dispatcher. ``**extra`` carries divergent metadata
     (e.g. ``position``, ``total``, ``wait_seconds``) emitted by some sites."""
     return {"step": step, "detail": detail, "progress": progress, **extra}
 
