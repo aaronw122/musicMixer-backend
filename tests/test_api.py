@@ -268,7 +268,7 @@ class TestUploadDurationGuard:
     def test_rejects_upload_exceeding_duration_limit(self, client):
         """Should return 413 when a song exceeds the duration limit."""
         # ffprobe returns 3600s (1 hour) — well over the 900s limit
-        with patch("musicmixer.api.remix._probe_duration", return_value=3600.0):
+        with patch("musicmixer.api.remix.probe_duration", return_value=3600.0):
             response = client.post(
                 "/api/remix",
                 files={
@@ -286,7 +286,7 @@ class TestUploadDurationGuard:
             session.status = "complete"
             processing_lock.release()
 
-        with patch("musicmixer.api.remix._probe_duration", return_value=300.0), \
+        with patch("musicmixer.api.remix.probe_duration", return_value=300.0), \
              patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",
@@ -304,7 +304,7 @@ class TestUploadDurationGuard:
             session.status = "complete"
             processing_lock.release()
 
-        with patch("musicmixer.api.remix._probe_duration", return_value=None), \
+        with patch("musicmixer.api.remix.probe_duration", return_value=None), \
              patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
             response = client.post(
                 "/api/remix",

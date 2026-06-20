@@ -189,6 +189,35 @@ class TestYouTubeURLValidation:
         )
         assert response.status_code == 422
 
+    def test_rejects_http_scheme(self, client):
+        """http:// YouTube URLs are rejected (C2 tightening — only https allowed)."""
+        response = client.post(
+            "/api/remix/youtube",
+            json={
+                "url_a": "http://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "url_b": VALID_YT_URL_B,
+                "prompt": "test remix",
+            },
+        )
+        assert response.status_code == 422
+        assert "only YouTube links" in response.json()["detail"]
+
+    def test_invalid_url_preserves_422_body_shape(self, client):
+        """Invalid URLs keep the existing {"detail": "<message>"} 422 body shape."""
+        response = client.post(
+            "/api/remix/youtube",
+            json={
+                "url_a": "https://evil.com/watch?v=abc123",
+                "url_b": VALID_YT_URL_B,
+                "prompt": "test remix",
+            },
+        )
+        assert response.status_code == 422
+        body = response.json()
+        assert set(body.keys()) == {"detail"}
+        assert isinstance(body["detail"], str)
+        assert body["detail"] == "Invalid URL — only YouTube links are accepted"
+
     def test_rejects_javascript_scheme(self, client):
         """javascript: scheme should be rejected."""
         response = client.post(
@@ -378,6 +407,117 @@ class TestYouTubeRemixEndpoint:
             },
         )
         assert response.status_code == 422
+
+
+class TestPreQueueUrlCacheHit:
+    """A pre-queue URL cache hit must return a completed session WITHOUT
+    consuming the processing slot or enqueuing work.
+
+    This is the sensitive bypass path described in the orchestration refactor
+    plan: same URLs + prompt -> served instantly, the pipeline wrapper is never
+    invoked, the processing lock is never acquired, and the wait queue stays
+    empty.
+    """
+
+    def test_cache_hit_returns_completed_session_without_slot(self, client, tmp_path):
+        # Pre-seed a cached remix file the endpoint will copy into the session dir.
+        cached_remix = tmp_path / "cached_remix.mp3"
+        cached_remix.write_bytes(b"cached-remix-bytes")
+
+        processing_lock = client.app.state.processing_lock
+        wait_queue = client.app.state.wait_queue
+        assert wait_queue.qsize() == 0
+
+        with patch("musicmixer.api.remix.settings") as mock_settings, \
+             patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper, \
+             patch("musicmixer.api.remix._enqueue_or_start") as mock_enqueue, \
+             patch(
+                 "musicmixer.services.remix_cache.compute_url_cache_key",
+                 return_value="urlkey123",
+             ), \
+             patch(
+                 "musicmixer.services.remix_cache.get_cached_remix",
+                 return_value=cached_remix,
+             ), \
+             patch(
+                 "musicmixer.services.remix_cache.get_cached_metadata",
+                 return_value={
+                     "explanation": "Cached explanation",
+                     "used_fallback": True,
+                     "warnings": ["w1"],
+                     "key_warning": "kw",
+                 },
+             ):
+            mock_settings.youtube_enabled = True
+            mock_settings.remix_cache_enabled = True
+            mock_settings.remix_cache_dir = tmp_path / "remix_cache"
+            mock_settings.data_dir = tmp_path
+
+            response = client.post(
+                "/api/remix/youtube",
+                json={
+                    "url_a": VALID_YT_URL_A,
+                    "url_b": VALID_YT_URL_B,
+                    "prompt": "test remix",
+                },
+            )
+
+        assert response.status_code == 200
+        session_id = response.json()["session_id"]
+
+        # The slot was never consumed and nothing was queued.
+        mock_wrapper.assert_not_called()
+        mock_enqueue.assert_not_called()
+        assert wait_queue.qsize() == 0
+        # Lock is still free (acquire returns True), confirming it was never held.
+        assert processing_lock.acquire(blocking=False) is True
+        processing_lock.release()
+
+        # The session is fully completed and carries the cached metadata.
+        session = client.app.state.sessions[session_id]
+        assert session.status == "complete"
+        assert session.explanation == "Cached explanation"
+        assert session.used_fallback is True
+        assert session.warnings == ["w1"]
+        assert session.key_warning == "kw"
+        assert session.remix_path is not None
+        # The cached remix was copied into the session output dir.
+        assert Path(session.remix_path).read_bytes() == b"cached-remix-bytes"
+
+    def test_cache_miss_falls_through_to_queue(self, client, tmp_path):
+        """A pre-queue cache MISS must fall through to the normal enqueue path."""
+        with patch("musicmixer.api.remix.settings") as mock_settings, \
+             patch("musicmixer.api.remix._enqueue_or_start") as mock_enqueue, \
+             patch(
+                 "musicmixer.services.remix_cache.compute_url_cache_key",
+                 return_value="urlkey123",
+             ), \
+             patch(
+                 "musicmixer.services.remix_cache.get_cached_remix",
+                 return_value=None,
+             ):
+            mock_settings.youtube_enabled = True
+            mock_settings.remix_cache_enabled = True
+            mock_settings.remix_cache_dir = tmp_path / "remix_cache"
+            mock_settings.data_dir = tmp_path
+
+            response = client.post(
+                "/api/remix/youtube",
+                json={
+                    "url_a": VALID_YT_URL_A,
+                    "url_b": VALID_YT_URL_B,
+                    "prompt": "test remix",
+                },
+            )
+
+        assert response.status_code == 200
+        session_id = response.json()["session_id"]
+        # Cache miss -> normal path: enqueue was called, session not pre-completed.
+        mock_enqueue.assert_called_once()
+        session = client.app.state.sessions[session_id]
+        assert session.status != "complete"
+        # The URL cache key is stashed for the pipeline to write an alias later.
+        assert session.url_cache_key == "urlkey123"
 
 
 class TestYouTubePipelineWrapper:
@@ -581,6 +721,86 @@ class TestYouTubePipelineWrapper:
         error_events = [e for e in events if e.get("step") == "error"]
         assert len(error_events) >= 1
         assert "Download failed" in error_events[-1]["detail"]
+
+
+class TestAnalyzeAndCheckpointStage:
+    """Test the analyze/checkpoint stage in isolation (Slice 6)."""
+
+    def _downloaded_pair(self, tmp_path):
+        from musicmixer.services.remix_stages import DownloadedPair
+
+        wav_a = tmp_path / "song_a.wav"
+        wav_b = tmp_path / "song_b.wav"
+        wav_a.write_bytes(b"a")
+        wav_b.write_bytes(b"b")
+        result_a = FakeYouTubeAudioResult(
+            wav_path=wav_a, title="Song A Title",
+            duration_seconds=180.0, source_codec="opus", source_bitrate=128,
+        )
+        result_b = FakeYouTubeAudioResult(
+            wav_path=wav_b, title="Song B Title",
+            duration_seconds=200.0, source_codec="aac", source_bitrate=128,
+        )
+        return DownloadedPair(
+            result_a=result_a,
+            result_b=result_b,
+            source_quality_a="youtube-opus-128kbps",
+            source_quality_b="youtube-aac-128kbps",
+        )
+
+    def test_returns_analysis_metrics_source_quality_and_checkpoints_both(self, tmp_path):
+        """Stage runs analyze_songs, checkpoints A and B, and returns the remix inputs."""
+        from musicmixer.models import SessionState
+        from musicmixer.services.remix_stages import (
+            AnalyzedRemix,
+            analyze_and_checkpoint_youtube_pair,
+        )
+
+        session = SessionState()
+        downloaded = self._downloaded_pair(tmp_path)
+
+        fake_analysis = MagicMock()
+        fake_analysis.song_a_stems_dir = tmp_path / "stems" / "a"
+        fake_analysis.song_b_stems_dir = tmp_path / "stems" / "b"
+
+        with patch("musicmixer.services.pipeline.analyze_songs", return_value=fake_analysis) as mock_analyze, \
+             patch("musicmixer.services.remix_stages._checkpoint_song") as mock_checkpoint, \
+             patch("musicmixer.services.pipeline.run_remix") as mock_remix:
+            result = analyze_and_checkpoint_youtube_pair(
+                downloaded,
+                url_a=VALID_YT_URL_A,
+                url_b=VALID_YT_URL_B,
+                session_id="test-session",
+                event_queue=session.events,
+                session=session,
+                cached_song_a=None,
+                cached_song_b=None,
+            )
+
+        assert isinstance(result, AnalyzedRemix)
+        assert result.analysis is fake_analysis
+        assert result.source_quality_a == "youtube-opus-128kbps"
+        assert result.source_quality_b == "youtube-aac-128kbps"
+
+        # Video IDs populated from the URLs on the returned metrics
+        assert result.metrics.song_a_video_id == "dQw4w9WgXcQ"
+        assert result.metrics.song_b_video_id == "9bZkp7q19f0"
+
+        # analyze_songs was given the downloaded pair's paths/quality
+        mock_analyze.assert_called_once()
+        kwargs = mock_analyze.call_args.kwargs
+        assert kwargs["song_a_original_filename"] == "Song A Title"
+        assert kwargs["song_b_original_filename"] == "Song B Title"
+        assert kwargs["source_quality_a"] == "youtube-opus-128kbps"
+        assert kwargs["source_quality_b"] == "youtube-aac-128kbps"
+
+        # Both songs checkpointed (A then B)
+        assert mock_checkpoint.call_count == 2
+        roles = [c.kwargs["url"] for c in mock_checkpoint.call_args_list]
+        assert roles == [VALID_YT_URL_A, VALID_YT_URL_B]
+
+        # The stage must NOT render the remix
+        mock_remix.assert_not_called()
 
 
 class TestYouTubeProgressFlow:

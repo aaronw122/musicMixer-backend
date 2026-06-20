@@ -94,7 +94,7 @@ def _run_wrapper_with_download(download_side_effect):
         patch("musicmixer.services.youtube.download_youtube_audio", side_effect=download_side_effect),
         patch("musicmixer.api.remix.settings") as mock_settings,
         patch("musicmixer.api.remix._process_next_queued"),
-        patch("musicmixer.api.shelf._extract_video_id", return_value=None),
+        patch("musicmixer.services.youtube.extract_video_id", return_value=None),
     ):
         # tmp data dir for the per-session upload dir mkdir
         import tempfile

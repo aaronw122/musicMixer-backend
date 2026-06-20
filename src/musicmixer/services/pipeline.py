@@ -88,6 +88,13 @@ def emit_progress(
         session.last_event = event
 
 
+def progress_event(step: str, detail: str, progress: float, **extra: Any) -> dict:
+    """Build a progress event payload — a plain dict builder used by both API and
+    pipeline code, not a dispatcher. ``**extra`` carries divergent metadata
+    (e.g. ``position``, ``total``, ``wait_seconds``) emitted by some sites."""
+    return {"step": step, "detail": detail, "progress": progress, **extra}
+
+
 def progress_ticker(event_queue, session, start, end, step_name, detail, interval=5):
     """Background thread that slowly advances progress from start toward end."""
     stop = threading.Event()
@@ -99,11 +106,9 @@ def progress_ticker(event_queue, session, start, end, step_name, detail, interva
                 return
             current = min(current + increment, end - 0.01)
             increment *= 0.8
-            emit_progress(event_queue, {
-                "step": step_name,
-                "detail": detail,
-                "progress": round(current, 3),
-            }, session=session)
+            emit_progress(event_queue, progress_event(
+                step_name, detail, round(current, 3),
+            ), session=session)
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
     return stop
@@ -216,11 +221,9 @@ def _step_separate_and_analyze(
     from musicmixer.services.separation import separate_stems, separate_vocal_song
 
     logger.info("Session %s: [1/17] separating stems + analyzing audio...", session_id)
-    emit_progress(event_queue, {
-        "step": "separating",
-        "detail": "Pulling each instrument out of the mix...",
-        "progress": 0.10,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "separating", "Pulling each instrument out of the mix...", 0.10,
+    ), session=session)
 
     song_a_stems_dir = stems_dir / "song_a"
     song_b_stems_dir = stems_dir / "song_b"
@@ -328,19 +331,15 @@ def _step_separate_and_analyze(
                 completed_sep += 1
                 ticker.set()
                 if completed_sep == 1:
-                    emit_progress(event_queue, {
-                        "step": "separating",
-                        "detail": "Got the first song's stems!",
-                        "progress": 0.24,
-                    }, session=session)
+                    emit_progress(event_queue, progress_event(
+                        "separating", "Got the first song's stems!", 0.24,
+                    ), session=session)
                     ticker = progress_ticker(event_queue, session, 0.25, 0.36, "separating",
                                              "Working on the second song...", interval=5)
                 else:
-                    emit_progress(event_queue, {
-                        "step": "separating",
-                        "detail": "Got both songs' stems!",
-                        "progress": 0.37,
-                    }, session=session)
+                    emit_progress(event_queue, progress_event(
+                        "separating", "Got both songs' stems!", 0.37,
+                    ), session=session)
         finally:
             ticker.set()
 
@@ -408,11 +407,9 @@ def _step_separate_and_analyze(
         else:
             logger.info("Session %s: Song %s lyrics: not found", session_id, label)
 
-    emit_progress(event_queue, {
-        "step": "separating",
-        "detail": "Got all the pieces!",
-        "progress": 0.39,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "separating", "Got all the pieces!", 0.39,
+    ), session=session)
 
     logger.info("Session %s: [1/17] stems done (%d song_a, %d song_b)", session_id, len(song_a_stems), len(song_b_stems))
 
@@ -437,11 +434,11 @@ def _step_reconcile_bpm(session_id: str, meta_a, meta_b, event_queue, session):
         session_id, meta_a.bpm, meta_b.bpm,
     )
 
-    emit_progress(event_queue, {
-        "step": "analyzing",
-        "detail": f"Song A vibes at {meta_a.bpm:.0f} BPM, Song B grooves at {meta_b.bpm:.0f} BPM",
-        "progress": 0.45,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "analyzing",
+        f"Song A vibes at {meta_a.bpm:.0f} BPM, Song B grooves at {meta_b.bpm:.0f} BPM",
+        0.45,
+    ), session=session)
 
     return meta_a, meta_b
 
@@ -612,20 +609,16 @@ def _step_analyze_structure(
     from musicmixer.services.analysis import analyze_stems, compute_relationships
 
     logger.info("Session %s: [3.5/17] analyzing song structure...", session_id)
-    emit_progress(event_queue, {
-        "step": "analyzing",
-        "detail": "Mapping out verses, choruses, drops...",
-        "progress": 0.50,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "analyzing", "Mapping out verses, choruses, drops...", 0.50,
+    ), session=session)
 
     # When both songs are cached, skip everything in this step
     if has_cached_meta_a and has_cached_meta_b:
         logger.info("Session %s: [3.5/17] skipping structure + PulseMap (both songs cached)", session_id)
-        emit_progress(event_queue, {
-            "step": "analyzing",
-            "detail": "Got the blueprint!",
-            "progress": 0.57,
-        }, session=session)
+        emit_progress(event_queue, progress_event(
+            "analyzing", "Got the blueprint!", 0.57,
+        ), session=session)
         return
 
     # Log key detection results (already populated by analyze_audio_full)
@@ -706,11 +699,9 @@ def _step_analyze_structure(
             lyrics_a_data, session_id,
         )
 
-    emit_progress(event_queue, {
-        "step": "analyzing",
-        "detail": "Got the blueprint!",
-        "progress": 0.57,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "analyzing", "Got the blueprint!", 0.57,
+    ), session=session)
 
 
 def _step_measure_stem_lufs(
@@ -799,11 +790,9 @@ def _step_interpret_prompt(
     from musicmixer.services.interpreter import interpret_prompt
 
     logger.info("Session %s: [4/17] interpreting prompt via LLM...", session_id)
-    emit_progress(event_queue, {
-        "step": "interpreting",
-        "detail": "Your AI DJ is reading the prompt...",
-        "progress": 0.58,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "interpreting", "Your AI DJ is reading the prompt...", 0.58,
+    ), session=session)
 
     intent_or_plan = interpret_prompt(
         prompt, meta_a, meta_b,
@@ -912,11 +901,9 @@ def _step_load_and_standardize_stems(
     is_lossy_vocal_source = is_lossy_source_a
     is_lossy_inst_source = is_lossy_source_b
 
-    emit_progress(event_queue, {
-        "step": "processing",
-        "detail": "Getting everything on the same page...",
-        "progress": 0.62,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "processing", "Getting everything on the same page...", 0.62,
+    ), session=session)
 
     # === STEP 6: Load and standardize all stems ===
     vocal_audio: dict[str, np.ndarray] = {}
@@ -1012,11 +999,9 @@ def _step_trim_filter_eq(
     check_cancelled(session)
 
     # === STEP 7.7: Vocal pre-filter bandpass ===
-    emit_progress(event_queue, {
-        "step": "processing",
-        "detail": "Cleaning up the vocals...",
-        "progress": 0.65,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "processing", "Cleaning up the vocals...", 0.65,
+    ), session=session)
     # Apply 150Hz-16kHz bandpass to vocal stems before tempo stretching.
     # Removes low-frequency bleed (bass rumble, kick artifacts) and
     # high-frequency separation noise, giving rubberband's R3 engine
@@ -1262,11 +1247,9 @@ def _step_tempo_match(
     )
 
     # Emit batch-level progress BEFORE the pool starts (avoids 5-10s silent gap in SSE stream)
-    emit_progress(event_queue, {
-        "step": "processing",
-        "detail": f"Syncing tempos ({total_stems_to_process} tracks)...",
-        "progress": 0.68,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "processing", f"Syncing tempos ({total_stems_to_process} tracks)...", 0.68,
+    ), session=session)
 
     with ThreadPoolExecutor(max_workers=6) as rb_executor:
         futures = {}
@@ -1323,18 +1306,14 @@ def _step_tempo_match(
                     inst_audio[stem_name] = result
                 completed_rb += 1
                 sub_progress = 0.69 + (completed_rb / total) * 0.19
-                emit_progress(event_queue, {
-                    "step": "processing",
-                    "detail": f"Synced {completed_rb}/{total} tracks...",
-                    "progress": round(sub_progress, 3),
-                }, session=session)
+                emit_progress(event_queue, progress_event(
+                    "processing", f"Synced {completed_rb}/{total} tracks...", round(sub_progress, 3),
+                ), session=session)
 
     # Emit completion progress AFTER all futures resolve
-    emit_progress(event_queue, {
-        "step": "processing",
-        "detail": "Everything's locked in!",
-        "progress": 0.89,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "processing", "Everything's locked in!", 0.89,
+    ), session=session)
 
     return vocal_audio, inst_audio
 
@@ -1447,11 +1426,9 @@ def _step_compress_and_level_match(
     # === STEP 11: Compress vocal dynamic range ===
     # Compress BEFORE level matching so the LUFS measurement reflects
     # post-compression loudness (otherwise level match is wasted).
-    emit_progress(event_queue, {
-        "step": "processing",
-        "detail": "Balancing the volume...",
-        "progress": 0.90,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "processing", "Balancing the volume...", 0.90,
+    ), session=session)
 
     vocal_makeup_db = 3.0
     for voc_stem in list(vocal_audio.keys()):
@@ -1507,11 +1484,9 @@ def _step_compress_and_level_match(
         _level_match_gain_db = _post_lm_lufs - _pre_lm_lufs if _pre_lm_lufs > -70 else 0.0
 
     # === STEP 11.8: Pre-limit drum and bass transients ===
-    emit_progress(event_queue, {
-        "step": "processing",
-        "detail": "Smoothing out the drum hits...",
-        "progress": 0.92,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "processing", "Smoothing out the drum hits...", 0.92,
+    ), session=session)
     # Drum transients have 12-15 dB crest factor, consuming all headroom
     # at the mix bus. Pre-limiting reduces crest factor so the LUFS
     # normalizer can actually boost to target. Ceiling/release are tunable
@@ -1568,11 +1543,9 @@ def _step_render_and_duck(
     from musicmixer.services.interpreter import TARGET_REMIX_DURATION_SECONDS
 
     logger.info("Session %s: [12/17] rendering arrangement...", session_id)
-    emit_progress(event_queue, {
-        "step": "rendering",
-        "detail": "Stitching the pieces together...",
-        "progress": 0.93,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "rendering", "Stitching the pieces together...", 0.93,
+    ), session=session)
 
     vocal_bus, instrumental_bus = render_arrangement(
         sections=plan.sections,
@@ -1609,11 +1582,9 @@ def _step_render_and_duck(
     # instrumental_bus -- the auto-leveler at step 13.7 must continue using
     # the un-ducked instrumental_bus as its detector signal.
     logger.info("Session %s: [12.5/17] applying spectral ducking...", session_id)
-    emit_progress(event_queue, {
-        "step": "rendering",
-        "detail": "Making room so nothing clashes...",
-        "progress": 0.94,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "rendering", "Making room so nothing clashes...", 0.94,
+    ), session=session)
 
     ducked_instrumental = spectral_duck(instrumental_bus, vocal_bus, sr)
 
@@ -1705,11 +1676,9 @@ def _step_master(
     from musicmixer.services.mastering import master_static
     from musicmixer.services.processor import soft_clip, true_peak_limit
 
-    emit_progress(event_queue, {
-        "step": "rendering",
-        "detail": "Final polish...",
-        "progress": 0.95,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "rendering", "Final polish...", 0.95,
+    ), session=session)
     # === STEP 14: Static mastering chain ===
     # Constrained LUFS normalize (-12 LUFS) then limiter (-1.0 dBTP).
     master_kwargs: dict = dict(target_lufs=-12.0, ceiling_dbtp=-1.0)
@@ -1795,11 +1764,9 @@ def _step_fades(
     """
     from musicmixer.services.processor import apply_fades
 
-    emit_progress(event_queue, {
-        "step": "rendering",
-        "detail": "Adding smooth transitions...",
-        "progress": 0.97,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "rendering", "Adding smooth transitions...", 0.97,
+    ), session=session)
     skip_fade_in = plan.sections[0].transition_in == "fade" if plan.sections else False
     # Renderer no longer applies a terminal fade-out; keep one authoritative
     # final fade stage here in the pipeline for every remix.
@@ -1824,11 +1791,9 @@ def _step_export_and_finalize(
     from musicmixer.services.processor import export_mp3
 
     logger.info("Session %s: [16/16] exporting MP3...", session_id)
-    emit_progress(event_queue, {
-        "step": "rendering",
-        "detail": "Bouncing your remix...",
-        "progress": 0.98,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "rendering", "Bouncing your remix...", 0.98,
+    ), session=session)
 
     export_mp3(mixed, sr, output_path, use_s16_dither=False)
 
@@ -1954,11 +1919,9 @@ def analyze_songs(
 
     check_cancelled(session)
 
-    emit_progress(event_queue, {
-        "step": "analyzing",
-        "detail": "Figuring out the BPM and musical key...",
-        "progress": 0.40,
-    }, session=session)
+    emit_progress(event_queue, progress_event(
+        "analyzing", "Figuring out the BPM and musical key...", 0.40,
+    ), session=session)
 
     # Propagate source quality metadata (YouTube inputs carry codec/bitrate info)
     if source_quality_a is not None:
