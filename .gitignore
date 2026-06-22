@@ -26,3 +26,6 @@ notes
 conversations/
 .zed
 .modal.toml
+
+# Parked/disabled features (history preserved; not built or tested)
+src/musicmixer/_future/
