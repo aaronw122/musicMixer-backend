@@ -25,8 +25,8 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -937,3 +937,291 @@ def get_cached_stems(video_id: str, role: SongRole, output_dir: Path) -> bool:
 
     logger.info("Restored cached stems for video %s (role=%s, %d files)", video_id, role, len(wav_files))
     return True
+
+
+# ---------------------------------------------------------------------------
+# Distributed stem-cache coordination (Redis lease + state machine)
+# ---------------------------------------------------------------------------
+# Two Redis keys per (video_id, role) coordinate stem separation across workers:
+#   song:{video_id}:{role}:stem_lock   — string holding the owner_token (ownership)
+#   song:{video_id}:{role}:stem_state  — hash describing the lifecycle (observability)
+# The lock is the ownership authority; the state hash is descriptive. Renew and
+# release are token-checked via Lua so a worker that lost its lease can never act
+# on another owner's lock.
+
+StemCacheStatus = Literal["processing", "ready", "failed"]
+StemErrorCode = Literal["transient", "invalid_input"]
+
+# Bounded failure categories that map to a retry policy. A raw traceback or
+# arbitrary exception text is never stored in the state record.
+STEM_ERROR_TRANSIENT: StemErrorCode = "transient"
+STEM_ERROR_INVALID_INPUT: StemErrorCode = "invalid_input"
+
+
+def _stem_state_key(video_id: str, role: SongRole) -> str:
+    """Redis key for the lifecycle hash: song:{video_id}:{role}:stem_state"""
+    if role not in _VALID_STEM_SETS_BY_ROLE:
+        raise ValueError(f"Invalid role {role!r}, must be one of {tuple(_VALID_STEM_SETS_BY_ROLE)}")
+    return f"song:{video_id}:{role}:stem_state"
+
+
+def _stem_lock_key(video_id: str, role: SongRole) -> str:
+    """Redis key for the ownership token: song:{video_id}:{role}:stem_lock"""
+    if role not in _VALID_STEM_SETS_BY_ROLE:
+        raise ValueError(f"Invalid role {role!r}, must be one of {tuple(_VALID_STEM_SETS_BY_ROLE)}")
+    return f"song:{video_id}:{role}:stem_lock"
+
+
+@dataclass(frozen=True)
+class StemCacheState:
+    """A snapshot of the stem-coordination state hash for a (video_id, role).
+
+    Maps to the Redis hash fields in plan §5.1. Optional fields are absent (None)
+    when not yet set; ``manifest`` is the list of expected WAV filenames. Phase 1
+    populates only the fields the lock/failed primitives need; later phases add
+    ready/publication fields.
+    """
+
+    status: StemCacheStatus
+    owner_token: str | None = None
+    started_at: str | None = None
+    updated_at: str | None = None
+    lease_expires_at: str | None = None
+    completed_at: str | None = None
+    failed_at: str | None = None
+    retry_after: str | None = None
+    attempt: int = 0
+    path: str | None = None
+    manifest: tuple[str, ...] | None = None
+    separator_version: str | None = None
+    error_code: StemErrorCode | None = None
+
+    def to_hash(self) -> dict[str, str]:
+        """Serialize to the Redis hash field mapping (string values only)."""
+        mapping: dict[str, str] = {"status": self.status, "attempt": str(self.attempt)}
+        for field_name in (
+            "owner_token",
+            "started_at",
+            "updated_at",
+            "lease_expires_at",
+            "completed_at",
+            "failed_at",
+            "retry_after",
+            "path",
+            "separator_version",
+            "error_code",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                mapping[field_name] = value
+        if self.manifest is not None:
+            mapping["manifest"] = json.dumps(list(self.manifest))
+        return mapping
+
+    @classmethod
+    def from_hash(cls, data: dict[str, str]) -> "StemCacheState":
+        """Reconstruct from a Redis hash field mapping."""
+        manifest_raw = data.get("manifest")
+        manifest = tuple(json.loads(manifest_raw)) if manifest_raw else None
+        error_code = data.get("error_code") or None
+        return cls(
+            status=data["status"],  # type: ignore[arg-type]
+            owner_token=data.get("owner_token") or None,
+            started_at=data.get("started_at") or None,
+            updated_at=data.get("updated_at") or None,
+            lease_expires_at=data.get("lease_expires_at") or None,
+            completed_at=data.get("completed_at") or None,
+            failed_at=data.get("failed_at") or None,
+            retry_after=data.get("retry_after") or None,
+            attempt=int(data.get("attempt", "0") or "0"),
+            path=data.get("path") or None,
+            manifest=manifest,
+            separator_version=data.get("separator_version") or None,
+            error_code=error_code,  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True)
+class StemLease:
+    """An owned lease over a (video_id, role) separation."""
+
+    video_id: str
+    role: SongRole
+    owner_token: str
+
+
+# Token-checked Lua. Renew/release act only if the lock value still equals the
+# caller's owner_token, so a worker whose lease expired (and was re-acquired by
+# another) cannot extend or delete the new owner's lock. Run via EVAL each call —
+# the scripts are tiny and per-(video,role) coordination is not hot.
+_RENEW_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('pexpire', KEYS[1], ARGV[2])
+else
+    return 0
+end
+"""
+
+_RELEASE_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end
+"""
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
+class StemCacheCoordinator:
+    """Distributed coordination primitives for per-(video_id, role) stem separation.
+
+    Phase 1 scope: token-checked lease acquire/renew/release, state reads, and the
+    failed-state transition with attempt-driven backoff. Reuses the module-level
+    ``_get_redis`` client and key-construction helpers — no second Redis client.
+    """
+
+    def __init__(self, redis_client: redis.Redis | None = None) -> None:
+        self._redis = redis_client
+
+    def _r(self) -> redis.Redis:
+        return self._redis if self._redis is not None else _get_redis()
+
+    def get_state(self, video_id: str, role: SongRole) -> StemCacheState | None:
+        """Return the current state, or None when the state key is absent (missing)."""
+        data = self._r().hgetall(_stem_state_key(video_id, role))
+        if not data:
+            return None
+        return StemCacheState.from_hash(data)  # type: ignore[arg-type]
+
+    def acquire(self, video_id: str, role: SongRole) -> StemLease | None:
+        """Try to become the separation owner for (video_id, role).
+
+        Atomically sets the lock with ``SET NX PX <lease>``. Returns a StemLease on
+        success (this caller owns it) or None on contention (another live owner holds
+        the lock). A stale/expired lock has been auto-removed by Redis, so a fresh
+        acquire after expiry succeeds (takeover).
+        """
+        owner_token = uuid.uuid4().hex
+        lease_ms = settings.stem_lock_lease_seconds * 1000
+        acquired = self._r().set(
+            _stem_lock_key(video_id, role), owner_token, nx=True, px=lease_ms
+        )
+        if not acquired:
+            return None
+
+        now = _utcnow()
+        expires = now + timedelta(seconds=settings.stem_lock_lease_seconds)
+        existing = self.get_state(video_id, role)
+        state = StemCacheState(
+            status="processing",
+            owner_token=owner_token,
+            started_at=_iso(now),
+            updated_at=_iso(now),
+            lease_expires_at=_iso(expires),
+            attempt=existing.attempt if existing is not None else 0,
+            path=str(_stems_dir_for(video_id, role)),
+            separator_version=settings.stem_separator_version,
+        )
+        self._write_state(video_id, role, state)
+        return StemLease(video_id=video_id, role=role, owner_token=owner_token)
+
+    def renew(self, lease: StemLease) -> bool:
+        """Extend the lease iff the caller still owns the lock. Returns success."""
+        lease_ms = settings.stem_lock_lease_seconds * 1000
+        result = self._r().eval(
+            _RENEW_LUA, 1, _stem_lock_key(lease.video_id, lease.role),
+            lease.owner_token, str(lease_ms),
+        )
+        renewed = bool(result)
+        if renewed:
+            now = _utcnow()
+            expires = now + timedelta(seconds=settings.stem_lock_lease_seconds)
+            self._r().hset(
+                _stem_state_key(lease.video_id, lease.role),
+                mapping={"updated_at": _iso(now), "lease_expires_at": _iso(expires)},
+            )
+        return renewed
+
+    def release(self, lease: StemLease) -> bool:
+        """Delete the lock iff the caller still owns it. Returns whether it deleted."""
+        result = self._r().eval(
+            _RELEASE_LUA, 1, _stem_lock_key(lease.video_id, lease.role),
+            lease.owner_token,
+        )
+        return bool(result)
+
+    def mark_failed(self, lease: StemLease, error_code: StemErrorCode) -> StemCacheState:
+        """Record a categorized failure, schedule retry per backoff, release the lock.
+
+        Only the lock owner may fail: the lock is released token-checked as part of
+        failing. ``attempt`` is incremented; ``retry_after`` follows the §6 schedule:
+        transient failures back off exponentially from ``stem_retry_transient_base_seconds``
+        capped at ``stem_retry_backoff_cap_seconds``; invalid-input uses a fixed window.
+        Once ``attempt >= stem_retry_max_attempts`` the state holds ``failed`` with no
+        ``retry_after`` until the 24h failed-state TTL expires. Returns the written state.
+        """
+        if error_code not in (STEM_ERROR_TRANSIENT, STEM_ERROR_INVALID_INPUT):
+            raise ValueError(f"Invalid error_code {error_code!r}")
+
+        existing = self.get_state(lease.video_id, lease.role)
+        prior_attempt = existing.attempt if existing is not None else 0
+        attempt = prior_attempt + 1
+
+        now = _utcnow()
+        retry_after: str | None = None
+        if attempt < settings.stem_retry_max_attempts:
+            retry_after = _iso(now + timedelta(seconds=_retry_delay_seconds(error_code, attempt)))
+
+        state = StemCacheState(
+            status="failed",
+            owner_token=None,
+            started_at=existing.started_at if existing is not None else None,
+            updated_at=_iso(now),
+            failed_at=_iso(now),
+            retry_after=retry_after,
+            attempt=attempt,
+            path=str(_stems_dir_for(lease.video_id, lease.role)),
+            separator_version=settings.stem_separator_version,
+            error_code=error_code,
+        )
+        self._write_state(
+            lease.video_id, lease.role, state, ttl_seconds=settings.stem_failed_ttl_seconds
+        )
+        self.release(lease)
+        return state
+
+    def _write_state(
+        self,
+        video_id: str,
+        role: SongRole,
+        state: StemCacheState,
+        ttl_seconds: int | None = None,
+    ) -> None:
+        """Replace the state hash with ``state`` (full overwrite), optional TTL."""
+        key = _stem_state_key(video_id, role)
+        r = self._r()
+        pipe = r.pipeline()
+        pipe.delete(key)
+        pipe.hset(key, mapping=state.to_hash())
+        if ttl_seconds is not None and ttl_seconds > 0:
+            pipe.expire(key, ttl_seconds)
+        pipe.execute()
+
+
+def _retry_delay_seconds(error_code: StemErrorCode, attempt: int) -> int:
+    """Seconds until retry for a failed attempt (§6 retry policy).
+
+    Invalid input is a fixed window. Transient failures back off exponentially
+    from the configured base, capped at the configured ceiling.
+    """
+    if error_code == STEM_ERROR_INVALID_INPUT:
+        return settings.stem_retry_invalid_input_seconds
+    delay = settings.stem_retry_transient_base_seconds * (2 ** (attempt - 1))
+    return min(delay, settings.stem_retry_backoff_cap_seconds)
