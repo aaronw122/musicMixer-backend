@@ -17,6 +17,7 @@ Only stem separation is role-dependent, so stems get their own role-qualified ke
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import redis
@@ -1504,3 +1505,433 @@ def _remove_dir(path: Path) -> bool:
     except OSError:
         logger.debug("Failed to sweep orphaned dir %s", path, exc_info=True)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Cache-aware separation wrapper (renewable lease + wait / takeover)
+# ---------------------------------------------------------------------------
+# get_or_create_cached_stems wraps a role-specific separator behind the §6 state
+# machine: it elects one owner per (video_id, role) to run the paid separation,
+# while concurrent callers wait and then reuse the owner's published stems. A
+# Redis outage degrades to local separation (§11) rather than failing the request.
+
+SeparateFn = Callable[..., dict[str, Path] | dict[str, "Path | None"]]
+
+
+class StemSeparationError(Exception):
+    """A categorized stem-separation failure surfaced through the pipeline.
+
+    ``error_code`` is one of the bounded §6 categories. ``transient`` failures are
+    retryable (infra/separator/timeouts, ENOSPC); ``invalid_input`` indicates the
+    source audio is unusable and will not be retried for the §6 invalid-input window.
+    """
+
+    def __init__(self, message: str, error_code: StemErrorCode):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class StemWaitTimeout(StemSeparationError):
+    """A waiter exceeded ``stem_wait_timeout_seconds`` without the owner publishing."""
+
+    def __init__(self, video_id: str, role: SongRole):
+        super().__init__(
+            f"Timed out waiting for stems for {video_id}/{role}", STEM_ERROR_TRANSIENT
+        )
+
+
+def _categorize_separation_exception(exc: BaseException) -> StemErrorCode:
+    """Map a separation exception to a bounded §6 error code.
+
+    A disk-full (``ENOSPC``) mid-separation/publish is transient (plan §8). Plain
+    ``ValueError`` from staging validation means the produced stems do not match the
+    role shape — treat as invalid input. Everything else (Modal RPC errors, timeouts,
+    network) is transient and retryable.
+    """
+    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        return STEM_ERROR_TRANSIENT
+    if isinstance(exc, ValueError):
+        return STEM_ERROR_INVALID_INPUT
+    return STEM_ERROR_TRANSIENT
+
+
+def _is_redis_outage(exc: BaseException) -> bool:
+    """True iff ``exc`` indicates Redis is unreachable (connection-level failure)."""
+    return isinstance(exc, (redis.ConnectionError, redis.TimeoutError))
+
+
+class _LeaseRenewer:
+    """Background thread that renews a lease until told to stop.
+
+    Renews every ``stem_lock_renew_interval_seconds`` so the lease survives a long
+    blocking separation (e.g. a remote Modal RPC with a cold start, §9.2). If a renew
+    fails (the lease was lost / Redis hiccup), ``lease_lost`` is set so the owner can
+    refuse to publish over a new owner. Always stop in a ``finally``.
+    """
+
+    def __init__(self, coordinator: "StemCacheCoordinator", lease: StemLease):
+        self._coordinator = coordinator
+        self._lease = lease
+        self._stop = threading.Event()
+        self.lease_lost = threading.Event()
+        self.renew_count = 0
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        interval = max(settings.stem_lock_renew_interval_seconds, 1)
+        while not self._stop.wait(interval):
+            try:
+                renewed = self._coordinator.renew(self._lease)
+            except redis.RedisError:
+                logger.warning(
+                    "Lease renew errored for %s/%s; will retry next interval",
+                    self._lease.video_id, self._lease.role, exc_info=True,
+                )
+                continue
+            if renewed:
+                self.renew_count += 1
+            else:
+                logger.warning(
+                    "Lost lease for %s/%s during separation; owner will not publish",
+                    self._lease.video_id, self._lease.role,
+                )
+                self.lease_lost.set()
+                return
+
+
+def _copy_dir_wavs(src_dir: Path, output_dir: Path) -> dict[str, Path]:
+    """Copy every WAV in ``src_dir`` into ``output_dir``. Raises on a missing file.
+
+    Used for the ready-copy path. ``FileNotFoundError`` propagates so the caller can
+    treat a mid-copy ``_atomic_replace_dir`` (which deletes files out from under the
+    glob) as a cache miss (§17 medium-1/4) rather than a partial copy.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    copied: dict[str, Path] = {}
+    for wav_file in sorted(src_dir.glob("*.wav")):
+        dest = output_dir / wav_file.name
+        shutil.copy2(wav_file, dest)
+        copied[wav_file.stem] = dest
+    return copied
+
+
+def _copy_ready_stems(
+    coordinator: "StemCacheCoordinator",
+    video_id: str,
+    role: SongRole,
+    output_dir: Path,
+) -> dict[str, Path] | None:
+    """Copy a ready record's validated stems into ``output_dir`` with one retry.
+
+    Resolves the directory from the state record's ``path``, re-validates it, then
+    copies. If the source dir/files vanish mid-copy (a concurrent invalidate +
+    ``_atomic_replace_dir``), one bounded retry re-resolves and re-validates against
+    the current record; a second disappearance is treated as a cache miss (returns
+    None) so the caller falls through to compete for a lease (§6 Ready / §17 medium-1).
+    """
+    for attempt in (1, 2):
+        state = coordinator.get_state(video_id, role)
+        if state is None or state.status != "ready" or not state.path:
+            return None
+        src_dir = Path(state.path)
+        manifest = _validate_role_dir(role, src_dir)
+        if manifest is None:
+            return None
+        try:
+            stems = _copy_dir_wavs(src_dir, output_dir)
+        except FileNotFoundError:
+            logger.info(
+                "Ready stems for %s/%s disappeared mid-copy (attempt %d); re-resolving",
+                video_id, role, attempt,
+            )
+            shutil.rmtree(output_dir, ignore_errors=True)
+            continue
+        logger.info(
+            "stem_cache outcome=ready_hit video=%s role=%s files=%d",
+            video_id, role, len(stems),
+        )
+        return stems
+    logger.info(
+        "stem_cache outcome=ready_miss_after_swap video=%s role=%s", video_id, role
+    )
+    return None
+
+
+def _run_uncached_separation(
+    separate_fn: SeparateFn,
+    audio_path: Path,
+    session_output_dir: Path,
+) -> dict[str, Path] | dict[str, Path | None]:
+    """Run the separator straight into the session dir (no coordination)."""
+    return separate_fn(audio_path, session_output_dir)
+
+
+def _run_as_owner(
+    coordinator: "StemCacheCoordinator",
+    lease: StemLease,
+    video_id: str,
+    role: SongRole,
+    audio_path: Path,
+    session_output_dir: Path,
+    separate_fn: SeparateFn,
+    check_cancelled: Callable[[], None],
+) -> dict[str, Path] | dict[str, Path | None]:
+    """Separate under a renewable lease, publish, then copy the result out.
+
+    Separation runs into an owner-token-scoped staging dir. A background renewer
+    keeps the lease alive across the blocking separation. On success the staging dir
+    is published fenced (``mark_ready`` re-checks ownership before the replace); if
+    the lease was lost, we discard staging and do NOT publish, letting a future caller
+    finish (§7). On failure we categorize, ``mark_failed`` (which releases the lock),
+    and re-raise.
+    """
+    cache_dir = _stems_dir_for(video_id, role)
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = cache_dir.with_name(f".{role}.staging.{lease.owner_token}")
+
+    renewer = _LeaseRenewer(coordinator, lease)
+    renewer.start()
+    published = False
+    sep_start = time.monotonic()
+    try:
+        check_cancelled()
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+
+        separate_fn(audio_path, staging)
+
+        if renewer.lease_lost.is_set():
+            logger.warning(
+                "stem_cache outcome=lease_lost video=%s role=%s; discarding staging",
+                video_id, role,
+            )
+            raise StemSeparationError(
+                f"Lost lease for {video_id}/{role} before publish", STEM_ERROR_TRANSIENT
+            )
+
+        coordinator.mark_ready(lease, staging)
+        published = True
+        logger.info(
+            "stem_cache outcome=owner_created video=%s role=%s renews=%d separation_s=%.1f",
+            video_id, role, renewer.renew_count, time.monotonic() - sep_start,
+        )
+    except BaseException as exc:
+        renewer.stop()
+        error_code = _categorize_separation_exception(exc)
+        # Only fail the shared state if we still own the lock; mark_failed releases it.
+        if coordinator._owns_lock(lease):
+            try:
+                coordinator.mark_failed(lease, error_code)
+            except redis.RedisError:
+                logger.warning("Could not record failed state for %s/%s", video_id, role, exc_info=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if isinstance(exc, StemSeparationError):
+            raise
+        if isinstance(exc, Exception):
+            logger.info(
+                "stem_cache outcome=failed_backoff video=%s role=%s code=%s",
+                video_id, role, error_code,
+            )
+            raise StemSeparationError(str(exc) or exc.__class__.__name__, error_code) from exc
+        raise
+    finally:
+        renewer.stop()
+        try:
+            coordinator.release(lease)
+        except redis.RedisError:
+            logger.debug("Lock release errored for %s/%s", video_id, role, exc_info=True)
+
+    if not published:
+        # Lease lost without raising shouldn't happen, but never copy in that case.
+        raise StemSeparationError(
+            f"Did not publish stems for {video_id}/{role}", STEM_ERROR_TRANSIENT
+        )
+
+    stems = _copy_ready_stems(coordinator, video_id, role, session_output_dir)
+    if stems is None:
+        raise StemSeparationError(
+            f"Published stems for {video_id}/{role} vanished before copy",
+            STEM_ERROR_TRANSIENT,
+        )
+    return stems
+
+
+def _wait_for_owner(
+    coordinator: "StemCacheCoordinator",
+    video_id: str,
+    role: SongRole,
+    session_output_dir: Path,
+    check_cancelled: Callable[[], None],
+) -> dict[str, Path] | dict[str, Path | None] | None:
+    """Poll until the owner publishes (copy), fails (raise), or the lease goes stale.
+
+    Returns the copied stems on ``ready``; raises ``StemSeparationError`` on ``failed``
+    or timeout; raises the cancellation error if ``check_cancelled`` fires. Returns
+    None when the lease is stale (lock gone, state still processing) so the caller can
+    compete for takeover (§6 Processing / §11 waiting timeout).
+    """
+    deadline = time.monotonic() + settings.stem_wait_timeout_seconds
+    wait_start = time.monotonic()
+    while True:
+        check_cancelled()
+        state = coordinator.get_state(video_id, role)
+
+        if state is None:
+            return None  # state vanished -> re-enter the machine (compete)
+
+        if state.status == "ready":
+            stems = _copy_ready_stems(coordinator, video_id, role, session_output_dir)
+            if stems is not None:
+                logger.info(
+                    "stem_cache outcome=waited_then_hit video=%s role=%s wait_s=%.1f",
+                    video_id, role, time.monotonic() - wait_start,
+                )
+                return stems
+            return None  # ready vanished mid-copy -> compete
+
+        if state.status == "failed":
+            code: StemErrorCode = state.error_code or STEM_ERROR_TRANSIENT
+            raise StemSeparationError(
+                f"Separation failed for {video_id}/{role} ({code})", code
+            )
+
+        # processing: still owned?
+        lock_held = coordinator._r().get(_stem_lock_key(video_id, role))
+        if not lock_held:
+            return None  # stale lease -> caller competes for takeover
+
+        if time.monotonic() >= deadline:
+            if lock_held:
+                raise StemWaitTimeout(video_id, role)
+            return None
+
+        time.sleep(max(settings.stem_wait_poll_seconds, 0))
+
+
+def get_or_create_cached_stems(
+    *,
+    video_id: str | None,
+    role: SongRole,
+    audio_path: Path,
+    session_output_dir: Path,
+    separate_fn: SeparateFn,
+    check_cancelled: Callable[[], None],
+) -> dict[str, Path] | dict[str, Path | None]:
+    """Cache-aware separation for one (video_id, role) with single-flight + reuse.
+
+    Per §9.2:
+    - ``video_id is None`` (file upload): run the uncached path, no coordination.
+    - ``ready``: copy validated cached stems into the session dir (resilient to a
+      concurrent invalidate/replace, §17 medium-1/4).
+    - ``owner``: acquire a lease, separate under renewal, publish fenced, copy out.
+    - ``wait``: poll until ready/failed/timeout/cancel; on a stale lease, take over.
+
+    On a Redis outage at any coordination point, degrade to local separation into the
+    session dir (§11) — availability over dedup. Cancellation of a waiter stops polling
+    and does not disturb the owner's lock/state (§11).
+    """
+    if video_id is None:
+        return _run_uncached_separation(separate_fn, audio_path, session_output_dir)
+
+    coordinator = StemCacheCoordinator()
+
+    try:
+        return _coordinated_get_or_create(
+            coordinator=coordinator,
+            video_id=video_id,
+            role=role,
+            audio_path=audio_path,
+            session_output_dir=session_output_dir,
+            separate_fn=separate_fn,
+            check_cancelled=check_cancelled,
+        )
+    except (redis.ConnectionError, redis.TimeoutError):
+        logger.warning(
+            "stem_cache outcome=redis_outage_fallback video=%s role=%s; running local separation",
+            video_id, role, exc_info=True,
+        )
+        shutil.rmtree(session_output_dir, ignore_errors=True)
+        return _run_uncached_separation(separate_fn, audio_path, session_output_dir)
+
+
+def _coordinated_get_or_create(
+    *,
+    coordinator: "StemCacheCoordinator",
+    video_id: str,
+    role: SongRole,
+    audio_path: Path,
+    session_output_dir: Path,
+    separate_fn: SeparateFn,
+    check_cancelled: Callable[[], None],
+) -> dict[str, Path] | dict[str, Path | None]:
+    """Drive the §6 state machine for a cached (video_id, role). Redis errors propagate.
+
+    ``redis.ConnectionError``/``redis.TimeoutError`` bubble up to the caller's outage
+    fallback. Loops a bounded number of times so a stale-lease takeover race or a
+    mid-copy swap re-enters the machine rather than spinning forever.
+    """
+    max_rounds = settings.stem_retry_max_attempts + 2
+    for _round in range(max_rounds):
+        check_cancelled()
+
+        # Lazily adopt a valid on-disk role dir as ready (legacy / crash recovery, §10).
+        coordinator.reconcile_disk(video_id, role)
+
+        state = coordinator.get_state(video_id, role)
+
+        if state is not None and state.status == "ready":
+            stems = _copy_ready_stems(coordinator, video_id, role, session_output_dir)
+            if stems is not None:
+                return stems
+            continue  # ready vanished mid-copy -> re-enter
+
+        if state is not None and state.status == "failed":
+            if state.retry_after is not None and _utcnow() < _parse_iso(state.retry_after):
+                logger.info(
+                    "stem_cache outcome=retry_blocked video=%s role=%s code=%s",
+                    video_id, role, state.error_code,
+                )
+                raise StemSeparationError(
+                    f"Separation for {video_id}/{role} is in backoff",
+                    state.error_code or STEM_ERROR_TRANSIENT,
+                )
+            # retry_after elapsed (or held with no retry): compete for a fresh lease.
+
+        lease = coordinator.acquire(video_id, role)
+        if lease is not None:
+            return _run_as_owner(
+                coordinator=coordinator,
+                lease=lease,
+                video_id=video_id,
+                role=role,
+                audio_path=audio_path,
+                session_output_dir=session_output_dir,
+                separate_fn=separate_fn,
+                check_cancelled=check_cancelled,
+            )
+
+        # Contention: someone else owns it. Wait, then copy / takeover.
+        waited = _wait_for_owner(
+            coordinator, video_id, role, session_output_dir, check_cancelled
+        )
+        if waited is not None:
+            return waited
+        # None -> ready vanished mid-copy or stale lease: re-enter and compete.
+
+    raise StemSeparationError(
+        f"Exhausted coordination rounds for {video_id}/{role}", STEM_ERROR_TRANSIENT
+    )
+
+
+def _parse_iso(ts: str) -> datetime:
+    """Parse an ISO-8601 timestamp written by the coordinator."""
+    return datetime.fromisoformat(ts)
