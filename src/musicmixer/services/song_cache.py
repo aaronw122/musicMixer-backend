@@ -1771,6 +1771,7 @@ def _wait_for_owner(
     role: SongRole,
     session_output_dir: Path,
     check_cancelled: Callable[[], None],
+    on_wait: Callable[[], None] | None = None,
 ) -> dict[str, Path] | dict[str, Path | None] | None:
     """Poll until the owner publishes (copy), fails (raise), or the lease goes stale.
 
@@ -1781,9 +1782,14 @@ def _wait_for_owner(
     """
     deadline = time.monotonic() + settings.stem_wait_timeout_seconds
     wait_start = time.monotonic()
+    notified = False
     while True:
         check_cancelled()
         state = coordinator.get_state(video_id, role)
+        if not notified and state is not None and state.status == "processing":
+            if on_wait is not None:
+                on_wait()
+            notified = True
 
         if state is None:
             return None  # state vanished -> re-enter the machine (compete)
@@ -1825,6 +1831,7 @@ def get_or_create_cached_stems(
     session_output_dir: Path,
     separate_fn: SeparateFn,
     check_cancelled: Callable[[], None],
+    on_wait: Callable[[], None] | None = None,
 ) -> dict[str, Path] | dict[str, Path | None]:
     """Cache-aware separation for one (video_id, role) with single-flight + reuse.
 
@@ -1853,6 +1860,7 @@ def get_or_create_cached_stems(
             session_output_dir=session_output_dir,
             separate_fn=separate_fn,
             check_cancelled=check_cancelled,
+            on_wait=on_wait,
         )
     except (redis.ConnectionError, redis.TimeoutError):
         logger.warning(
@@ -1872,6 +1880,7 @@ def _coordinated_get_or_create(
     session_output_dir: Path,
     separate_fn: SeparateFn,
     check_cancelled: Callable[[], None],
+    on_wait: Callable[[], None] | None = None,
 ) -> dict[str, Path] | dict[str, Path | None]:
     """Drive the §6 state machine for a cached (video_id, role). Redis errors propagate.
 
@@ -1921,7 +1930,7 @@ def _coordinated_get_or_create(
 
         # Contention: someone else owns it. Wait, then copy / takeover.
         waited = _wait_for_owner(
-            coordinator, video_id, role, session_output_dir, check_cancelled
+            coordinator, video_id, role, session_output_dir, check_cancelled, on_wait
         )
         if waited is not None:
             return waited
