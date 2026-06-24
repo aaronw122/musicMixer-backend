@@ -108,6 +108,70 @@ def _stems_valid_for_role(role: SongRole, wav_files: list[Path]) -> bool:
     return frozenset(names) in _VALID_STEM_SETS_BY_ROLE[role]
 
 
+# A valid WAV begins with a 12-byte "RIFF....WAVE" header. A truncated WAV from a
+# disk-full write keeps a nonzero size, so a bare size check is insufficient; we
+# verify the RIFF/WAVE magic and a sane floor instead of a full (costly) decode.
+_WAV_MIN_BYTES = 1024
+
+
+def _is_intact_wav(path: Path) -> bool:
+    """Lightweight WAV integrity check: readable RIFF/WAVE header + sane size.
+
+    Confirms the file is at least ``_WAV_MIN_BYTES`` large and starts with a
+    ``RIFF....WAVE`` header. Deliberately NOT a full decode — too costly per file
+    at publication time. Catches zero-byte, truncated, and non-WAV files that a
+    bare existence/size check would wrongly accept (see plan §8 disk-full).
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size < _WAV_MIN_BYTES:
+        return False
+    try:
+        with open(path, "rb") as f:
+            header = f.read(12)
+    except OSError:
+        return False
+    return len(header) == 12 and header[0:4] == b"RIFF" and header[8:12] == b"WAVE"
+
+
+def _build_manifest(wav_files: list[Path]) -> tuple[str, ...]:
+    """Sorted tuple of WAV filenames for a validated role directory.
+
+    The manifest records exactly which stem files a ``ready`` record references,
+    so a later read can confirm every expected file still exists and is intact.
+    """
+    return tuple(sorted(f.name for f in wav_files))
+
+
+def _validate_role_dir(role: SongRole, stems_dir: Path) -> tuple[str, ...] | None:
+    """Validate a role's stem directory and return its manifest, or None.
+
+    A directory is publishable iff its WAV identities exactly match a known shape
+    for the role (``_stems_valid_for_role``) AND every WAV passes the lightweight
+    integrity check (``_is_intact_wav``). Returns the manifest on success.
+    """
+    if not stems_dir.is_dir():
+        return None
+    wav_files = list(stems_dir.glob("*.wav"))
+    if not _stems_valid_for_role(role, wav_files):
+        return None
+    if not all(_is_intact_wav(f) for f in wav_files):
+        return None
+    return _build_manifest(wav_files)
+
+
+def _manifest_files_intact(stems_dir: Path, manifest: tuple[str, ...] | None) -> bool:
+    """Confirm every file named in ``manifest`` exists and is an intact WAV."""
+    if not manifest:
+        return False
+    for name in manifest:
+        if not _is_intact_wav(stems_dir / name):
+            return False
+    return True
+
+
 def _is_degenerate_energy(stem_analysis: StemAnalysis | None) -> bool:
     """Return True iff a cached ``StemAnalysis`` carries zeroed-out energy.
 
@@ -1197,6 +1261,126 @@ class StemCacheCoordinator:
         self.release(lease)
         return state
 
+    def mark_ready(self, lease: StemLease, staging_dir: Path) -> StemCacheState:
+        """Fenced publication of a validated staging dir as the role's ready stems.
+
+        Publish order (plan §8): validate staging (exact role stem names + WAV
+        integrity) and build the manifest → confirm the caller STILL owns the lease
+        (token-checked) before any destructive replace → atomically swap the
+        published ``{role}/`` dir into place (reuses ``_atomic_replace_dir``) →
+        write ``status=ready`` with path, manifest, ``separator_version``, and
+        timestamps → update the legacy ``:stems`` pointer. The lock is NOT released
+        here; the caller releases it in its ``finally`` (Phase 1 contract).
+
+        Raises ``PermissionError`` if the caller no longer owns the lease (a worker
+        that lost its lease must never publish). Raises ``ValueError`` if the staging
+        directory does not validate. ``ENOSPC`` during the replace propagates as
+        ``OSError`` so the caller can categorize it transient (plan §8 disk-full).
+        """
+        manifest = _validate_role_dir(lease.role, staging_dir)
+        if manifest is None:
+            raise ValueError(
+                f"Staging dir {staging_dir} is not a valid {lease.role} stem set"
+            )
+
+        if not self._owns_lock(lease):
+            raise PermissionError(
+                f"Lease for {lease.video_id}/{lease.role} no longer owned; refusing to publish"
+            )
+
+        cache_dir = _stems_dir_for(lease.video_id, lease.role)
+        _atomic_replace_dir(staging_dir, cache_dir)
+
+        now = _utcnow()
+        existing = self.get_state(lease.video_id, lease.role)
+        state = StemCacheState(
+            status="ready",
+            started_at=existing.started_at if existing is not None else None,
+            updated_at=_iso(now),
+            completed_at=_iso(now),
+            attempt=existing.attempt if existing is not None else 0,
+            path=str(cache_dir),
+            manifest=manifest,
+            separator_version=settings.stem_separator_version,
+        )
+        self._write_state(lease.video_id, lease.role, state)
+        self._write_legacy_pointer(lease.video_id, lease.role, str(cache_dir))
+        logger.info(
+            "Published ready stems for video %s (role=%s, %d files)",
+            lease.video_id, lease.role, len(manifest),
+        )
+        return state
+
+    def invalidate_ready(self, video_id: str, role: SongRole) -> None:
+        """Clear a ready record so a new lease can be competed for (plan §6 Ready).
+
+        Used when a ready record's ``separator_version`` is incompatible or its
+        manifest/files fail validation. Deletes the state key (returning to
+        ``missing``) only when the current record is ``ready`` — never disturbs an
+        active ``processing`` owner. The legacy ``:stems`` pointer is also cleared.
+        """
+        state = self.get_state(video_id, role)
+        if state is None or state.status != "ready":
+            return
+        r = self._r()
+        pipe = r.pipeline()
+        pipe.delete(_stem_state_key(video_id, role))
+        pipe.delete(_stems_key(video_id, role))
+        pipe.execute()
+        logger.info("Invalidated ready stems for video %s (role=%s)", video_id, role)
+
+    def reconcile_disk(self, video_id: str, role: SongRole) -> StemCacheState | None:
+        """Lazily adopt a valid on-disk role dir as ready WITHOUT separation (§10).
+
+        Only acts when the state key is absent (missing). Inspects the deterministic
+        ``{role}/`` directory; if it validates (exact role stems + intact WAVs),
+        builds a manifest and publishes ``ready`` stamped with the CURRENT
+        ``separator_version`` (legacy on-disk dirs carry no version stamp, so they
+        are treated as current per §10/§17). If the directory is invalid, leaves
+        state missing and does NOT promote a stale legacy ``:stems`` pointer.
+
+        Returns the published ready state, or None if nothing was adopted.
+        """
+        if self.get_state(video_id, role) is not None:
+            return None
+
+        cache_dir = _stems_dir_for(video_id, role)
+        manifest = _validate_role_dir(role, cache_dir)
+        if manifest is None:
+            return None
+
+        now = _utcnow()
+        state = StemCacheState(
+            status="ready",
+            updated_at=_iso(now),
+            completed_at=_iso(now),
+            path=str(cache_dir),
+            manifest=manifest,
+            separator_version=settings.stem_separator_version,
+        )
+        self._write_state(video_id, role, state)
+        self._write_legacy_pointer(video_id, role, str(cache_dir))
+        logger.info(
+            "Adopted on-disk stems as ready for video %s (role=%s, %d files)",
+            video_id, role, len(manifest),
+        )
+        return state
+
+    def _owns_lock(self, lease: StemLease) -> bool:
+        """True iff the lock value still equals the lease's owner_token (live lock)."""
+        held = self._r().get(_stem_lock_key(lease.video_id, lease.role))
+        return held == lease.owner_token
+
+    def _write_legacy_pointer(self, video_id: str, role: SongRole, path: str) -> None:
+        """Best-effort write of the legacy ``:stems`` pointer (§5.3 compatibility)."""
+        try:
+            self._r().set(_stems_key(video_id, role), path)
+        except redis.RedisError:
+            logger.debug(
+                "Could not write legacy :stems pointer for %s (%s)",
+                video_id, role, exc_info=True,
+            )
+
     def _write_state(
         self,
         video_id: str,
@@ -1225,3 +1409,98 @@ def _retry_delay_seconds(error_code: StemErrorCode, attempt: int) -> int:
         return settings.stem_retry_invalid_input_seconds
     delay = settings.stem_retry_transient_base_seconds * (2 ** (attempt - 1))
     return min(delay, settings.stem_retry_backoff_cap_seconds)
+
+
+# Sibling dirs left beside a published {role}/ dir: owner-scoped staging
+# (".{role}.staging.{token}") and the transient swap-aside (".{role}.old.{uuid}").
+# A hard crash or OOM-kill can orphan either (plan §8 low-3).
+_STAGING_INFIX = ".staging."
+_OLD_INFIX = ".old."
+
+
+def sweep_orphaned_staging_dirs(coordinator: StemCacheCoordinator | None = None) -> int:
+    """Remove orphaned ``.staging.*`` / ``.old.*`` siblings under the song cache.
+
+    A ``.staging.{token}`` dir is orphaned unless its trailing ``token`` still holds
+    a live lock for its ``(video_id, role)`` — a worker that died never released its
+    lock, which Redis expires, so a staging dir whose token no longer matches the
+    live lock is safe to drop. ``.old.*`` swap-aside dirs are always transient (the
+    atomic replace removes them on success), so any left on disk are crash debris.
+
+    Returns the number of directories removed. Best-effort; logs and continues on
+    per-dir errors so one bad entry never aborts the sweep.
+    """
+    coord = coordinator if coordinator is not None else StemCacheCoordinator()
+    root = settings.song_cache_dir
+    if not root.is_dir():
+        return 0
+
+    removed = 0
+    for video_dir in root.iterdir():
+        try:
+            if not video_dir.is_dir():
+                continue
+        except OSError:
+            continue
+        video_id = video_dir.name
+        for sibling in video_dir.iterdir():
+            name = sibling.name
+            try:
+                if not sibling.is_dir() or not name.startswith("."):
+                    continue
+            except OSError:
+                continue
+
+            if _OLD_INFIX in name:
+                if _remove_dir(sibling):
+                    removed += 1
+                continue
+
+            if _STAGING_INFIX not in name:
+                continue
+
+            role, token = _parse_staging_name(name)
+            if role is not None and token is not None and _staging_token_is_live(
+                coord, video_id, role, token
+            ):
+                continue
+            if _remove_dir(sibling):
+                removed += 1
+
+    if removed:
+        logger.info("Swept %d orphaned staging/old stem dirs", removed)
+    return removed
+
+
+def _parse_staging_name(name: str) -> tuple[SongRole | None, str | None]:
+    """Parse ``.{role}.staging.{token}`` into (role, token); (None, None) if unmatched."""
+    body = name[1:] if name.startswith(".") else name
+    prefix, sep, token = body.partition(_STAGING_INFIX[1:])  # "staging."
+    if not sep or not token:
+        return None, None
+    role = prefix.rstrip(".")
+    if role not in _VALID_STEM_SETS_BY_ROLE:
+        return None, None
+    return role, token  # type: ignore[return-value]
+
+
+def _staging_token_is_live(
+    coordinator: StemCacheCoordinator, video_id: str, role: SongRole, token: str
+) -> bool:
+    """True iff ``token`` currently holds the live lock for (video_id, role)."""
+    try:
+        held = coordinator._r().get(_stem_lock_key(video_id, role))
+    except redis.RedisError:
+        # Cannot confirm liveness; be conservative and keep the dir.
+        return True
+    return held == token
+
+
+def _remove_dir(path: Path) -> bool:
+    """Remove a directory tree; return whether it was removed. Best-effort."""
+    try:
+        shutil.rmtree(path)
+        return True
+    except OSError:
+        logger.debug("Failed to sweep orphaned dir %s", path, exc_info=True)
+        return False
