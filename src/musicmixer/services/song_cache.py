@@ -1328,7 +1328,9 @@ class StemCacheCoordinator:
         pipe.delete(_stem_state_key(video_id, role))
         pipe.delete(_stems_key(video_id, role))
         pipe.execute()
-        logger.info("Invalidated ready stems for video %s (role=%s)", video_id, role)
+        _log_stem_cache_outcome(
+            "invalidated", video_id, role, separator_version=state.separator_version,
+        )
 
     def reconcile_disk(self, video_id: str, role: SongRole) -> StemCacheState | None:
         """Lazily adopt a valid on-disk role dir as ready WITHOUT separation (§10).
@@ -1560,6 +1562,40 @@ def _is_redis_outage(exc: BaseException) -> bool:
     return isinstance(exc, (redis.ConnectionError, redis.TimeoutError))
 
 
+# Bounded set of per-(video_id, role) stem-cache outcomes (plan §9.6). Each is
+# emitted exactly once on the path that already produces it; the set is closed so
+# downstream queries can group on a known vocabulary.
+StemCacheOutcome = Literal[
+    "ready_hit",
+    "owner_created",
+    "waited_then_hit",
+    "stale_takeover",
+    "legacy_adopted",
+    "failed_backoff",
+    "invalidated",
+]
+
+
+def _log_stem_cache_outcome(
+    outcome: StemCacheOutcome,
+    video_id: str,
+    role: SongRole,
+    **fields: object,
+) -> None:
+    """Emit one structured stem-cache outcome record (plan §9.6).
+
+    Uses the project's ``extra=`` structured-logging convention (see
+    ``pipeline_metrics``) so the outcome and its timing/category fields land as
+    queryable JSON keys. Only bounded categories are recorded here — never raw
+    Redis payloads, full URLs, or exception tracebacks (plan §9.6).
+    """
+    logger.info(
+        "stem_cache outcome=%s",
+        outcome,
+        extra={"stem_cache_outcome": outcome, "video_id": video_id, "role": role, **fields},
+    )
+
+
 class _LeaseRenewer:
     """Background thread that renews a lease until told to stop.
 
@@ -1653,13 +1689,10 @@ def _copy_ready_stems(
             )
             shutil.rmtree(output_dir, ignore_errors=True)
             continue
-        logger.info(
-            "stem_cache outcome=ready_hit video=%s role=%s files=%d",
-            video_id, role, len(stems),
-        )
         return stems
     logger.info(
-        "stem_cache outcome=ready_miss_after_swap video=%s role=%s", video_id, role
+        "Ready stems for %s/%s vanished after swap; treating as cache miss",
+        video_id, role,
     )
     return None
 
@@ -1682,6 +1715,7 @@ def _run_as_owner(
     session_output_dir: Path,
     separate_fn: SeparateFn,
     check_cancelled: Callable[[], None],
+    took_over: bool = False,
 ) -> dict[str, Path] | dict[str, Path | None]:
     """Separate under a renewable lease, publish, then copy the result out.
 
@@ -1719,28 +1753,35 @@ def _run_as_owner(
 
         coordinator.mark_ready(lease, staging)
         published = True
-        logger.info(
-            "stem_cache outcome=owner_created video=%s role=%s renews=%d separation_s=%.1f",
-            video_id, role, renewer.renew_count, time.monotonic() - sep_start,
+        _log_stem_cache_outcome(
+            "stale_takeover" if took_over else "owner_created",
+            video_id, role,
+            separation_duration_s=round(time.monotonic() - sep_start, 3),
+            lease_renew_count=renewer.renew_count,
+            separator_version=settings.stem_separator_version,
         )
     except BaseException as exc:
         renewer.stop()
         error_code = _categorize_separation_exception(exc)
         # Only fail the shared state if we still own the lock; mark_failed releases it.
+        recorded_failed = False
         if coordinator._owns_lock(lease):
             try:
                 coordinator.mark_failed(lease, error_code)
+                recorded_failed = True
             except redis.RedisError:
                 logger.warning("Could not record failed state for %s/%s", video_id, role, exc_info=True)
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+        if recorded_failed:
+            _log_stem_cache_outcome(
+                "failed_backoff", video_id, role,
+                error_code=error_code,
+                separator_version=settings.stem_separator_version,
+            )
         if isinstance(exc, StemSeparationError):
             raise
         if isinstance(exc, Exception):
-            logger.info(
-                "stem_cache outcome=failed_backoff video=%s role=%s code=%s",
-                video_id, role, error_code,
-            )
             raise StemSeparationError(str(exc) or exc.__class__.__name__, error_code) from exc
         raise
     finally:
@@ -1797,9 +1838,10 @@ def _wait_for_owner(
         if state.status == "ready":
             stems = _copy_ready_stems(coordinator, video_id, role, session_output_dir)
             if stems is not None:
-                logger.info(
-                    "stem_cache outcome=waited_then_hit video=%s role=%s wait_s=%.1f",
-                    video_id, role, time.monotonic() - wait_start,
+                _log_stem_cache_outcome(
+                    "waited_then_hit", video_id, role,
+                    wait_duration_s=round(time.monotonic() - wait_start, 3),
+                    file_count=len(stems),
                 )
                 return stems
             return None  # ready vanished mid-copy -> compete
@@ -1893,21 +1935,34 @@ def _coordinated_get_or_create(
         check_cancelled()
 
         # Lazily adopt a valid on-disk role dir as ready (legacy / crash recovery, §10).
-        coordinator.reconcile_disk(video_id, role)
+        adopted = coordinator.reconcile_disk(video_id, role)
+        if adopted is not None:
+            _log_stem_cache_outcome(
+                "legacy_adopted", video_id, role,
+                file_count=len(adopted.manifest or ()),
+                separator_version=adopted.separator_version,
+            )
 
         state = coordinator.get_state(video_id, role)
 
         if state is not None and state.status == "ready":
             stems = _copy_ready_stems(coordinator, video_id, role, session_output_dir)
             if stems is not None:
+                # A just-adopted dir already emitted ``legacy_adopted``; don't also
+                # count it as a plain ``ready_hit`` for the same request (§9.6).
+                if adopted is None:
+                    _log_stem_cache_outcome(
+                        "ready_hit", video_id, role, file_count=len(stems),
+                    )
                 return stems
             continue  # ready vanished mid-copy -> re-enter
 
         if state is not None and state.status == "failed":
             if state.retry_after is not None and _utcnow() < _parse_iso(state.retry_after):
-                logger.info(
-                    "stem_cache outcome=retry_blocked video=%s role=%s code=%s",
-                    video_id, role, state.error_code,
+                _log_stem_cache_outcome(
+                    "failed_backoff", video_id, role,
+                    error_code=state.error_code,
+                    separator_version=state.separator_version,
                 )
                 raise StemSeparationError(
                     f"Separation for {video_id}/{role} is in backoff",
@@ -1915,6 +1970,9 @@ def _coordinated_get_or_create(
                 )
             # retry_after elapsed (or held with no retry): compete for a fresh lease.
 
+        # A pre-existing ``processing`` record whose lock we can now acquire means
+        # the prior owner's lease expired: this acquire is a takeover (plan §9.6).
+        took_over = state is not None and state.status == "processing"
         lease = coordinator.acquire(video_id, role)
         if lease is not None:
             return _run_as_owner(
@@ -1926,6 +1984,7 @@ def _coordinated_get_or_create(
                 session_output_dir=session_output_dir,
                 separate_fn=separate_fn,
                 check_cancelled=check_cancelled,
+                took_over=took_over,
             )
 
         # Contention: someone else owns it. Wait, then copy / takeover.
