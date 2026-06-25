@@ -2,7 +2,7 @@
 
 Exercises the wiring added in Phase 4: ``_step_separate_and_analyze`` now routes
 both separations through ``get_or_create_cached_stems`` keyed by (video_id, role),
-and ``_checkpoint_song`` no longer publishes stems (the wrapper is the sole
+and ``_checkpoint_song_metadata`` no longer publishes stems (the wrapper is the sole
 publisher). These tests run against a REAL Redis (``clean_redis``, ``test_``-prefixed
 keys) with the separators mocked to count calls, covering plan §12 "pipeline
 integration":

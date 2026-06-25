@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
-    #Redis
+    # Redis and song cache
     redis_url: str = "redis://localhost:6379"
     song_cache_dir: Path = Path("data/song_cache")
 
@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     audio_cache_ttl_hours: int = 168  # 7 days
     audio_cache_max_gb: float = 5.0
 
-    # Distributed stem-cache coordination (Redis lease + state per (video_id, role))
+    # Stem-cache coordination (Redis lease + state per (video_id, role))
     stem_lock_lease_seconds: int = 90
     stem_lock_renew_interval_seconds: int = 30
     stem_wait_poll_seconds: int = 1
@@ -83,8 +83,8 @@ class Settings(BaseSettings):
     stem_failed_ttl_seconds: int = 86400
     stem_separator_version: str = "v1"
 
-    # Failed-state retry policy. Transient failures back off exponentially from a base
-    # up to a cap; after max attempts, failed is held until the failed-state TTL expires.
+    # Stem-cache failed-state retry policy. Transient failures back off exponentially from
+    # a base up to a cap; after max attempts, failed is held until the failed-state TTL expires.
     stem_retry_transient_base_seconds: int = 30
     stem_retry_backoff_cap_seconds: int = 600
     stem_retry_max_attempts: int = 5
