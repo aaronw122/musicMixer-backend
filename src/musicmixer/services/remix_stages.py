@@ -466,9 +466,9 @@ def download_youtube_pair(
     )
 
 
-def _checkpoint_song(
+def _checkpoint_song_metadata(
     *,
-    url: str,
+    video_id: str | None,
     role,
     title: str,
     meta,
@@ -489,9 +489,7 @@ def _checkpoint_song(
     and race the wrapper for the same (video_id, role).
     """
     from musicmixer.services.song_cache import cache_song_metadata
-    from musicmixer.services.youtube import extract_video_id
 
-    video_id = extract_video_id(url)
     if video_id is None:
         return
     if already_cached:
@@ -540,8 +538,9 @@ def analyze_and_checkpoint_youtube_pair(
     """Analyze the downloaded pair, then checkpoint each song to the cache.
 
     Builds ``PipelineMetrics`` (with video IDs populated), runs ``analyze_songs``
-    over the two downloads, and persists each song's stems + metadata before the
-    expensive remix/render via ``_checkpoint_song`` (failure-isolated, A then B).
+    over the two downloads, and checkpoints each song's metadata after cache-aware
+    separation via ``_checkpoint_song_metadata`` (failure-isolated, A then B). Stems
+    are published by the cache-aware separation wrapper, not here.
 
     ``analyze_songs`` owns its own progress emission and cancellation checks
     through ``event_queue``/``session``; this stage builds no SSE payloads and
@@ -584,13 +583,13 @@ def analyze_and_checkpoint_youtube_pair(
         video_id_b=video_id_b,
     )
 
-    _checkpoint_song(
-        url=url_a, role=ROLE_VOCAL, title=result_a.title,
+    _checkpoint_song_metadata(
+        video_id=video_id_a, role=ROLE_VOCAL, title=result_a.title,
         meta=analysis.meta_a, lyrics=analysis.lyrics_a,
         already_cached=cached_song_a is not None, session_id=session_id,
     )
-    _checkpoint_song(
-        url=url_b, role=ROLE_INSTRUMENTAL, title=result_b.title,
+    _checkpoint_song_metadata(
+        video_id=video_id_b, role=ROLE_INSTRUMENTAL, title=result_b.title,
         meta=analysis.meta_b, lyrics=analysis.lyrics_b,
         already_cached=cached_song_b is not None, session_id=session_id,
     )
