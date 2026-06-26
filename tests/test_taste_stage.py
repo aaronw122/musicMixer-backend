@@ -145,25 +145,29 @@ class TestFlagGating:
         sf.write(str(song_a), audio, sr, subtype="FLOAT")
         sf.write(str(song_b), audio, sr, subtype="FLOAT")
 
-        # Create mock stems
+        # Song A (vocal source) and Song B (instrumental source) take different
+        # separation paths, so each separator is mocked independently.
         stems_dir_a = tmp_path / "stems" / "test" / "song_a"
         stems_dir_b = tmp_path / "stems" / "test" / "song_b"
         stems_dir_a.mkdir(parents=True, exist_ok=True)
         stems_dir_b.mkdir(parents=True, exist_ok=True)
-        stem_names = ["vocals", "drums", "bass", "other"]
+        vocal_stem_names = ["lead_vocals", "backing_vocals", "instrumental"]
+        instrumental_stem_names = ["vocals", "drums", "bass", "other"]
         stems_a = {}
         stems_b = {}
-        for name in stem_names:
+        for name in vocal_stem_names:
             p = stems_dir_a / f"{name}.wav"
             sf.write(str(p), audio, sr, subtype="FLOAT")
             stems_a[name] = p
+        for name in instrumental_stem_names:
             p = stems_dir_b / f"{name}.wav"
             sf.write(str(p), audio, sr, subtype="FLOAT")
             stems_b[name] = p
 
-        def mock_separate(audio_path, output_dir, progress_callback=None):
-            if "song_a" in str(audio_path):
-                return stems_a
+        def mock_separate_vocal(audio_path, output_dir, progress_callback=None):
+            return stems_a
+
+        def mock_separate_stems(audio_path, output_dir, progress_callback=None):
             return stems_b
 
         event_queue = queue.Queue(maxsize=100)
@@ -171,7 +175,8 @@ class TestFlagGating:
 
         with (
             patch("musicmixer.config.settings") as mock_settings,
-            patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate),
+            patch("musicmixer.services.separation.separate_vocal_song", side_effect=mock_separate_vocal),
+            patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate_stems),
             patch("musicmixer.services.taste_stage.run_taste_stage") as mock_taste,
         ):
             mock_settings.data_dir = tmp_path

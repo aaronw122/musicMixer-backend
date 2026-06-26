@@ -67,13 +67,28 @@ class Settings(BaseSettings):
     # Taste training (candidate generation + scoring)
     ab_taste_model_v1: bool = False
 
-    #Redis
+    # Redis and song cache
     redis_url: str = "redis://localhost:6379"
     song_cache_dir: Path = Path("data/song_cache")
 
     # Audio cache: raw download reuse by video_id. ttl<=0 disables expiry; max_gb<=0 disables the cap.
     audio_cache_ttl_hours: int = 168  # 7 days
     audio_cache_max_gb: float = 5.0
+
+    # Stem-cache coordination (Redis lease + state per (video_id, role))
+    stem_lock_lease_seconds: int = 90
+    stem_lock_renew_interval_seconds: int = 30
+    stem_wait_poll_seconds: int = 1
+    stem_wait_timeout_seconds: int = 1200
+    stem_failed_ttl_seconds: int = 86400
+    stem_separator_version: str = "v1"
+
+    # Stem-cache failed-state retry policy. Transient failures back off exponentially from
+    # a base up to a cap; after max attempts, failed is held until the failed-state TTL expires.
+    stem_retry_transient_base_seconds: int = 30
+    stem_retry_backoff_cap_seconds: int = 600
+    stem_retry_max_attempts: int = 5
+    stem_retry_invalid_input_seconds: int = 600
 
     # Twilio SMS notifications
     twilio_account_sid: str = ""
