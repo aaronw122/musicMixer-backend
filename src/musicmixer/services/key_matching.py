@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class KeyPlan:
     """Result of key convergence analysis."""
-    action: str          # "skip" | "shift" | "warning" | "incompatible"
+    action: str          # "skip" | "shift" | "warning"
     shift_a: float       # Semitones to shift Song A (vocals) audio (signed)
     shift_b: float       # Semitones to shift Song B (instrumentals) audio (signed)
     target_key: str      # The target key both songs converge toward
@@ -244,19 +244,7 @@ def _build_plan(
             distance=0,
         )
 
-    if dist > 6:
-        # Should not happen given chromatic_distance returns 0-6,
-        # but guard anyway.
-        return KeyPlan(
-            action="incompatible",
-            shift_a=0, shift_b=0,
-            target_key="",
-            target_scale=target_scale,
-            reason=f"chromatic distance {dist} — keys are incompatible",
-            distance=dist,
-        )
-
-    # Get allocation from table
+    # dist is 1-6 by chromatic_distance contract
     inst_mag, vocal_mag = _SHIFT_ALLOCATION[dist]
 
     # Determine direction: B (instrumental) shifts TOWARD A's position
