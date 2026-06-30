@@ -203,6 +203,8 @@ def _step_separate_and_analyze(
     cached_meta_b: AudioMetadata | None = None,
     cached_lyrics_a: LyricsData | None = None,
     cached_lyrics_b: LyricsData | None = None,
+    video_id_a: str | None = None,
+    video_id_b: str | None = None,
 ) -> tuple:
     """Steps 1+2: Separation + analysis (overlapped).
 
@@ -219,6 +221,11 @@ def _step_separate_and_analyze(
     from musicmixer.services.lyrics import lookup_lyrics_for_song
     from musicmixer.services.analysis import analyze_audio_full
     from musicmixer.services.separation import separate_stems, separate_vocal_song
+    from musicmixer.services.song_cache import (
+        ROLE_INSTRUMENTAL,
+        ROLE_VOCAL,
+        get_or_create_cached_stems,
+    )
 
     logger.info("Session %s: [1/17] separating stems + analyzing audio...", session_id)
     emit_progress(event_queue, progress_event(
@@ -274,11 +281,44 @@ def _step_separate_and_analyze(
     analysis_future_a = None
     analysis_future_b = None
 
+    def _check_cancelled() -> None:
+        check_cancelled(session)
+
+    def _on_wait() -> None:
+        emit_progress(event_queue, progress_event(
+            "separating",
+            "This song is already being separated — waiting for cached stems...",
+            0.12,
+        ), session=session)
+
+    def _separate_a():
+        return get_or_create_cached_stems(
+            video_id=video_id_a,
+            role=ROLE_VOCAL,
+            audio_path=song_a_path,
+            session_output_dir=song_a_stems_dir,
+            separate_fn=separate_vocal_song,
+            check_cancelled=_check_cancelled,
+            on_wait=_on_wait,
+        )
+
+    def _separate_b():
+        return get_or_create_cached_stems(
+            video_id=video_id_b,
+            role=ROLE_INSTRUMENTAL,
+            audio_path=song_b_path,
+            session_output_dir=song_b_stems_dir,
+            separate_fn=separate_stems,
+            check_cancelled=_check_cancelled,
+            on_wait=_on_wait,
+        )
+
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         # Separation futures: ALWAYS run (even with cached metadata, stems
-        # must be separated for the new role).
-        sep_future_a = pool.submit(separate_vocal_song, song_a_path, song_a_stems_dir)
-        sep_future_b = pool.submit(separate_stems, song_b_path, song_b_stems_dir)
+        # must be separated for the new role). Each goes through the cache-aware
+        # wrapper so concurrent sessions/workers dedup separation per (video,role).
+        sep_future_a = pool.submit(_separate_a)
+        sep_future_b = pool.submit(_separate_b)
 
         # Analysis futures (skip when cached metadata is available)
         if _need_fresh_a:
@@ -1855,6 +1895,8 @@ def analyze_songs(
     cached_meta_b: AudioMetadata | None = None,
     cached_lyrics_a: LyricsData | None = None,
     cached_lyrics_b: LyricsData | None = None,
+    video_id_a: str | None = None,
+    video_id_b: str | None = None,
 ) -> AnalyzedSongs:
     """Analysis phase (steps 1-3.8): separation, audio analysis, structure detection.
 
@@ -1891,6 +1933,8 @@ def analyze_songs(
         cached_meta_b=cached_meta_b,
         cached_lyrics_a=cached_lyrics_a,
         cached_lyrics_b=cached_lyrics_b,
+        video_id_a=video_id_a,
+        video_id_b=video_id_b,
     )
     _step_times["1+2 separate+analyze"] = time.monotonic() - _t0
 

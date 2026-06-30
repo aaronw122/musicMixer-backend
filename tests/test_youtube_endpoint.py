@@ -764,7 +764,7 @@ class TestAnalyzeAndCheckpointStage:
         fake_analysis.song_b_stems_dir = tmp_path / "stems" / "b"
 
         with patch("musicmixer.services.pipeline.analyze_songs", return_value=fake_analysis) as mock_analyze, \
-             patch("musicmixer.services.remix_stages._checkpoint_song") as mock_checkpoint, \
+             patch("musicmixer.services.remix_stages._checkpoint_song_metadata") as mock_checkpoint, \
              patch("musicmixer.services.pipeline.run_remix") as mock_remix:
             result = analyze_and_checkpoint_youtube_pair(
                 downloaded,
@@ -796,8 +796,8 @@ class TestAnalyzeAndCheckpointStage:
 
         # Both songs checkpointed (A then B)
         assert mock_checkpoint.call_count == 2
-        roles = [c.kwargs["url"] for c in mock_checkpoint.call_args_list]
-        assert roles == [VALID_YT_URL_A, VALID_YT_URL_B]
+        video_ids = [c.kwargs["video_id"] for c in mock_checkpoint.call_args_list]
+        assert video_ids == ["dQw4w9WgXcQ", "9bZkp7q19f0"]
 
         # The stage must NOT render the remix
         mock_remix.assert_not_called()

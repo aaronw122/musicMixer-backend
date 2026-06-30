@@ -173,7 +173,7 @@ def restore_fully_cached_youtube_remix(
     from musicmixer.services.song_cache import (
         ROLE_INSTRUMENTAL,
         ROLE_VOCAL,
-        cached_stems_exist,
+        StemCacheCoordinator,
         get_cached_stems,
     )
 
@@ -193,18 +193,37 @@ def restore_fully_cached_youtube_remix(
     song_a_stems_dir = stems_dir / "song_a"
     song_b_stems_dir = stems_dir / "song_b"
 
-    # get_cached_stems copies as a side effect, so confirm BOTH are present before
-    # copying either — otherwise "A ok, B missing" orphans A's stems on fallback.
+    # Require a ``ready`` state with a compatible validated manifest for BOTH
+    # roles before skipping work. reconcile_disk lazily adopts a valid on-disk
+    # role dir (legacy cache / Redis flush) into ``ready`` so existing caches
+    # still short-circuit. A Redis outage leaves get_state None -> miss -> full
+    # pipeline, which is the safe degraded behavior.
+    coordinator = StemCacheCoordinator()
+
+    def _role_ready(video_id: str, role) -> bool:
+        try:
+            coordinator.reconcile_disk(video_id, role)
+            state = coordinator.get_state(video_id, role)
+        except Exception:
+            logger.warning(
+                "Session %s: stem-cache state check failed for %s/%s; falling back",
+                session_id, video_id, role, exc_info=True,
+            )
+            return False
+        return state is not None and state.status == "ready"
+
     if not (
-        cached_stems_exist(cached_song_a.video_id, ROLE_VOCAL)
-        and cached_stems_exist(cached_song_b.video_id, ROLE_INSTRUMENTAL)
+        _role_ready(cached_song_a.video_id, ROLE_VOCAL)
+        and _role_ready(cached_song_b.video_id, ROLE_INSTRUMENTAL)
     ):
         logger.warning(
-            "Session %s: Cached stems missing, falling back to full pipeline",
+            "Session %s: Cached stems not ready, falling back to full pipeline",
             session_id,
         )
         return FullyCachedRestore(used_cache=False)
 
+    # Copy only after BOTH roles are confirmed ready — otherwise "A ok, B missing"
+    # would orphan A's stems on fallback.
     get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
     get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
 
@@ -447,40 +466,40 @@ def download_youtube_pair(
     )
 
 
-def _checkpoint_song(
+def _checkpoint_song_metadata(
     *,
-    url: str,
+    video_id: str | None,
     role,
     title: str,
     meta,
     lyrics,
-    stems_dir,
     already_cached: bool,
     session_id: str,
 ) -> None:
-    """Persist one song's metadata + stems to the cache, failure-isolated.
+    """Persist one song's metadata to the cache, failure-isolated.
 
-    Called per-song right after analysis. Any
-    exception is swallowed and logged: a cache write must never crash the
-    pipeline the user is waiting on, and one song's failure must not abort the
-    other song's checkpoint. Metadata is skipped when the song came from the
-    medium-cache path (it's already persisted); stems are always (re-)written for
-    the role since separation always runs.
+    Called per-song right after analysis. Any exception is swallowed and logged:
+    a cache write must never crash the pipeline the user is waiting on, and one
+    song's failure must not abort the other song's checkpoint. Metadata is skipped
+    when the song came from the medium-cache path (it's already persisted).
+
+    Stems are NOT published here: the lease-owning separation wrapper
+    (``get_or_create_cached_stems``) is the sole stem publisher, fencing its
+    atomic replace behind the Redis lease. Publishing here too would double-write
+    and race the wrapper for the same (video_id, role).
     """
-    from musicmixer.services.song_cache import cache_song_metadata, cache_song_stems
-    from musicmixer.services.youtube import extract_video_id
+    from musicmixer.services.song_cache import cache_song_metadata
 
-    video_id = extract_video_id(url)
     if video_id is None:
         return
+    if already_cached:
+        return
     try:
-        if not already_cached:
-            cache_song_metadata(
-                video_id=video_id, title=title, artist="", meta=meta, lyrics=lyrics,
-            )
-        cache_song_stems(video_id=video_id, role=role, stems_dir=Path(stems_dir))
+        cache_song_metadata(
+            video_id=video_id, title=title, artist="", meta=meta, lyrics=lyrics,
+        )
         logger.info(
-            "Session %s: checkpointed song %s (role=%s) to cache", session_id, video_id, role,
+            "Session %s: checkpointed metadata for song %s (role=%s)", session_id, video_id, role,
         )
     except Exception:
         logger.warning(
@@ -519,8 +538,9 @@ def analyze_and_checkpoint_youtube_pair(
     """Analyze the downloaded pair, then checkpoint each song to the cache.
 
     Builds ``PipelineMetrics`` (with video IDs populated), runs ``analyze_songs``
-    over the two downloads, and persists each song's stems + metadata before the
-    expensive remix/render via ``_checkpoint_song`` (failure-isolated, A then B).
+    over the two downloads, and checkpoints each song's metadata after cache-aware
+    separation via ``_checkpoint_song_metadata`` (failure-isolated, A then B). Stems
+    are published by the cache-aware separation wrapper, not here.
 
     ``analyze_songs`` owns its own progress emission and cancellation checks
     through ``event_queue``/``session``; this stage builds no SSE payloads and
@@ -537,9 +557,12 @@ def analyze_and_checkpoint_youtube_pair(
     source_quality_a = downloaded.source_quality_a
     source_quality_b = downloaded.source_quality_b
 
+    video_id_a = extract_video_id(url_a)
+    video_id_b = extract_video_id(url_b)
+
     metrics = PipelineMetrics(session_id=session_id)
-    metrics.song_a_video_id = extract_video_id(url_a) or ""
-    metrics.song_b_video_id = extract_video_id(url_b) or ""
+    metrics.song_a_video_id = video_id_a or ""
+    metrics.song_b_video_id = video_id_b or ""
 
     analysis = analyze_songs(
         session_id=session_id,
@@ -556,18 +579,18 @@ def analyze_and_checkpoint_youtube_pair(
         cached_meta_b=cached_song_b.meta if cached_song_b else None,
         cached_lyrics_a=cached_song_a.lyrics if cached_song_a else None,
         cached_lyrics_b=cached_song_b.lyrics if cached_song_b else None,
+        video_id_a=video_id_a,
+        video_id_b=video_id_b,
     )
 
-    _checkpoint_song(
-        url=url_a, role=ROLE_VOCAL, title=result_a.title,
+    _checkpoint_song_metadata(
+        video_id=video_id_a, role=ROLE_VOCAL, title=result_a.title,
         meta=analysis.meta_a, lyrics=analysis.lyrics_a,
-        stems_dir=analysis.song_a_stems_dir,
         already_cached=cached_song_a is not None, session_id=session_id,
     )
-    _checkpoint_song(
-        url=url_b, role=ROLE_INSTRUMENTAL, title=result_b.title,
+    _checkpoint_song_metadata(
+        video_id=video_id_b, role=ROLE_INSTRUMENTAL, title=result_b.title,
         meta=analysis.meta_b, lyrics=analysis.lyrics_b,
-        stems_dir=analysis.song_b_stems_dir,
         already_cached=cached_song_b is not None, session_id=session_id,
     )
 
