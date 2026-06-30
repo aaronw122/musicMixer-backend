@@ -185,7 +185,7 @@ class TestTokenizeStemFilename:
     def test_modal_tokenizer_matches_local(self):
         """Both modules should have identical tokenizer behavior."""
         from musicmixer.services.separation_local import _tokenize_stem_filename as local_tok
-        from musicmixer.services.separation_modal import _tokenize_stem_filename as modal_tok
+        from musicmixer.modal_apps.separation import _tokenize_stem_filename as modal_tok
 
         cases = [
             "vocals",
@@ -642,25 +642,25 @@ class TestModalConstants:
 
     def test_karaoke_model_checkpoint_defined(self):
         """Karaoke model checkpoint constant should be defined."""
-        from musicmixer.services.separation_modal import MELBAND_KARAOKE_CKPT
+        from musicmixer.modal_apps.separation import MELBAND_KARAOKE_CKPT
 
         assert MELBAND_KARAOKE_CKPT.endswith(".ckpt")
 
     def test_vocals_model_checkpoint_defined(self):
         """Vocals model checkpoint constant should be defined."""
-        from musicmixer.services.separation_modal import MELBAND_VOCALS_CKPT
+        from musicmixer.modal_apps.separation import MELBAND_VOCALS_CKPT
 
         assert MELBAND_VOCALS_CKPT.endswith(".ckpt")
 
     def test_bs_roformer_checkpoint_unchanged(self):
         """Existing BS-RoFormer checkpoint constant should be preserved."""
-        from musicmixer.services.separation_modal import MODEL_CKPT
+        from musicmixer.modal_apps.separation import MODEL_CKPT
 
         assert MODEL_CKPT == "BS-Roformer-SW.ckpt"
 
     def test_no_msst_references(self):
         """No MSST-related constants should remain after the rewrite."""
-        import musicmixer.services.separation_modal as mod
+        import musicmixer.modal_apps.separation as mod
 
         assert not hasattr(mod, "MSST_WEIGHTS_DIR")
         assert not hasattr(mod, "MELBAND_KARAOKE_CONFIG")

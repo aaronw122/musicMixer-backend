@@ -64,9 +64,6 @@ class Settings(BaseSettings):
     pulsemap_drums_enabled: bool = True
     pulsemap_word_alignment_enabled: bool = False  # disabled: loads WhisperX + wav2vec2 (~1.5GB), OOMs on 4GB hosts
 
-    # Taste training (candidate generation + scoring)
-    ab_taste_model_v1: bool = False
-
     # Redis and song cache
     redis_url: str = "redis://localhost:6379"
     song_cache_dir: Path = Path("data/song_cache")

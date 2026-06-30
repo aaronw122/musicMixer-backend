@@ -62,15 +62,12 @@ def separate_stems_remote(audio_bytes: bytes, filename: str = "input.wav") -> di
         output_dir = tmpdir / "stems"
         output_dir.mkdir()
 
-        # Write input file
         input_path.write_bytes(audio_bytes)
 
-        # Run separation with 6-stem model
         separator = Separator(output_dir=str(output_dir))
         separator.load_model(MODEL_CKPT)
         separator.separate(str(input_path))
 
-        # Collect output stems
         stems = {}
         expected_stems = ["vocals", "drums", "bass", "guitar", "piano", "other"]
         for stem_file in output_dir.iterdir():
@@ -120,7 +117,6 @@ def separate_vocal_song_remote(audio_bytes: bytes, filename: str = "input.wav") 
         pass1_dir.mkdir()
         pass2_dir.mkdir()
 
-        # Write input file
         input_path.write_bytes(audio_bytes)
 
         # ---- Pass 1: Karaoke model on the mix ----
@@ -129,7 +125,6 @@ def separate_vocal_song_remote(audio_bytes: bytes, filename: str = "input.wav") 
         sep1.load_model(MELBAND_KARAOKE_CKPT)
         sep1.separate(str(input_path))
 
-        # Map pass 1 output files to stem roles
         pass1_stems = {}
         expected_pass1 = ["vocals", "instrumental"]
         for stem_file in pass1_dir.iterdir():
@@ -156,7 +151,6 @@ def separate_vocal_song_remote(audio_bytes: bytes, filename: str = "input.wav") 
         sep2.load_model(MELBAND_VOCALS_CKPT)
         sep2.separate(str(karaoke_track_path))
 
-        # Map pass 2 output files to stem roles
         pass2_stems = {}
         expected_pass2 = ["vocals", "instrumental"]
         for stem_file in pass2_dir.iterdir():
@@ -177,7 +171,6 @@ def separate_vocal_song_remote(audio_bytes: bytes, filename: str = "input.wav") 
         backing_vocals_path = pass2_stems["vocals"]
         instrumental_path = pass2_stems["instrumental"]
 
-        # ---- Re-encode as float32 WAV and return ----
         result = {}
         for stem_name, stem_path in [
             ("lead_vocals", lead_vocals_path),

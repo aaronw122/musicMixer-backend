@@ -126,7 +126,6 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
         # causes boolean comparisons to behave unpredictably.
         mock_settings.stem_backend = "modal"
         mock_settings.lyrics_lookup_enabled = False
-        mock_settings.ab_taste_model_v1 = False
         mock_settings.anthropic_api_key = ""  # Prevent LLM API calls in tests
         mock_settings.pulsemap_polyphony_enabled = False
         mock_settings.pulsemap_chords_enabled = False

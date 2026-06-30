@@ -81,7 +81,6 @@ def _load_songformer_model():
     logger.info("Loading SongFormer model from %s", _MODEL_DIR)
     t0 = time.monotonic()
 
-    # Load config from disk
     config_path = os.path.join(_MODEL_DIR, "config.json")
     with open(config_path) as f:
         config_dict = json.load(f)
@@ -90,7 +89,6 @@ def _load_songformer_model():
     # Instantiate model on CPU (avoids meta tensor context)
     model = SongFormerModel(config)
 
-    # Load weights from safetensors
     weights_path = os.path.join(_MODEL_DIR, "model.safetensors")
     state_dict = load_file(weights_path)
     model.load_state_dict(state_dict, strict=False)

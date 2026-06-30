@@ -112,6 +112,13 @@ uv run modal run scripts/my_script.py --arg val  # with args (Modal handles CLI 
 
 **Do NOT use `uv run modal` from the workspace root** — `uv` resolves the venv from `pyproject.toml` in the current directory, and the root workspace doesn't have modal installed.
 
+**Deploying the Modal apps:** The Modal app definitions live in `src/musicmixer/modal_apps/`. They run in Modal's cloud and are referenced by runtime clients only via app-name string (`musicmixer-separation`, `musicmixer-songformer`), never by import. Deploy from `backend/`:
+
+```bash
+uv run modal deploy src/musicmixer/modal_apps/separation.py   # musicmixer-separation (stem separation)
+uv run modal deploy src/musicmixer/modal_apps/structure.py    # musicmixer-songformer (SongFormer structure analysis)
+```
+
 **Fallback:** If Modal is not configured, set `STEM_BACKEND=local` in `.env` to use local CPU separation.
 
 ## Key Conventions
