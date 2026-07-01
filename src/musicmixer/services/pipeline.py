@@ -1211,21 +1211,12 @@ def _step_compute_tempo_and_key_plan(
     vocal_semitones = key_plan.shift_a if key_plan.action in ("shift", "warning") else 0
     inst_semitones = key_plan.shift_b if key_plan.action in ("shift", "warning") else 0
 
-    # Handle warnings and incompatible cases
+    # Handle key-quality warning
     if key_plan.action == "warning":
         session.key_warning = (
             f"Large key difference ({meta_a.key} {meta_a.scale} vs {meta_b.key} {meta_b.scale}) — "
             "the key match is pushing quality limits."
         )
-    elif key_plan.action == "incompatible":
-        # Zero out shifts — proceed without key matching
-        session.key_warning = (
-            f"Songs are too far apart in key to match "
-            f"({meta_a.key} {meta_a.scale} vs {meta_b.key} {meta_b.scale}) — "
-            "remix built without key matching."
-        )
-        vocal_semitones = 0
-        inst_semitones = 0
     elif key_plan.action == "shift":
         _add_key_match_note(plan)
 

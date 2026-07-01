@@ -403,14 +403,13 @@ class TestDifferentModes:
 
 
 # ---------------------------------------------------------------------------
-# compute_key_plan: incompatible (distance 7+)
+# chromatic_distance invariant: distance never exceeds 6
 # ---------------------------------------------------------------------------
 
 
-class TestIncompatible:
-    """Test that distance > 6 is impossible with chromatic_distance (max=6),
-    so incompatible action should not occur in practice. But if it did, the
-    code would handle it."""
+class TestChromaticDistanceInvariant:
+    """Chromatic distance is bounded to 0-6, so no two songs are ever
+    key-incompatible. This test enforces that contract."""
 
     def test_max_chromatic_distance_is_6(self):
         """Verify that no pair of semitones can produce distance > 6."""
