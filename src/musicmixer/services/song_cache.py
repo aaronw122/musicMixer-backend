@@ -21,6 +21,7 @@ import errno
 import json
 import logging
 import os
+import random
 import shutil
 import tempfile
 import threading
@@ -1226,7 +1227,8 @@ class StemCacheCoordinator:
         Only the lock owner may fail: the lock is released token-checked as part of
         failing. ``attempt`` is incremented; ``retry_after`` follows the retry schedule:
         transient failures back off exponentially from ``stem_retry_transient_base_seconds``
-        capped at ``stem_retry_backoff_cap_seconds``; invalid-input uses a fixed window.
+        capped at ``stem_retry_backoff_cap_seconds`` (then equal-jittered); invalid-input
+        uses a fixed window.
         Once ``attempt >= stem_retry_max_attempts`` the state holds ``failed`` with no
         ``retry_after`` until the 24h failed-state TTL expires. Returns the written state.
         """
@@ -1404,12 +1406,15 @@ def _retry_delay_seconds(error_code: StemErrorCode, attempt: int) -> int:
     """Seconds until retry for a failed attempt.
 
     Invalid input is a fixed window. Transient failures back off exponentially
-    from the configured base, capped at the configured ceiling.
+    from the configured base, capped at the configured ceiling, then equal-
+    jittered into ``[delay/2, delay]`` so keys that failed together (e.g. a
+    Modal outage) don't all retry in lockstep and stampede the GPU backend.
     """
     if error_code == STEM_ERROR_INVALID_INPUT:
         return settings.stem_retry_invalid_input_seconds
     delay = settings.stem_retry_transient_base_seconds * (2 ** (attempt - 1))
-    return min(delay, settings.stem_retry_backoff_cap_seconds)
+    delay = min(delay, settings.stem_retry_backoff_cap_seconds)
+    return round(delay / 2 + random.uniform(0, delay / 2))
 
 
 # Sibling dirs left beside a published {role}/ dir: owner-scoped staging

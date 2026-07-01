@@ -288,7 +288,7 @@ class TestMarkFailed:
         assert state is not None
         assert state.owner_token is None
 
-    def test_transient_retry_after_follows_exponential_schedule(self, clean_redis):
+    def test_transient_retry_after_follows_jittered_exponential_schedule(self, clean_redis):
         coord = _coordinator()
         base = settings.stem_retry_transient_base_seconds
         cap = settings.stem_retry_backoff_cap_seconds
@@ -300,9 +300,10 @@ class TestMarkFailed:
             assert state.attempt == attempt
             assert state.retry_after is not None
 
-            expected = min(base * 2 ** (attempt - 1), cap)
+            capped = min(base * 2 ** (attempt - 1), cap)
             delay = (_parse(state.retry_after) - _parse(state.failed_at)).total_seconds()
-            assert abs(delay - expected) < 1.0
+            # Equal jitter: delay lands in [capped/2, capped].
+            assert capped / 2 - 1.0 <= delay <= capped + 1.0
 
     def test_invalid_input_uses_fixed_window(self, clean_redis):
         coord = _coordinator()
@@ -356,12 +357,19 @@ class TestMarkFailed:
 # ---------------------------------------------------------------------------
 
 class TestRetryDelay:
-    def test_transient_exponential_then_capped(self):
+    def test_transient_jittered_within_bounds(self):
         base = settings.stem_retry_transient_base_seconds
         cap = settings.stem_retry_backoff_cap_seconds
-        assert _retry_delay_seconds(STEM_ERROR_TRANSIENT, 1) == base
-        assert _retry_delay_seconds(STEM_ERROR_TRANSIENT, 2) == base * 2
-        assert _retry_delay_seconds(STEM_ERROR_TRANSIENT, 100) == cap
+        for attempt, uncapped in [(1, base), (2, base * 2), (100, cap)]:
+            capped = min(uncapped, cap)
+            for _ in range(100):
+                delay = _retry_delay_seconds(STEM_ERROR_TRANSIENT, attempt)
+                # Equal jitter keeps half the backoff as a floor and never exceeds it.
+                assert capped / 2 <= delay <= capped
+
+    def test_jitter_actually_varies(self):
+        samples = {_retry_delay_seconds(STEM_ERROR_TRANSIENT, 3) for _ in range(50)}
+        assert len(samples) > 1
 
     def test_invalid_input_fixed(self):
         assert (
