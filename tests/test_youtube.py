@@ -21,6 +21,7 @@ from musicmixer.services.youtube import (
     ERROR_CLASS_TRANSIENT,
     ERROR_CLASS_PERMANENT,
     classify_youtube_error,
+    extract_video_id,
     validate_youtube_url,
     _is_ip_literal,
     _map_ytdlp_error,
@@ -32,6 +33,33 @@ from musicmixer.services.youtube import (
 # ===========================================================================
 # URL validation tests (SSRF prevention)
 # ===========================================================================
+
+
+class TestExtractVideoId:
+    def test_extracts_valid_watch_id(self) -> None:
+        assert extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_extracts_valid_short_id(self) -> None:
+        assert extract_video_id("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_extracts_valid_shorts_id(self) -> None:
+        assert extract_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_extracts_valid_embed_id(self) -> None:
+        assert extract_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.youtube.com/watch?v=../evil",
+            "https://youtu.be/../../evil",
+            "https://www.youtube.com/shorts/song:bad:key",
+            "https://www.youtube.com/embed/too-short",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ/extra",
+        ],
+    )
+    def test_rejects_invalid_video_id_shape(self, url: str) -> None:
+        assert extract_video_id(url) is None
 
 
 class TestValidateYouTubeUrl:

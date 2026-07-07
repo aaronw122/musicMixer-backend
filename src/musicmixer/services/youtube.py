@@ -8,6 +8,7 @@ YouTube (Opus/AAC) -> decode -> int16 PCM WAV at native sample rate.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ _YOUTUBE_HOSTS = frozenset({
     "youtu.be",
     "music.youtube.com",
 })
+
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 # Wire-contract values for the SSE `error` event's `error_class` field.
@@ -231,15 +234,18 @@ def extract_video_id(url: str) -> str | None:
     hostname = parsed.hostname or ""
     path_parts = [part for part in parsed.path.split("/") if part]
 
+    def _valid_video_id(value: str) -> str | None:
+        return value if _VIDEO_ID_RE.fullmatch(value) else None
+
     if hostname == "youtu.be" and path_parts:
-        return path_parts[0]
+        return _valid_video_id(path_parts[0])
 
     query = parse_qs(parsed.query)
     if query.get("v"):
-        return query["v"][0]
+        return _valid_video_id(query["v"][0])
 
     if path_parts and path_parts[0] in {"shorts", "embed"} and len(path_parts) > 1:
-        return path_parts[1]
+        return _valid_video_id(path_parts[1])
 
     return None
 

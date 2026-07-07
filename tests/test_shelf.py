@@ -56,12 +56,12 @@ def test_post_shelf_adds_record_and_persists(client, tmp_path):
     ):
         response = client.post(
             "/api/shelf",
-            json={"youtube_url": "https://youtu.be/abc123"},
+            json={"youtube_url": "https://youtu.be/dQw4w9WgXcQ"},
         )
 
     assert response.status_code == 200
     record = response.json()
-    assert record["youtube_url"] == "https://www.youtube.com/watch?v=abc123"
+    assert record["youtube_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     assert record["artist"] == "The Meters"
     assert record["sleeve_image_url"] == f"/api/shelf/sleeve/{record['id']}"
     assert record["is_curated"] is False
@@ -80,11 +80,11 @@ def test_post_shelf_returns_existing_on_duplicate_url(client):
     ):
         first = client.post(
             "/api/shelf",
-            json={"youtube_url": "https://youtu.be/duplicate"},
+            json={"youtube_url": "https://youtu.be/9bZkp7q19f0"},
         )
         second = client.post(
             "/api/shelf",
-            json={"youtube_url": "https://www.youtube.com/watch?v=duplicate&t=42"},
+            json={"youtube_url": "https://www.youtube.com/watch?v=9bZkp7q19f0&t=42"},
         )
 
     assert first.status_code == 200
