@@ -21,6 +21,7 @@ import queue
 import struct
 import threading
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -151,6 +152,24 @@ def _fake_meta() -> AudioMetadata:
     )
 
 
+@contextmanager
+def _patched_separators(sep_a, sep_b):
+    """Patch the module-level separators + analysis for a step run.
+
+    ``unittest.mock.patch`` is not thread-safe: overlapping enter/exit from
+    concurrent threads can permanently leak a mock onto the patched globals.
+    Callers driving multiple sessions in parallel must enter this ONCE in the
+    main thread (see ``test_two_sessions_share_role_separate_once``) rather than
+    per-thread inside ``_run_step``.
+    """
+    with (
+        patch("musicmixer.services.separation.separate_vocal_song", side_effect=sep_a),
+        patch("musicmixer.services.separation.separate_stems", side_effect=sep_b),
+        patch("musicmixer.services.analysis.analyze_audio_full", side_effect=lambda *_a, **_k: _fake_meta()),
+    ):
+        yield
+
+
 def _run_step(
     session_id,
     stems_dir,
@@ -162,8 +181,14 @@ def _run_step(
     session=None,
     cached_meta_a=None,
     cached_meta_b=None,
+    apply_patches=True,
 ):
-    """Drive _step_separate_and_analyze with mocked separators + analysis."""
+    """Drive _step_separate_and_analyze with mocked separators + analysis.
+
+    When ``apply_patches`` is False the caller is responsible for having entered
+    ``_patched_separators`` already (required for concurrent sessions so the
+    global patches are not entered/exited from multiple threads).
+    """
     session = session or SessionState()
     event_queue: queue.Queue = queue.Queue(maxsize=200)
     song_a_path = stems_dir.parent / "song_a.wav"
@@ -171,11 +196,9 @@ def _run_step(
     _write_wav(song_a_path)
     _write_wav(song_b_path)
 
-    with (
-        patch("musicmixer.services.separation.separate_vocal_song", side_effect=sep_a),
-        patch("musicmixer.services.separation.separate_stems", side_effect=sep_b),
-        patch("musicmixer.services.analysis.analyze_audio_full", side_effect=lambda *_a, **_k: _fake_meta()),
-    ):
+    with ExitStack() as stack:
+        if apply_patches:
+            stack.enter_context(_patched_separators(sep_a, sep_b))
         return _step_separate_and_analyze(
             session_id,
             song_a_path,
@@ -257,23 +280,29 @@ class TestPipelineStemCache:
                 name, stems_dir,
                 video_id_a="test_shared", video_id_b=f"test_inst_{name}",
                 sep_a=sep_owner, sep_b=sep_b,
+                apply_patches=False,
             )
             results[name] = (res, q)
 
-        # First session owns the shared vocal; block it mid-separation.
-        t1 = threading.Thread(target=_session, args=("s1", stems_dir1, sep_inst))
-        t1.start()
-        assert sep_owner.started.wait(timeout=10)
+        # Patches are entered ONCE here (not per-thread) so the module-level
+        # separator globals are never patched/unpatched from worker threads.
+        # The two sessions share one instrumental separator (distinct video ids
+        # still force a real separation per session); only the shared vocal's
+        # call count is asserted.
+        with _patched_separators(sep_owner, sep_inst):
+            # First session owns the shared vocal; block it mid-separation.
+            t1 = threading.Thread(target=_session, args=("s1", stems_dir1, sep_inst))
+            t1.start()
+            assert sep_owner.started.wait(timeout=10)
 
-        # Second session requests the SAME vocal -> must wait, not separate.
-        sep_inst2 = _Separator(_INSTRUMENTAL_STEMS)
-        t2 = threading.Thread(target=_session, args=("s2", stems_dir2, sep_inst2))
-        t2.start()
-        time.sleep(0.5)
+            # Second session requests the SAME vocal -> must wait, not separate.
+            t2 = threading.Thread(target=_session, args=("s2", stems_dir2, sep_inst))
+            t2.start()
+            time.sleep(0.5)
 
-        block.set()
-        t1.join(timeout=30)
-        t2.join(timeout=30)
+            block.set()
+            t1.join(timeout=30)
+            t2.join(timeout=30)
 
         assert sep_owner.calls == 1  # vocal separated exactly once across both sessions
         res2, q2 = results["s2"]
