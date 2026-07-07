@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from musicmixer.config import settings
+from musicmixer.services.song_cache import sweep_orphaned_staging_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,10 @@ def cleanup_expired_sessions(
     Returns the total number of cleaned items (sessions + orphaned dirs).
     """
     ttl_seconds = settings.session_ttl_hours * 3600
-    processing_timeout_seconds = settings.processing_timeout_minutes * 60
+    processing_timeout_seconds = max(
+        settings.processing_timeout_minutes * 60,
+        settings.stem_wait_timeout_seconds + settings.stem_lock_lease_seconds,
+    )
     queue_timeout_seconds = settings.queue_entry_ttl_minutes * 60
     now = time.time()
     cleaned = 0
@@ -55,7 +59,7 @@ def cleanup_expired_sessions(
                     "(age: %.0fm, timeout: %dm)",
                     session_id,
                     age_minutes,
-                    settings.processing_timeout_minutes,
+                    round(processing_timeout_seconds / 60),
                 )
                 expired_ids.add(session_id)
 
@@ -126,6 +130,11 @@ def cleanup_expired_sessions(
                     session_dir,
                     (now - mtime) / 3600,
                 )
+
+    try:
+        cleaned += sweep_orphaned_staging_dirs()
+    except Exception:
+        logger.warning("Failed to sweep orphaned stem staging dirs", exc_info=True)
 
     return cleaned
 

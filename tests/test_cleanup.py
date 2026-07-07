@@ -117,6 +117,22 @@ class TestInMemoryCleanup:
         assert "stuck" not in sessions
         assert "Purging stuck processing session stuck" in caplog.text
 
+    def test_keeps_processing_until_coordination_window_elapses(self, data_dir, default_settings, monkeypatch):
+        monkeypatch.setattr(
+            "musicmixer.services.cleanup.settings.stem_wait_timeout_seconds", 60 * 60
+        )
+        monkeypatch.setattr(
+            "musicmixer.services.cleanup.settings.stem_lock_lease_seconds", 5 * 60
+        )
+        lock = threading.Lock()
+        sessions = {
+            "active-long-wait": _make_session("processing", age_seconds=25 * 60),
+        }
+
+        cleanup_expired_sessions(sessions, lock)
+
+        assert "active-long-wait" in sessions
+
     def test_skips_young_queued_sessions(self, data_dir, default_settings):
         lock = threading.Lock()
         sessions = {
@@ -207,6 +223,23 @@ class TestFileCleanup:
 
         for d in dirs:
             assert not d.exists()
+
+    def test_sweeps_orphaned_staging_dirs(self, data_dir, default_settings, monkeypatch):
+        lock = threading.Lock()
+        sessions = {}
+
+        called = {"count": 0}
+
+        def fake_sweep():
+            called["count"] += 1
+            return 2
+
+        monkeypatch.setattr("musicmixer.services.cleanup.sweep_orphaned_staging_dirs", fake_sweep)
+
+        cleaned = cleanup_expired_sessions(sessions, lock)
+
+        assert called["count"] == 1
+        assert cleaned == 2
 
 
 class TestOSErrorHandling:
