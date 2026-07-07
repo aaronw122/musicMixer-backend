@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import tempfile
 import threading
 import urllib.parse
@@ -26,9 +27,11 @@ from musicmixer.services.youtube import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _shelf_lock = threading.Lock()
 _NOEMBED_URL = "https://noembed.com/embed"
+_MAX_SHELF_RECORDS = 100
 
 
 class ShelfRecord(BaseModel):
@@ -242,6 +245,10 @@ def _sorted_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(records, key=lambda record: record["added_at"], reverse=True)
 
 
+def _has_capacity_for_new_record(records: list[dict[str, Any]]) -> bool:
+    return len(records) < _MAX_SHELF_RECORDS
+
+
 @router.get("/shelf", response_model=ShelfResponse)
 def list_shelf() -> ShelfResponse:
     records = _load_records()
@@ -250,23 +257,16 @@ def list_shelf() -> ShelfResponse:
     )
 
 
-def ensure_on_shelf(youtube_url: str) -> ShelfRecord:
-    """Add a YouTube URL to the shelf if it isn't already there.
-
-    Returns the ShelfRecord (existing or newly created). Safe to call
-    from any context — silently returns the existing record on duplicates.
-    """
-    normalized_url = _normalize_youtube_url(youtube_url)
-
-    # Fast path: already on the shelf
+def _existing_record(normalized_url: str) -> ShelfRecord | None:
     with _shelf_lock:
         records = _read_shelf_unlocked(_shelf_path())
         for record in records:
             if record["youtube_url"] == normalized_url:
                 return ShelfRecord(**record)
+    return None
 
-    metadata = _fetch_noembed_metadata(normalized_url)
 
+def _add_record_with_metadata(normalized_url: str, metadata: dict[str, str]) -> ShelfRecord:
     with _shelf_lock:
         path = _shelf_path()
         records = _read_shelf_unlocked(path)
@@ -274,6 +274,8 @@ def ensure_on_shelf(youtube_url: str) -> ShelfRecord:
         for record in records:
             if record["youtube_url"] == normalized_url:
                 return ShelfRecord(**record)
+        if not _has_capacity_for_new_record(records):
+            raise HTTPException(409, "Shelf is full")
 
         record_id = str(uuid.uuid4())
         record = {
@@ -292,9 +294,47 @@ def ensure_on_shelf(youtube_url: str) -> ShelfRecord:
     return ShelfRecord(**record)
 
 
+def _add_record_from_noembed(normalized_url: str) -> ShelfRecord:
+    metadata = _fetch_noembed_metadata(normalized_url)
+    return _add_record_with_metadata(normalized_url, metadata)
+
+
+def _ensure_on_shelf_background(normalized_url: str) -> None:
+    try:
+        _add_record_from_noembed(normalized_url)
+    except Exception:
+        logger.exception("Failed to add YouTube URL to shelf")
+
+
+def ensure_on_shelf(youtube_url: str) -> ShelfRecord | None:
+    """Ensure a YouTube URL is on the shelf without blocking the caller."""
+    normalized_url = _normalize_youtube_url(youtube_url)
+
+    existing = _existing_record(normalized_url)
+    if existing is not None:
+        return existing
+
+    with _shelf_lock:
+        records = _read_shelf_unlocked(_shelf_path())
+        if not _has_capacity_for_new_record(records):
+            return None
+
+    thread = threading.Thread(
+        target=_ensure_on_shelf_background,
+        args=(normalized_url,),
+        daemon=True,
+    )
+    thread.start()
+    return None
+
+
 @router.post("/shelf", response_model=ShelfRecord)
 def add_shelf_record(body: AddShelfRecordRequest) -> ShelfRecord:
-    return ensure_on_shelf(body.youtube_url)
+    normalized_url = _normalize_youtube_url(body.youtube_url)
+    existing = _existing_record(normalized_url)
+    if existing is not None:
+        return existing
+    return _add_record_from_noembed(normalized_url)
 
 
 def _sleeve_svg(record: dict[str, Any]) -> str:

@@ -92,6 +92,41 @@ def test_post_shelf_returns_existing_on_duplicate_url(client):
     assert first.json()["id"] == second.json()["id"]
 
 
+def test_ensure_on_shelf_fetches_metadata_in_background(client):
+    from musicmixer.api.shelf import ensure_on_shelf
+
+    with patch("musicmixer.api.shelf.threading.Thread") as thread, \
+         patch("musicmixer.api.shelf._fetch_noembed_metadata") as fetch:
+        thread.return_value.start.return_value = None
+        result = ensure_on_shelf("https://youtu.be/background")
+
+    assert result is None
+    fetch.assert_not_called()
+    thread.assert_called_once()
+    thread.return_value.start.assert_called_once()
+
+
+def test_post_shelf_rejects_new_record_when_full(client):
+    client.get("/api/shelf")
+    current_count = len(client.get("/api/shelf").json()["records"])
+
+    with patch("musicmixer.api.shelf._MAX_SHELF_RECORDS", current_count), \
+         patch(
+             "musicmixer.api.shelf._fetch_noembed_metadata",
+             return_value={
+                 "title": "Artist - Song",
+                 "thumbnail_url": "https://example.test/thumb.jpg",
+             },
+         ):
+        response = client.post(
+            "/api/shelf",
+            json={"youtube_url": "https://youtu.be/full999"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Shelf is full"
+
+
 def test_post_shelf_rejects_invalid_youtube_url(client):
     response = client.post(
         "/api/shelf",
