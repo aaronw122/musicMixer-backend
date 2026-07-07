@@ -808,6 +808,30 @@ async def cancel_remix(session_id: str, request: Request):
 # E.164: '+' followed by 10-15 digits
 _E164_RE = re.compile(r"^\+\d{10,15}$")
 
+# Abuse controls for the unauthenticated notify-sms endpoint.
+_NOTIFY_MAX_NUMBERS_PER_SESSION = 3
+_NOTIFY_RATE_MAX_REQUESTS = 5
+_NOTIFY_RATE_WINDOW_S = 60.0
+_notify_rate_lock = threading.Lock()
+_notify_rate_hits: dict[str, list[float]] = {}
+
+
+def _notify_rate_limit_ok(client_ip: str) -> bool:
+    """Allow up to _NOTIFY_RATE_MAX_REQUESTS per _NOTIFY_RATE_WINDOW_S per IP."""
+    now = time.monotonic()
+    cutoff = now - _NOTIFY_RATE_WINDOW_S
+    with _notify_rate_lock:
+        if len(_notify_rate_hits) > 4096:
+            stale = [ip for ip, ts in _notify_rate_hits.items() if not ts or ts[-1] < cutoff]
+            for ip in stale:
+                del _notify_rate_hits[ip]
+        hits = _notify_rate_hits.setdefault(client_ip, [])
+        hits[:] = [t for t in hits if t >= cutoff]
+        if len(hits) >= _NOTIFY_RATE_MAX_REQUESTS:
+            return False
+        hits.append(now)
+        return True
+
 
 class NotifySmsRequest(BaseModel):
     phone: str
@@ -825,9 +849,14 @@ def register_sms_notification(
     - 200: session already complete, ready notification sent directly
     - 409: session in error state
     - 422: invalid phone format
+    - 429: too many requests (per-IP rate limit) or too many numbers for this session
     - 503: SMS feature disabled
     """
     _validate_uuid(session_id)
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _notify_rate_limit_ok(client_ip):
+        raise HTTPException(429, "Too many requests, please slow down")
 
     if not settings.sms_enabled:
         raise HTTPException(503, "SMS notifications are not available")
@@ -843,30 +872,38 @@ def register_sms_notification(
     if session.status == "error":
         raise HTTPException(409, "Session failed — cannot register for notification")
 
-    if session.status == "complete":
-        # Remix already done — send ready notification directly, no confirmation
-        from musicmixer.services.sms import send_remix_ready
+    phone = body.phone
+    known_number = phone in session.notify_numbers
+    if not known_number and len(session.notify_numbers) >= _NOTIFY_MAX_NUMBERS_PER_SESSION:
+        raise HTTPException(429, "Too many phone numbers registered for this remix")
 
-        try:
-            send_remix_ready(body.phone, session_id)
-        except Exception:
-            logger.exception(
-                "Session %s: failed to send ready SMS", session_id
-            )
+    if session.status == "complete":
+        # Remix already done — send ready notification directly, no confirmation.
+        # Dedup: a number already seen for this session is a no-op success.
+        if not known_number:
+            session.notify_numbers.add(phone)
+            from musicmixer.services.sms import send_remix_ready
+
+            try:
+                send_remix_ready(phone, session_id)
+            except Exception:
+                logger.exception("Session %s: failed to send ready SMS", session_id)
         return {"status": "sent", "message": "Remix is already ready — notification sent"}
 
-    # Store phone on session (idempotent: overwrites any previous value)
-    session.notify_phone = body.phone
+    # Store phone on session (last registration wins for the ready notification).
+    session.notify_numbers.add(phone)
+    session.notify_phone = phone
 
-    # Send confirmation SMS (best-effort — failure is non-blocking)
-    from musicmixer.services.sms import send_confirmation
+    # Confirmation SMS is sent at most once per session (best-effort — failure
+    # is non-blocking and does not un-set the flag).
+    if not session.notify_confirmation_sent:
+        session.notify_confirmation_sent = True
+        from musicmixer.services.sms import send_confirmation
 
-    try:
-        send_confirmation(body.phone)
-    except Exception:
-        logger.exception(
-            "Session %s: failed to send confirmation SMS", session_id
-        )
+        try:
+            send_confirmation(phone)
+        except Exception:
+            logger.exception("Session %s: failed to send confirmation SMS", session_id)
 
     return JSONResponse(
         status_code=202,
