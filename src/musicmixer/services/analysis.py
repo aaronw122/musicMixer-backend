@@ -1527,7 +1527,7 @@ def compute_vocal_prominence(
 
     Returns prominence_db or None if insufficient data.
     """
-    vocal_rms = bar_rms_per_stem.get("vocals")
+    vocal_rms = _vocal_rms_for_activity(bar_rms_per_stem, len(vocal_active))
     if vocal_rms is None or len(vocal_rms) == 0:
         return None
 
@@ -1540,7 +1540,7 @@ def compute_vocal_prominence(
     # Sum of non-vocal stems over the same active bars
     non_vocal_sum = np.zeros(int(np.sum(active_mask)), dtype=np.float64)
     for name, rms in bar_rms_per_stem.items():
-        if name == "vocals":
+        if name in {"vocals", "lead_vocals", "backing_vocals"}:
             continue
         non_vocal_sum += rms[active_mask]
     mean_non_vocal = float(np.mean(non_vocal_sum))

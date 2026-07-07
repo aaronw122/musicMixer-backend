@@ -89,6 +89,14 @@ class TestGenerateFallbackPlan:
 
         assert len(plan.sections) in (5, 6, 8)
 
+    def test_default_arrangement_six_section_boundaries_nonzero(self):
+        """Snapped six-section fallback boundaries must not collapse."""
+        sections = default_arrangement(96)
+
+        assert len(sections) == 6
+        for section in sections:
+            assert section.end_beat > section.start_beat, section
+
     def test_fallback_plan_sections_contiguous(self):
         """Each section's start_beat equals the previous section's end_beat."""
         meta_a = _make_metadata(bpm=100.0, duration=200.0)
@@ -734,6 +742,22 @@ class TestIntentValidation:
         result = _validate_intent_plan(plan, meta_a, meta_b)
 
         # Intro should have been extended to cover the gap
+        assert result.sections[0].end_beat == result.sections[1].start_beat
+
+    def test_one_beat_gap_sections_fixed(self):
+        """A one-beat cut-transition gap is dead air and should be repaired."""
+        meta_a = _make_metadata(bpm=120.0, duration=240.0)
+        meta_b = _make_metadata(bpm=118.0, duration=210.0)
+
+        sections = [
+            IntentSection("intro", 0, 32, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "fade", 4),
+            IntentSection("verse", 33, 128, "medium", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "background", "piano": "background", "other": "texture"}, "cut", 0),
+            IntentSection("drop", 128, 352, "peak", {"lead_vocals": "lead", "backing_vocals": "silent", "drums": "support", "bass": "support", "guitar": "support", "piano": "background", "other": "background"}, "cut", 0),
+            IntentSection("outro", 352, 416, "low", {"lead_vocals": "silent", "backing_vocals": "silent", "drums": "background", "bass": "background", "guitar": "background", "piano": "background", "other": "texture"}, "crossfade", 8),
+        ]
+        plan = _make_intent_plan_with_sections(sections)
+        result = _validate_intent_plan(plan, meta_a, meta_b)
+
         assert result.sections[0].end_beat == result.sections[1].start_beat
 
     def test_overlap_sections_fixed(self):

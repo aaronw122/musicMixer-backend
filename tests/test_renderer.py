@@ -184,6 +184,34 @@ class TestRenderArrangement:
         # Instrumental bus should have non-zero content from drums
         assert not np.allclose(inst_bus, 0.0)
 
+    def test_legacy_vocals_use_lead_vocal_gain(self):
+        """Legacy vocal stem sets render with current lead_vocals plans."""
+        sections = [
+            Section(
+                label="main", start_beat=0, end_beat=8,
+                stem_gains={
+                    "lead_vocals": 1.0,
+                    "backing_vocals": 0.0,
+                    "drums": 0.0,
+                    "bass": 0.0,
+                    "guitar": 0.0,
+                    "piano": 0.0,
+                    "other": 0.0,
+                },
+                transition_in="cut", transition_beats=0,
+            ),
+        ]
+        total = beats_to_samples(8, BEAT_FRAMES, SR, HOP_LENGTH)
+        vocal_stems = {"vocals": np.ones((total, 2), dtype=np.float32)}
+        instrumental_stems: dict[str, np.ndarray] = {}
+
+        vocal_bus, inst_bus = render_arrangement(
+            sections, vocal_stems, instrumental_stems, BEAT_FRAMES, SR, HOP_LENGTH,
+        )
+
+        assert np.mean(vocal_bus) == pytest.approx(1.0)
+        assert np.allclose(inst_bus, 0.0)
+
     def test_missing_stems_handled(self):
         """Missing stems (None in dict or absent key) are handled gracefully."""
         sections = _make_sections(100)
@@ -362,6 +390,18 @@ class TestBeatsToSamplesBpmFallback:
         result_without = beats_to_samples(210, beat_frames_110, SR, HOP_LENGTH)
         # Within tolerance, so both should be equal
         assert result_with == result_without
+
+    def test_degenerate_grid_uses_target_bpm(self):
+        """Fewer than 2 beat frames should use target BPM when available."""
+        single = np.array([0])
+        result = beats_to_samples(5, single, SR, HOP_LENGTH, target_bpm=100.0)
+        assert result == int(5 * 60.0 / 100.0 * SR)
+
+    def test_degenerate_grid_without_target_bpm_keeps_legacy_60_bpm(self):
+        """Fewer than 2 beat frames falls back to beat_index * sr."""
+        single = np.array([0])
+        result = beats_to_samples(5, single, SR, HOP_LENGTH)
+        assert result == 5 * SR
 
 
 # ---------------------------------------------------------------------------

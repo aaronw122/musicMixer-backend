@@ -379,6 +379,33 @@ class TestComputeAdaptiveCorrections:
         assert len(vocal_corr) == 0
         assert len(inst_corr) == 0
 
+    def test_bass_fundamental_is_not_cut_as_anomaly(self):
+        """Expected bass low-end shape should not trigger permanent fundamental cuts."""
+        energies = np.zeros(len(ISO_BAND_CENTERS), dtype=np.float64)
+        bass_idx = _nearest_band_index(100.0)
+        energies[bass_idx] = ANOMALY_THRESHOLD_DB + 4.0
+
+        bass_profile = SpectralProfile(
+            stem_type="bass",
+            band_centers_hz=ISO_BAND_CENTERS.copy(),
+            band_energies_db=energies.copy(),
+            peak_frequencies_hz=np.array([100.0]),
+            peak_magnitudes_db=np.array([energies[bass_idx]]),
+        )
+        other_profile = SpectralProfile(
+            stem_type="other",
+            band_centers_hz=ISO_BAND_CENTERS.copy(),
+            band_energies_db=energies.copy(),
+            peak_frequencies_hz=np.array([100.0]),
+            peak_magnitudes_db=np.array([energies[bass_idx]]),
+        )
+
+        _, bass_corr = compute_adaptive_corrections([], [], [bass_profile])
+        _, other_corr = compute_adaptive_corrections([], [], [other_profile])
+
+        assert "bass" not in bass_corr
+        assert "other" in other_corr
+
 
 # ---------------------------------------------------------------------------
 # Performance
