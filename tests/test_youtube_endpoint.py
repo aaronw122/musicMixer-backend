@@ -720,7 +720,20 @@ class TestYouTubePipelineWrapper:
             events.append(session.events.get_nowait())
         error_events = [e for e in events if e.get("step") == "error"]
         assert len(error_events) >= 1
-        assert "Download failed" in error_events[-1]["detail"]
+        assert error_events[-1]["detail"] == "Something went wrong while creating your remix"
+
+    def test_rejects_prompt_over_length_limit(self, client):
+        """YouTube remix prompts over the route-level cap should return 422."""
+        response = client.post(
+            "/api/remix/youtube",
+            json={
+                "url_a": VALID_YT_URL_A,
+                "url_b": VALID_YT_URL_B,
+                "prompt": "x" * 2001,
+            },
+        )
+
+        assert response.status_code == 422
 
 
 class TestAnalyzeAndCheckpointStage:

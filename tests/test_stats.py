@@ -1,6 +1,7 @@
 """Tests for the /api/stats endpoint."""
 
 import json
+import inspect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -107,6 +108,12 @@ class TestStatsEndpointEmpty:
         assert data["most_used_songs"] == []
         assert data["red_flags"] == []
         assert data["cache_hit_rate"]["total_remixes"] == 0
+
+    def test_route_handler_is_sync(self):
+        """The route should run log parsing in Starlette's threadpool."""
+        from musicmixer.api.stats import get_stats
+
+        assert not inspect.iscoroutinefunction(get_stats)
 
     def test_empty_log_file(self, client, tmp_path):
         """Should return zeroed stats when the log file is empty."""

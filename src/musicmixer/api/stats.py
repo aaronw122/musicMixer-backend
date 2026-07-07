@@ -198,7 +198,7 @@ def _cache_hit_rate(completions: list[dict]) -> dict:
 
 
 @router.get("/stats")
-async def get_stats(
+def get_stats(
     days: int | None = Query(
         default=None,
         ge=1,

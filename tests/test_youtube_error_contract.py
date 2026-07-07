@@ -17,6 +17,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 from musicmixer.api.remix import (
+    _GENERIC_REMIX_ERROR_DETAIL,
     _build_error_event,
     _tag_failed_song,
     _youtube_pipeline_wrapper,
@@ -38,17 +39,19 @@ class TestBuildErrorEvent:
     def test_base_fields_always_present(self) -> None:
         event = _build_error_event(RuntimeError("kaboom"))
         assert event["step"] == "error"
-        assert event["detail"] == "kaboom"
+        assert event["detail"] == _GENERIC_REMIX_ERROR_DETAIL
         assert event["progress"] == 0
 
     def test_non_youtube_error_omits_error_class(self) -> None:
         event = _build_error_event(RuntimeError("kaboom"))
+        assert event["detail"] == _GENERIC_REMIX_ERROR_DETAIL
         assert "error_class" not in event
         assert "failed_song" not in event
 
     def test_youtube_transient_error_class_emitted(self) -> None:
         err = YouTubeDownloadError("403", error_class=ERROR_CLASS_TRANSIENT)
         event = _build_error_event(err)
+        assert event["detail"] == "403"
         assert event["error_class"] == ERROR_CLASS_TRANSIENT
 
     def test_youtube_permanent_error_class_emitted(self) -> None:
