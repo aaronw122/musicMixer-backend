@@ -1039,10 +1039,10 @@ def _validate_intent_plan(
             sections[i].end_beat = sections[i + 1].start_beat
             clamped_fields.append(f"overlap_section_{i}")
 
-    # 3. No gaps > 1 beat
+    # 3. No gaps
     for i in range(len(sections) - 1):
         gap = sections[i + 1].start_beat - sections[i].end_beat
-        if gap > 1:
+        if gap > 0:
             sections[i].end_beat = sections[i + 1].start_beat
             clamped_fields.append(f"gap_section_{i}")
 
@@ -1399,7 +1399,12 @@ def interpret_prompt(
             if partial_block is not None:
                 try:
                     partial_plan = _parse_intent_plan(partial_block.input)
-                    partial_plan = _validate_intent_plan(partial_plan, song_a_meta, song_b_meta)
+                    partial_plan = _validate_intent_plan(
+                        partial_plan,
+                        song_a_meta,
+                        song_b_meta,
+                        material_duration=material_duration,
+                    )
                     logger.info(
                         "Salvaged partial plan from truncated response: %d sections",
                         len(partial_plan.sections),
@@ -1668,8 +1673,18 @@ def default_arrangement(total_beats: int) -> list[Section]:
         # main ends earlier to make room; breakdown and drop each get 1/8
         five_eighth = snap_to_phrase(total_beats * 5 // 8)
         six_eighth = snap_to_phrase(total_beats * 6 // 8)
-        drop_start = six_eighth
         drop_end = snap_to_phrase(total_beats * 7 // 8)
+
+        boundaries = [eighth, quarter, five_eighth, six_eighth, drop_end]
+        for idx in range(1, len(boundaries)):
+            if boundaries[idx] - boundaries[idx - 1] < MIN_SECTION_BEATS:
+                boundaries[idx] = boundaries[idx - 1] + MIN_SECTION_BEATS
+        if boundaries[-1] > total_beats - MIN_SECTION_BEATS:
+            boundaries[-1] = total_beats - MIN_SECTION_BEATS
+        for idx in range(len(boundaries) - 2, -1, -1):
+            if boundaries[idx + 1] - boundaries[idx] < MIN_SECTION_BEATS:
+                boundaries[idx] = max(0, boundaries[idx + 1] - MIN_SECTION_BEATS)
+        eighth, quarter, five_eighth, drop_start, drop_end = boundaries
         outro_start = drop_end
 
         # Validate drop section has minimum beats
