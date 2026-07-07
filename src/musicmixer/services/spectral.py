@@ -4,9 +4,9 @@ Computes 1/3-octave spectral profiles per stem, detects cross-stem frequency
 conflicts, and generates adaptive correction parameters (frequency, gain, Q).
 
 All corrections are cuts only (no boosts).  Per-stem anomaly threshold is
-+6 dB relative deviation from a flat reference.  Cross-stem conflict cuts are
-capped at -3 dB; per-stem anomaly cuts are capped at -4 dB.  Maximum 4
-adaptive filters per stem.
++6 dB relative deviation from a stem-shaped reference.  Cross-stem conflict
+cuts are capped at -3 dB; per-stem anomaly cuts are capped at -4 dB.
+Maximum 4 adaptive filters per stem.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ _BAND_LOWER = ISO_BAND_CENTERS / _OCTAVE_SIXTH
 _BAND_UPPER = ISO_BAND_CENTERS * _OCTAVE_SIXTH
 
 # Thresholds
-ANOMALY_THRESHOLD_DB = 6.0    # per-stem: deviation from flat reference to trigger cut
+ANOMALY_THRESHOLD_DB = 6.0    # per-stem: deviation from shaped reference to trigger cut
 MAX_PER_STEM_CUT_DB = -4.0    # most aggressive per-stem cut
 MAX_CROSS_STEM_CUT_DB = -3.0  # most aggressive cross-stem cut
 MAX_CORRECTIONS_PER_STEM = 4  # cap on adaptive filters per stem
@@ -315,12 +315,14 @@ def _anomaly_corrections(
 ) -> list[tuple[float, float, float]]:
     """Generate per-stem anomaly corrections for bands exceeding threshold.
 
-    Reference envelope is flat (0 dB) for v1, so deviation = band_energy.
+    Reference envelope follows broad expected stem shape, so a bass
+    fundamental is not treated as an anomaly just because bass is narrowband.
     """
     corrections: list[tuple[float, float, float]] = []
+    reference_db = _stem_anomaly_reference_db(profile.stem_type)
 
     for i, energy_db in enumerate(profile.band_energies_db):
-        deviation = energy_db  # flat reference: deviation = absolute value
+        deviation = energy_db - reference_db[i]
         if deviation <= ANOMALY_THRESHOLD_DB:
             continue
 
@@ -333,6 +335,31 @@ def _anomaly_corrections(
         corrections.append((freq, gain_db, q))
 
     return corrections
+
+
+def _stem_anomaly_reference_db(stem_type: str) -> np.ndarray:
+    """Expected broad spectral contour for per-stem anomaly detection."""
+    reference = np.zeros(len(ISO_BAND_CENTERS), dtype=np.float64)
+    if stem_type != "bass":
+        return reference
+
+    bass_shape = {
+        20.0: 4.0,
+        31.5: 8.0,
+        40.0: 10.0,
+        50.0: 12.0,
+        63.0: 12.0,
+        80.0: 12.0,
+        100.0: 12.0,
+        125.0: 10.0,
+        160.0: 8.0,
+        200.0: 6.0,
+        250.0: 3.0,
+    }
+    for freq, db in bass_shape.items():
+        idx = int(np.argmin(np.abs(ISO_BAND_CENTERS - freq)))
+        reference[idx] = db
+    return reference
 
 
 def _cap_corrections(
