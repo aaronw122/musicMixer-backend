@@ -321,6 +321,19 @@ class TestSameModeDistances:
         assert abs(plan.shift_a) == 2
         assert abs(plan.shift_b) == 4
 
+    def test_tritone_shifts_converge_to_same_pitch_class(self):
+        plan = compute_key_plan(
+            "C", "major", 0.90, False,
+            "F#", "major", 0.90, False,
+        )
+
+        shifted_a = (note_to_semitone("C") + int(plan.shift_a)) % 12
+        shifted_b = (note_to_semitone("F#") + int(plan.shift_b)) % 12
+
+        assert plan.action == "warning"
+        assert shifted_a == shifted_b
+        assert note_to_semitone(plan.target_key) == shifted_a
+
     def test_shifts_toward_each_other(self):
         """Songs should shift TOWARD each other, not away."""
         # C(0) vs E(4): distance 4

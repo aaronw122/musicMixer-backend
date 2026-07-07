@@ -252,14 +252,13 @@ def _build_plan(
     # Normalize direction to unit sign
     b_sign = 1 if b_direction > 0 else -1
 
-    # A (vocal) shifts TOWARD B's position (opposite direction)
-    a_direction = signed_shift(effective_semi_a, effective_semi_b)
-    a_sign = 1 if a_direction > 0 else -1
+    # A (vocal) shifts in the opposite direction so both positions converge.
+    a_sign = -b_sign
 
     shift_b = b_sign * inst_mag
     shift_a = a_sign * vocal_mag
 
-    # Compute target key: where B ends up after shifting
+    # Compute target key from the converged position.
     target_semi = (effective_semi_b + shift_b) % 12
     target_note = _SEMITONE_TO_NOTE[target_semi]
 
