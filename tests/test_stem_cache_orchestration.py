@@ -14,6 +14,7 @@ all keys use ``test_``-prefixed video IDs and are cleaned up after each test.
 import struct
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -25,11 +26,12 @@ from musicmixer.services.song_cache import (
     ROLE_VOCAL,
     STEM_ERROR_TRANSIENT,
     StemCacheCoordinator,
-    StemLease,
+    StemCacheState,
     StemSeparationError,
     _get_redis,
     _stem_lock_key,
     _stems_dir_for,
+    _wait_for_owner,
     get_or_create_cached_stems,
 )
 
@@ -43,6 +45,8 @@ def clean_redis():
     """Fresh Redis client; clean up test keys after each test."""
     song_cache._redis_client = None
     r = _get_redis()
+    for key in r.scan_iter("song:test_*"):
+        r.delete(key)
     yield r
     for key in r.scan_iter("song:test_*"):
         r.delete(key)
@@ -59,12 +63,21 @@ def cache_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def fast_coord(monkeypatch):
+def fast_coord():
     """Short lease/renew/poll so renewal, expiry, and waiting run quickly."""
-    monkeypatch.setattr(settings, "stem_lock_lease_seconds", 2)
-    monkeypatch.setattr(settings, "stem_lock_renew_interval_seconds", 1)
-    monkeypatch.setattr(settings, "stem_wait_poll_seconds", 0)
-    monkeypatch.setattr(settings, "stem_wait_timeout_seconds", 30)
+    old_values = {
+        "stem_lock_lease_seconds": settings.stem_lock_lease_seconds,
+        "stem_lock_renew_interval_seconds": settings.stem_lock_renew_interval_seconds,
+        "stem_wait_poll_seconds": settings.stem_wait_poll_seconds,
+        "stem_wait_timeout_seconds": settings.stem_wait_timeout_seconds,
+    }
+    settings.stem_lock_lease_seconds = 5
+    settings.stem_lock_renew_interval_seconds = 1
+    settings.stem_wait_poll_seconds = 0
+    settings.stem_wait_timeout_seconds = 30
+    yield
+    for name, value in old_values.items():
+        setattr(settings, name, value)
 
 
 _VOCAL_STEMS = ("lead_vocals", "backing_vocals", "instrumental")
@@ -163,6 +176,67 @@ class TestOwnerAndReadyHit:
         assert state is not None and state.status == "ready"
         # Lock released by the owner's finally.
         assert clean_redis.get(_stem_lock_key("test_owner", ROLE_VOCAL)) is None
+
+    def test_ready_with_missing_disk_invalidates_and_reseparates(self, clean_redis, cache_dir, fast_coord, tmp_path):
+        coord = StemCacheCoordinator()
+        missing = cache_dir / "test_ready_missing" / "vocal"
+        coord._write_state(
+            "test_ready_missing",
+            ROLE_VOCAL,
+            StemCacheState(
+                status="ready",
+                path=str(missing),
+                manifest=tuple(sorted(f"{s}.wav" for s in _VOCAL_STEMS)),
+                separator_version=settings.stem_separator_version,
+            ),
+        )
+
+        sep = _Separator()
+        result = get_or_create_cached_stems(
+            video_id="test_ready_missing",
+            role=ROLE_VOCAL,
+            audio_path=tmp_path / "a.mp3",
+            session_output_dir=tmp_path / "session",
+            separate_fn=sep,
+            check_cancelled=_noop_cancel,
+        )
+
+        assert sep.calls == 1
+        assert set(result) == set(_VOCAL_STEMS)
+        state = coord.get_state("test_ready_missing", ROLE_VOCAL)
+        assert state is not None and state.status == "ready"
+
+    def test_ready_with_old_separator_version_invalidates_and_reseparates(self, clean_redis, cache_dir, fast_coord, tmp_path):
+        coord = StemCacheCoordinator()
+        ready_dir = cache_dir / "test_ready_version" / "vocal"
+        for stem in _VOCAL_STEMS:
+            _write_wav(ready_dir / f"{stem}.wav")
+        coord._write_state(
+            "test_ready_version",
+            ROLE_VOCAL,
+            StemCacheState(
+                status="ready",
+                path=str(ready_dir),
+                manifest=tuple(sorted(f"{s}.wav" for s in _VOCAL_STEMS)),
+                separator_version="old-version",
+            ),
+        )
+
+        sep = _Separator()
+        result = get_or_create_cached_stems(
+            video_id="test_ready_version",
+            role=ROLE_VOCAL,
+            audio_path=tmp_path / "a.mp3",
+            session_output_dir=tmp_path / "session",
+            separate_fn=sep,
+            check_cancelled=_noop_cancel,
+        )
+
+        assert sep.calls == 1
+        assert set(result) == set(_VOCAL_STEMS)
+        state = coord.get_state("test_ready_version", ROLE_VOCAL)
+        assert state is not None
+        assert state.separator_version == settings.stem_separator_version
 
     def test_second_request_is_ready_hit_no_separation(self, clean_redis, cache_dir, fast_coord, tmp_path):
         sep = _Separator()
@@ -281,9 +355,9 @@ class TestLeaseRenewal:
         t.start()
         sep.started.wait(timeout=5)
 
-        # Block for well past the 2s lease; renewal (1s interval) must keep it alive.
+        # Block past the lease; renewal must keep it alive.
         lease_secs = settings.stem_lock_lease_seconds
-        time.sleep(lease_secs * 2 + 0.5)
+        time.sleep(lease_secs + 1)
         coord = StemCacheCoordinator()
         # A would-be taker cannot acquire because the lock is still held (renewed).
         assert coord.acquire("test_renew", ROLE_VOCAL) is None
@@ -369,7 +443,8 @@ class TestLostLeaseCannotPublish:
 # ---------------------------------------------------------------------------
 
 class TestWaiterCancellation:
-    def test_cancelled_waiter_stops_without_disturbing_owner(self, clean_redis, cache_dir, fast_coord, tmp_path):
+    def test_cancelled_waiter_stops_without_disturbing_owner(self, clean_redis, cache_dir, fast_coord, monkeypatch, tmp_path):
+        monkeypatch.setattr(settings, "stem_wait_poll_seconds", 0.01)
         coord = StemCacheCoordinator()
         # An owner is mid-flight: hold a real lease (processing) that we keep alive.
         owner_lease = coord.acquire("test_cancel", ROLE_VOCAL)
@@ -418,6 +493,90 @@ class TestWaiterCancellation:
         assert clean_redis.get(_stem_lock_key("test_cancel", ROLE_VOCAL)) == owner_lease.owner_token
         state = coord.get_state("test_cancel", ROLE_VOCAL)
         assert state is not None and state.status == "processing"
+
+
+class TestOwnerCancellation:
+    def test_owner_cancel_does_not_mark_failed(self, clean_redis, cache_dir, fast_coord, tmp_path):
+        import asyncio
+
+        checks = 0
+
+        def check_cancelled():
+            nonlocal checks
+            checks += 1
+            if checks > 1:
+                raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
+            get_or_create_cached_stems(
+                video_id="test_owner_cancel",
+                role=ROLE_VOCAL,
+                audio_path=tmp_path / "a.mp3",
+                session_output_dir=tmp_path / "session",
+                separate_fn=_Separator(),
+                check_cancelled=check_cancelled,
+            )
+
+        state = StemCacheCoordinator().get_state("test_owner_cancel", ROLE_VOCAL)
+        assert state is not None
+        assert state.status == "processing"
+        assert clean_redis.get(_stem_lock_key("test_owner_cancel", ROLE_VOCAL)) is None
+
+
+class TestOwnerErrorHandling:
+    def test_owns_lock_error_does_not_mask_original_failure(self, clean_redis, cache_dir, fast_coord, monkeypatch, tmp_path):
+        import redis as redis_lib
+
+        def fail_separator(audio_path, output_dir, progress_callback=None):
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            _write_wav(output_dir / "lead_vocals.wav")
+            raise RuntimeError("separator exploded")
+
+        monkeypatch.setattr(
+            song_cache.StemCacheCoordinator,
+            "_owns_lock",
+            lambda self, lease: (_ for _ in ()).throw(redis_lib.TimeoutError("redis blip")),
+        )
+
+        with pytest.raises(StemSeparationError, match="separator exploded"):
+            get_or_create_cached_stems(
+                video_id="test_owns_lock_blip",
+                role=ROLE_VOCAL,
+                audio_path=tmp_path / "a.mp3",
+                session_output_dir=tmp_path / "session",
+                separate_fn=fail_separator,
+                check_cancelled=_noop_cancel,
+            )
+
+        assert not list((cache_dir / "test_owns_lock_blip").glob(".vocal.staging.*"))
+
+
+class TestFailedRetryAfterWaiter:
+    def test_elapsed_retry_after_returns_to_compete(self, clean_redis, cache_dir, fast_coord, tmp_path):
+        from datetime import timedelta
+
+        coord = StemCacheCoordinator()
+        past = datetime.now(timezone.utc) - timedelta(seconds=1)
+        coord._write_state(
+            "test_wait_retry_elapsed",
+            ROLE_VOCAL,
+            StemCacheState(
+                status="failed",
+                retry_after=past.isoformat(),
+                error_code=STEM_ERROR_TRANSIENT,
+            ),
+        )
+
+        waited = _wait_for_owner(
+            coord,
+            "test_wait_retry_elapsed",
+            ROLE_VOCAL,
+            tmp_path / "waiter",
+            _noop_cancel,
+        )
+
+        assert waited is None
 
 
 # ---------------------------------------------------------------------------

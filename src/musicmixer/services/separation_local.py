@@ -7,7 +7,7 @@ import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
-_STEM_TOKEN_RE = re.compile(r"[_\-.\s]+")
+_STEM_TOKEN_RE = re.compile(r"[_\-.\s()]+")
 
 
 def _tokenize_stem_filename(filename_stem: str) -> list[str]:
@@ -87,19 +87,31 @@ def separate_vocal_song_local(
 
     stems = separate_stems_local(audio_path, output_dir, progress_callback)
 
-    # Map htdemucs_ft output to vocal-song stem names
+    # Map htdemucs_ft output to vocal-song stem names.
     result: dict[str, Path | None] = {
         "lead_vocals": stems.get("vocals"),
         "backing_vocals": None,  # htdemucs_ft cannot split lead/backing
         "instrumental": stems.get("other"),
     }
 
-    # Rename vocals.wav -> lead_vocals.wav if it exists
     vocals_path = stems.get("vocals")
     if vocals_path and vocals_path.exists():
         lead_path = vocals_path.parent / "lead_vocals.wav"
+        lead_path.unlink(missing_ok=True)
         vocals_path.rename(lead_path)
         result["lead_vocals"] = lead_path
+
+    other_path = stems.get("other")
+    if other_path and other_path.exists():
+        instrumental_path = other_path.parent / "instrumental.wav"
+        instrumental_path.unlink(missing_ok=True)
+        other_path.rename(instrumental_path)
+        result["instrumental"] = instrumental_path
+
+    for stem_name in ("drums", "bass", "guitar", "piano"):
+        stem_path = stems.get(stem_name)
+        if stem_path is not None:
+            stem_path.unlink(missing_ok=True)
 
     logger.info("Local vocal separation complete (backing_vocals unavailable)")
     return result

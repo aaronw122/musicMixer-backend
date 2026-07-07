@@ -6,7 +6,7 @@ import modal
 
 logger = logging.getLogger(__name__)
 
-_STEM_TOKEN_RE = re.compile(r"[_\-.\s()]+")  # includes parens from audio-separator output
+_STEM_TOKEN_RE = re.compile(r"[_\-.\s()]+")
 
 
 def _tokenize_stem_filename(filename_stem: str) -> list[str]:

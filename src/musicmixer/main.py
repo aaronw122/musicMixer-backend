@@ -13,6 +13,7 @@ from musicmixer.api import health, remix, shelf, stats, thumbnail
 from musicmixer.config import settings
 from musicmixer.logging_config import setup_logging
 from musicmixer.services.cleanup import cleanup_expired_sessions
+from musicmixer.services.song_cache import sweep_orphaned_staging_dirs
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ async def lifespan(app: FastAPI):
         app.state.sessions,
         app.state.sessions_lock,
     )
+    await asyncio.to_thread(sweep_orphaned_staging_dirs)
 
     # Background task: run cleanup every 30 minutes
     async def _periodic_cleanup() -> None:
