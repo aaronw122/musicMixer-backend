@@ -29,6 +29,38 @@ def mock_twilio_client():
         yield client_instance
 
 
+class TestMaskPhone:
+    def test_redacts_full_number_keeps_last_four(self):
+        from musicmixer.services.sms import _mask_phone
+
+        masked = _mask_phone("+15551234567")
+
+        assert "5551234" not in masked
+        assert masked != "+15551234567"
+        assert masked.endswith("4567")
+        assert masked.startswith("+1")
+
+    def test_masks_middle_digits(self):
+        from musicmixer.services.sms import _mask_phone
+
+        assert _mask_phone("+15551234567") == "+1******4567"
+
+    @pytest.mark.parametrize("value", [None, "", "123", 15551234567])
+    def test_short_or_invalid_input_fully_masked(self, value):
+        from musicmixer.services.sms import _mask_phone
+
+        assert _mask_phone(value) == "***"
+
+    def test_without_plus_prefix(self):
+        from musicmixer.services.sms import _mask_phone
+
+        masked = _mask_phone("5551234567")
+
+        assert not masked.startswith("+")
+        assert masked.endswith("4567")
+        assert "5551234" not in masked
+
+
 class TestSendRemixReady:
     def test_sends_correct_message(self, sms_settings, mock_twilio_client):
         """Should send SMS with correct body and recipient."""
@@ -52,6 +84,16 @@ class TestSendRemixReady:
 
         assert result is False
         mock_twilio_client.messages.create.assert_not_called()
+
+    def test_log_masks_phone_number(self, sms_settings, mock_twilio_client, caplog):
+        """Success log should contain the masked number, never the raw one."""
+        from musicmixer.services.sms import send_remix_ready
+
+        with caplog.at_level(logging.INFO):
+            send_remix_ready("+15551234567", "abc-123")
+
+        assert "+15551234567" not in caplog.text
+        assert "+1******4567" in caplog.text
 
     def test_catches_twilio_exception(self, sms_settings, mock_twilio_client, caplog):
         """Should catch TwilioRestException and return False."""
