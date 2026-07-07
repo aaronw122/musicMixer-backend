@@ -42,13 +42,22 @@ def _ffprobe_fail(rc: int = 1) -> MagicMock:
     return result
 
 
-def _silence_detect_result(silence_end: float | None = None) -> MagicMock:
+def _silence_detect_result(
+    silence_end: float | None = None,
+    silence_start: float | None = 0.0,
+) -> MagicMock:
     """Return a CompletedProcess mock simulating ffmpeg silencedetect."""
     result = MagicMock(spec=subprocess.CompletedProcess)
     result.returncode = 0
     result.stdout = ""
     if silence_end is not None:
+        start_line = (
+            f"[silencedetect @ 0x1234] silence_start: {silence_start}\n"
+            if silence_start is not None
+            else ""
+        )
         result.stderr = (
+            start_line +
             f"[silencedetect @ 0x1234] silence_end: {silence_end} "
             f"| silence_duration: {silence_end}\n"
         )
@@ -300,6 +309,25 @@ class TestLeadingSilenceSkipped:
 
         result = pre_trim_for_processing(audio, max_duration_seconds=210.0)
 
+        trim_command = _trim_command(mock_run)
+        assert _command_option(trim_command, "-ss") == "0.0"
+
+    @patch("shutil.move")
+    @patch("musicmixer.services.processor.subprocess.run")
+    def test_mid_song_silence_does_not_shift_trim_offset(
+        self, mock_run: MagicMock, mock_move: MagicMock, tmp_path: Path
+    ) -> None:
+        audio = _make_dummy_file(tmp_path)
+
+        mock_run.side_effect = [
+            _ffprobe_ok(duration=300.0),
+            _silence_detect_result(silence_start=120.0, silence_end=123.5),
+            _trim_ok(),
+        ]
+
+        result = pre_trim_for_processing(audio, max_duration_seconds=210.0)
+
+        assert result == audio
         trim_command = _trim_command(mock_run)
         assert _command_option(trim_command, "-ss") == "0.0"
 
