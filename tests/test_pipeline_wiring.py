@@ -120,6 +120,7 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
         patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate),
         patch("musicmixer.services.separation.separate_vocal_song", side_effect=mock_separate_vocal),
     ):
+        mock_settings.stem_wait_timeout_seconds = 1200
         mock_settings.data_dir = tmp_path
 
         # Set sensible defaults for all settings the pipeline reads.
@@ -282,6 +283,7 @@ class TestPipelineHandlesSeparationError:
             patch("musicmixer.services.separation.separate_stems", side_effect=mock_separate_raises),
             patch("musicmixer.services.separation.separate_vocal_song", side_effect=mock_separate_raises),
         ):
+            mock_settings.stem_wait_timeout_seconds = 1200
             mock_settings.data_dir = tmp_path
 
             with pytest.raises(RuntimeError, match="GPU unavailable"):
@@ -852,6 +854,7 @@ class TestMediumCachePath:
             patch("musicmixer.services.separation.separate_vocal_song", side_effect=self._mock_separate(pipeline_tmp)),
             patch("musicmixer.services.analysis.analyze_audio_full", side_effect=_tracking_analyze),
         ):
+            mock_settings.stem_wait_timeout_seconds = 1200
             mock_settings.lyrics_lookup_enabled = False
             mock_settings.section_detection_backend = "heuristic"
 
@@ -901,6 +904,7 @@ class TestMediumCachePath:
             patch("musicmixer.services.separation.separate_vocal_song", side_effect=self._mock_separate(pipeline_tmp)),
             patch("musicmixer.services.analysis.analyze_audio_full", side_effect=_tracking_analyze),
         ):
+            mock_settings.stem_wait_timeout_seconds = 1200
             mock_settings.lyrics_lookup_enabled = False
             mock_settings.section_detection_backend = "heuristic"
 
@@ -949,6 +953,7 @@ class TestMediumCachePath:
             ),
             patch("musicmixer.services.analysis.analyze_audio_full", side_effect=AssertionError),
         ):
+            mock_settings.stem_wait_timeout_seconds = 1200
             mock_settings.lyrics_lookup_enabled = False
             mock_settings.section_detection_backend = "heuristic"
 
@@ -995,6 +1000,7 @@ class TestMediumCachePath:
             patch("musicmixer.services.separation.separate_vocal_song", side_effect=self._mock_separate(pipeline_tmp)),
             patch("musicmixer.services.analysis.analyze_audio_full", side_effect=AssertionError),
         ):
+            mock_settings.stem_wait_timeout_seconds = 1200
             mock_settings.lyrics_lookup_enabled = True
             mock_settings.section_detection_backend = "heuristic"
 
