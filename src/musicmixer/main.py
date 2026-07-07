@@ -114,7 +114,14 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
-    logger.info("musicMixer backend shutting down")
+    # Guard shutdown logging: under pytest's fd capture (and other harnesses),
+    # the log stream's file descriptor can be closed before lifespan teardown
+    # runs, making logging raise OSError (EBADF). A shutdown log must never be
+    # able to crash the process, so swallow stream errors here.
+    try:
+        logger.info("musicMixer backend shutting down")
+    except (OSError, ValueError):
+        pass
     app.state.executor.shutdown(wait=False)
     app.state.sse_executor.shutdown(wait=False)
 
