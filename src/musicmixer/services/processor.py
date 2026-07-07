@@ -202,8 +202,18 @@ def _detect_leading_silence_end(
 
 
 def _first_silence_end(ffmpeg_stderr: str, max_offset_seconds: float) -> float:
+    leading_silence = False
     for line in ffmpeg_stderr.splitlines():
-        if "silence_end" not in line:
+        if "silence_start" in line:
+            for part in line.split():
+                try:
+                    silence_start_seconds = float(part)
+                except ValueError:
+                    continue
+                leading_silence = silence_start_seconds <= 0.05
+                break
+
+        if "silence_end" not in line or not leading_silence:
             continue
 
         for part in line.split():

@@ -367,7 +367,7 @@ def _step_separate_and_analyze(
                                  "Pulling apart every instrument...", interval=5)
         try:
             completed_sep = 0
-            for future in as_completed(sep_futures, timeout=900):
+            for future in as_completed(sep_futures, timeout=settings.stem_wait_timeout_seconds):
                 completed_sep += 1
                 ticker.set()
                 if completed_sep == 1:
@@ -547,11 +547,11 @@ def _run_pulsemap_analysis(
 
     # --- Parallel lightweight tasks (polyphony + drums) ---
     pulsemap_workers = 0
-    if settings.pulsemap_polyphony_enabled and vocal_stem_a.exists():
+    if settings.pulsemap_polyphony_enabled and meta_a.polyphony_info is None and vocal_stem_a.exists():
         pulsemap_workers += 1
-    if settings.pulsemap_drums_enabled and drum_stem_b.exists():
+    if settings.pulsemap_drums_enabled and meta_b.drum_pattern is None and drum_stem_b.exists():
         pulsemap_workers += 1
-    if settings.pulsemap_word_alignment_enabled and vocal_stem_a.exists():
+    if settings.pulsemap_word_alignment_enabled and meta_a.word_alignment is None and vocal_stem_a.exists():
         pulsemap_workers += 1
 
     if pulsemap_workers == 0 and task_count == 0:
@@ -563,13 +563,13 @@ def _run_pulsemap_analysis(
 
     if pulsemap_workers > 0:
         with ThreadPoolExecutor(max_workers=pulsemap_workers) as pool:
-            if settings.pulsemap_polyphony_enabled and vocal_stem_a.exists():
+            if settings.pulsemap_polyphony_enabled and meta_a.polyphony_info is None and vocal_stem_a.exists():
                 pulsemap_futures["polyphony"] = pool.submit(detect_polyphony, vocal_stem_a)
 
-            if settings.pulsemap_drums_enabled and drum_stem_b.exists():
+            if settings.pulsemap_drums_enabled and meta_b.drum_pattern is None and drum_stem_b.exists():
                 pulsemap_futures["drums"] = pool.submit(transcribe_drum_pattern, drum_stem_b)
 
-            if settings.pulsemap_word_alignment_enabled and vocal_stem_a.exists():
+            if settings.pulsemap_word_alignment_enabled and meta_a.word_alignment is None and vocal_stem_a.exists():
                 pulsemap_futures["word_align"] = pool.submit(
                     align_words, vocal_stem_a, lyrics_a_data,
                 )
@@ -817,7 +817,6 @@ def _step_interpret_prompt(
     lyrics_a_data, lyrics_b_data,
     vocal_stem_lufs: dict[str, float],
     inst_stem_lufs: dict[str, float],
-    force_vocal_source: str | None,
     event_queue, session,
 ) -> tuple:
     """Step 4: Interpret prompt via LLM, map gains.
@@ -855,10 +854,6 @@ def _step_interpret_prompt(
         )
     else:
         plan = intent_or_plan
-
-    if force_vocal_source is not None:
-        plan.vocal_source = force_vocal_source
-        logger.info("Session %s: Forced vocal_source=%s", session_id, force_vocal_source)
 
     if plan.used_fallback:
         logger.warning(
@@ -1168,6 +1163,7 @@ def _step_compute_tempo_and_key_plan(
     (fixed convention).
 
     Returns (target_bpm, need_vocal_rb, need_inst_rb,
+             stretch_vocals, stretch_instrumentals,
              vocal_semitones, inst_semitones).
     """
     from musicmixer.services.processor import compute_tempo_plan
@@ -1224,7 +1220,15 @@ def _step_compute_tempo_and_key_plan(
     need_vocal_rb = stretch_vocals or vocal_semitones != 0
     need_inst_rb = stretch_instrumentals or inst_semitones != 0
 
-    return target_bpm, need_vocal_rb, need_inst_rb, vocal_semitones, inst_semitones
+    return (
+        target_bpm,
+        need_vocal_rb,
+        need_inst_rb,
+        stretch_vocals,
+        stretch_instrumentals,
+        vocal_semitones,
+        inst_semitones,
+    )
 
 
 def _step_tempo_match(
@@ -1235,6 +1239,8 @@ def _step_tempo_match(
     target_bpm: float,
     need_vocal_rb: bool,
     need_inst_rb: bool,
+    stretch_vocals: bool,
+    stretch_instrumentals: bool,
     vocal_semitones: float,
     inst_semitones: float,
     sr: int,
@@ -1262,14 +1268,16 @@ def _step_tempo_match(
     with ThreadPoolExecutor(max_workers=6) as rb_executor:
         futures = {}
         if need_vocal_rb:
+            vocal_target_bpm = target_bpm if stretch_vocals else vocal_meta.bpm
             # Stretch all vocal stems (lead_vocals, backing_vocals, or legacy "vocals").
             for voc_stem_name in list(vocal_audio.keys()):
                 futures[("vocal", voc_stem_name)] = rb_executor.submit(
                     rubberband_process, vocal_audio[voc_stem_name], sr,
-                    vocal_meta.bpm, target_bpm,
+                    vocal_meta.bpm, vocal_target_bpm,
                     semitones=vocal_semitones, is_vocal=True,
                 )
         if need_inst_rb:
+            inst_target_bpm = target_bpm if stretch_instrumentals else inst_meta.bpm
             for stem_name in list(inst_audio.keys()):
                 # Drums are exempt from pitch shifting — they're unpitched,
                 # and shifting smears transients.
@@ -1278,7 +1286,7 @@ def _step_tempo_match(
                 stem_semitones = 0 if stem_name == "drums" else inst_semitones
                 futures[("inst", stem_name)] = rb_executor.submit(
                     rubberband_process, inst_audio[stem_name], sr,
-                    inst_meta.bpm, target_bpm,
+                    inst_meta.bpm, inst_target_bpm,
                     semitones=stem_semitones,
                 )
         # Dynamic timeout: 60s base + 2s per second of longest song.
@@ -1331,6 +1339,7 @@ def _step_post_stretch_beat_grid(
     inst_audio: dict,
     inst_meta,
     target_bpm: float,
+    stretch_instrumentals: bool,
     plan,
     sr: int,
 ):
@@ -1344,11 +1353,19 @@ def _step_post_stretch_beat_grid(
 
     beat_grid_source = "scaled_fallback"
 
-    # Scale the instrumental's original beat grid proportionally as fallback
-    beat_scale = inst_meta.bpm / target_bpm if abs(inst_meta.bpm - target_bpm) > 0.001 else 1.0
+    trim_offset_frames = int(round(plan.start_time_instrumental * 22050 / 512))
+    source_beat_frames = inst_meta.beat_frames - trim_offset_frames
+    source_beat_frames = source_beat_frames[source_beat_frames >= 0]
+
+    # Scale the instrumental's original beat grid only if that bus was stretched.
+    beat_scale = (
+        inst_meta.bpm / target_bpm
+        if stretch_instrumentals and abs(inst_meta.bpm - target_bpm) > 0.001
+        else 1.0
+    )
     # beat_frames are at 22050 Hz analysis rate with hop_length=512 (default).
     # Scale for tempo change. The renderer uses these frames directly with hop_length=512.
-    post_stretch_beat_frames = (inst_meta.beat_frames * beat_scale).astype(int)
+    post_stretch_beat_frames = (source_beat_frames * beat_scale).astype(int)
 
     # Try re-detecting beats on the summed stretched instrumental (more accurate)
     try:
@@ -2032,7 +2049,6 @@ def run_remix(
     session: SessionState | None = None,
     source_quality_a: str | None = None,
     source_quality_b: str | None = None,
-    force_vocal_source: str | None = None,
     remix_cache_key: str | None = None,
     metrics: PipelineMetrics | None = None,
 ) -> None:
@@ -2065,7 +2081,6 @@ def run_remix(
         session_id, prompt, meta_a, meta_b,
         analysis.lyrics_a, analysis.lyrics_b,
         analysis.vocal_stem_lufs, analysis.inst_stem_lufs,
-        force_vocal_source,
         event_queue, session,
     )
     _step_times["4 llm_interpret"] = time.monotonic() - _t0
@@ -2139,7 +2154,15 @@ def run_remix(
 
     # === STEPS 8+8.5: Tempo plan + key convergence ===
     _t0 = time.monotonic()
-    target_bpm, need_vocal_rb, need_inst_rb, vocal_semitones, inst_semitones = (
+    (
+        target_bpm,
+        need_vocal_rb,
+        need_inst_rb,
+        stretch_vocals,
+        stretch_instrumentals,
+        vocal_semitones,
+        inst_semitones,
+    ) = (
         _step_compute_tempo_and_key_plan(
             session_id, meta_a, meta_b,
             plan, vocal_type, session,
@@ -2150,9 +2173,16 @@ def run_remix(
     # --- Structured metrics: tempo/key ---
     if metrics is not None:
         metrics.target_bpm = target_bpm
-        # Compute max stretch % across both songs
-        vocal_stretch = abs(meta_a.bpm - target_bpm) / meta_a.bpm * 100 if meta_a.bpm > 0 else 0
-        inst_stretch = abs(meta_b.bpm - target_bpm) / meta_b.bpm * 100 if meta_b.bpm > 0 else 0
+        vocal_stretch = (
+            abs(meta_a.bpm - target_bpm) / meta_a.bpm * 100
+            if stretch_vocals and meta_a.bpm > 0
+            else 0
+        )
+        inst_stretch = (
+            abs(meta_b.bpm - target_bpm) / meta_b.bpm * 100
+            if stretch_instrumentals and meta_b.bpm > 0
+            else 0
+        )
         metrics.stretch_pct = max(vocal_stretch, inst_stretch)
         metrics.vocal_semitones = vocal_semitones
         metrics.inst_semitones = inst_semitones
@@ -2165,6 +2195,7 @@ def run_remix(
         session_id, vocal_audio, inst_audio,
         meta_a, meta_b,
         target_bpm, need_vocal_rb, need_inst_rb,
+        stretch_vocals, stretch_instrumentals,
         vocal_semitones, inst_semitones,
         sr, event_queue, session,
     )
@@ -2173,7 +2204,7 @@ def run_remix(
     # === STEP 10: Post-stretch beat grid ===
     _t0 = time.monotonic()
     post_stretch_beat_frames, beat_grid_source = _step_post_stretch_beat_grid(
-        session_id, inst_audio, meta_b, target_bpm, plan, sr,
+        session_id, inst_audio, meta_b, target_bpm, stretch_instrumentals, plan, sr,
     )
     _step_times["10 beat_grid"] = time.monotonic() - _t0
 
@@ -2342,7 +2373,6 @@ def run_pipeline(
         session=session,
         source_quality_a=source_quality_a,
         source_quality_b=source_quality_b,
-        force_vocal_source=force_vocal_source,
         remix_cache_key=remix_cache_key,
         metrics=metrics,
     )

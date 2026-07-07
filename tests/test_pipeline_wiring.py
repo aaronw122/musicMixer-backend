@@ -9,6 +9,7 @@ pre-limiting, look-ahead limiter, LUFS normalization, safety soft clip.
 
 import queue
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -597,6 +598,151 @@ class TestPipelineOutputQuality:
         assert peak <= ceiling_linear + 0.05, (
             f"True peak {peak:.4f} grossly exceeds ceiling {ceiling_linear:.4f}"
         )
+
+
+class TestTempoKeyProcessingPlan:
+    def test_key_only_bus_uses_unity_tempo_ratio(self):
+        from musicmixer.services.pipeline import _step_tempo_match
+
+        calls = []
+        audio = {
+            "lead_vocals": np.ones((100, 2), dtype=np.float32),
+        }
+        inst = {
+            "drums": np.ones((100, 2), dtype=np.float32),
+            "bass": np.ones((100, 2), dtype=np.float32),
+        }
+        vocal_meta = SimpleNamespace(bpm=85.0, duration_seconds=10.0)
+        inst_meta = SimpleNamespace(bpm=130.0, duration_seconds=10.0)
+
+        def _fake_rubberband(audio_arg, sr, source_bpm, target_bpm, semitones=0, is_vocal=False):
+            calls.append((source_bpm, target_bpm, semitones, is_vocal))
+            return audio_arg
+
+        with patch("musicmixer.services.processor.rubberband_process", side_effect=_fake_rubberband):
+            _step_tempo_match(
+                "sess",
+                audio,
+                inst,
+                vocal_meta,
+                inst_meta,
+                target_bpm=95.2,
+                need_vocal_rb=False,
+                need_inst_rb=True,
+                stretch_vocals=False,
+                stretch_instrumentals=False,
+                vocal_semitones=0.0,
+                inst_semitones=-4.0,
+                sr=SR,
+                event_queue=queue.Queue(),
+                session=SessionState(),
+            )
+
+        assert calls == [
+            (130.0, 130.0, 0, False),
+            (130.0, 130.0, -4.0, False),
+        ]
+
+    def test_scaled_fallback_beat_grid_respects_trim_and_stretch_flag(self):
+        from musicmixer.services.pipeline import _step_post_stretch_beat_grid
+
+        inst_meta = SimpleNamespace(
+            bpm=130.0,
+            beat_frames=np.array([0, 43, 86, 129]),
+        )
+        plan = SimpleNamespace(
+            start_time_instrumental=1.0,
+            sections=[SimpleNamespace(end_beat=999)],
+        )
+        inst_audio = {"drums": np.zeros((32, 2), dtype=np.float32)}
+
+        with patch("librosa.beat.beat_track", return_value=(0.0, np.array([1, 2]))):
+            frames, source = _step_post_stretch_beat_grid(
+                "sess",
+                inst_audio,
+                inst_meta,
+                target_bpm=95.2,
+                stretch_instrumentals=False,
+                plan=plan,
+                sr=SR,
+            )
+
+        assert source == "scaled_fallback"
+        np.testing.assert_array_equal(frames, np.array([0, 43, 86]))
+
+        with patch("librosa.beat.beat_track", return_value=(0.0, np.array([1, 2]))):
+            stretched_frames, source = _step_post_stretch_beat_grid(
+                "sess",
+                inst_audio,
+                inst_meta,
+                target_bpm=65.0,
+                stretch_instrumentals=True,
+                plan=plan,
+                sr=SR,
+            )
+
+        assert source == "scaled_fallback"
+        np.testing.assert_array_equal(stretched_frames, np.array([0, 86, 172]))
+
+
+class TestPulseMapCacheRespect:
+    def test_existing_pulsemap_fields_are_not_recomputed(self, tmp_path, monkeypatch):
+        from musicmixer.config import settings
+        from musicmixer.models import AudioMetadata
+        from musicmixer.services.pipeline import _run_pulsemap_analysis
+
+        song_a_stems = tmp_path / "song_a"
+        song_b_stems = tmp_path / "song_b"
+        song_a_stems.mkdir()
+        song_b_stems.mkdir()
+        (song_a_stems / "lead_vocals.wav").write_bytes(b"placeholder")
+        (song_b_stems / "drums.wav").write_bytes(b"placeholder")
+
+        cached_polyphony = object()
+        cached_drums = object()
+        cached_words = object()
+        meta_a = AudioMetadata(
+            bpm=120.0,
+            bpm_confidence=1.0,
+            beat_frames=np.array([0, 1]),
+            duration_seconds=10.0,
+            total_beats=2,
+            polyphony_info=cached_polyphony,
+            word_alignment=cached_words,
+        )
+        meta_b = AudioMetadata(
+            bpm=120.0,
+            bpm_confidence=1.0,
+            beat_frames=np.array([0, 1]),
+            duration_seconds=10.0,
+            total_beats=2,
+            drum_pattern=cached_drums,
+        )
+
+        monkeypatch.setattr(settings, "pulsemap_chords_enabled", False)
+        monkeypatch.setattr(settings, "pulsemap_polyphony_enabled", True)
+        monkeypatch.setattr(settings, "pulsemap_drums_enabled", True)
+        monkeypatch.setattr(settings, "pulsemap_word_alignment_enabled", True)
+
+        with (
+            patch("musicmixer.services.pulsemap.detect_polyphony", side_effect=AssertionError),
+            patch("musicmixer.services.pulsemap.transcribe_drum_pattern", side_effect=AssertionError),
+            patch("musicmixer.services.pulsemap.align_words", side_effect=AssertionError),
+        ):
+            _run_pulsemap_analysis(
+                meta_a,
+                meta_b,
+                None,
+                None,
+                song_a_stems,
+                song_b_stems,
+                None,
+                "sess",
+            )
+
+        assert meta_a.polyphony_info is cached_polyphony
+        assert meta_a.word_alignment is cached_words
+        assert meta_b.drum_pattern is cached_drums
 
 
 # ---------------------------------------------------------------------------
