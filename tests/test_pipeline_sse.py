@@ -45,7 +45,9 @@ def client(tmp_path):
 
         with patch("musicmixer.api.remix.settings", mock_settings), \
              patch("musicmixer.main.settings", mock_settings), \
-             patch("musicmixer.api.remix.cleanup_expired_sessions"):
+             patch("musicmixer.api.remix.cleanup_expired_sessions"), \
+             patch("musicmixer.api.remix.probe_duration", return_value=300.0), \
+             patch("musicmixer.services.song_cache.get_cached_song", return_value=None):
             with TestClient(app) as c:
                 yield c
 
@@ -279,6 +281,9 @@ class TestGetStatus:
             data = status_resp.json()
             assert data["session_id"] == session_id
             assert data["status"] == "complete"
+            assert data["ready"] is True
+            assert data["audio_url"] == f"/api/remix/{session_id}/audio"
+            assert "remix_path" not in data
             assert data["explanation"] == "Test remix"
 
     def test_returns_404_for_unknown_session(self, client):
@@ -335,6 +340,25 @@ class TestGetProgress:
         fake_id = str(uuid.uuid4())
         resp = client.get(f"/api/remix/{fake_id}/progress")
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_sse_replays_cancelled_terminal_event(self):
+        """Reconnect should replay cancelled instead of hanging."""
+        from musicmixer.api.remix import _event_stream
+
+        session = SessionState(status="cancelled")
+        session.last_event = {
+            "step": "cancelled",
+            "detail": "Remix cancelled",
+            "progress": 0,
+        }
+
+        stream = _event_stream(session, None, session_id="cancelled-session")
+        first = await stream.__anext__()
+        assert json.loads(first.removeprefix("data: ").strip()) == session.last_event
+
+        with pytest.raises(StopAsyncIteration):
+            await stream.__anext__()
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ from typing import AsyncGenerator, Callable
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from musicmixer.config import settings
 from musicmixer.models import CachedSong, SessionState
@@ -40,6 +40,10 @@ from musicmixer.api.shelf import ensure_on_shelf
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+PROMPT_MAX_CHARS = 2000
+_GENERIC_REMIX_ERROR_DETAIL = "Something went wrong while creating your remix"
+_TERMINAL_STEPS = {"complete", "error", "cancelled"}
 
 # Average remix duration in seconds, used for queue wait estimates.
 # Updated after each completed remix for better accuracy.
@@ -105,12 +109,16 @@ def _pipeline_wrapper(
         emit_progress(session.events, progress_event(
             "cancelled", "Remix cancelled", 0,
         ), session=session)
-    except BaseException as exc:
+    except Exception:
         logger.exception("Session %s: pipeline failed", session_id)
         session.status = "error"
         from musicmixer.services.pipeline import emit_progress
 
-        emit_progress(session.events, _plain_error_event(str(exc)), session=session)
+        emit_progress(
+            session.events,
+            _plain_error_event(_GENERIC_REMIX_ERROR_DETAIL),
+            session=session,
+        )
     finally:
         processing_lock.release()
         _process_next_queued(app_state)
@@ -139,7 +147,7 @@ def _validate_youtube_url(url: str) -> None:
 class YouTubeRemixRequest(BaseModel):
     url_a: str  # YouTube URL for song A
     url_b: str  # YouTube URL for song B
-    prompt: str = ""  # Remix prompt (optional — defaults to deterministic plan)
+    prompt: str = Field(default="", max_length=PROMPT_MAX_CHARS)
 
 
 # Structured-error wire contract (producer side; the frontend is the consumer).
@@ -175,6 +183,14 @@ def _plain_error_event(detail: str) -> dict:
     return {"step": "error", "detail": detail, "progress": 0}
 
 
+def _validate_prompt_length(prompt: str) -> None:
+    if len(prompt) > PROMPT_MAX_CHARS:
+        raise HTTPException(
+            422,
+            f"Prompt must be {PROMPT_MAX_CHARS} characters or fewer",
+        )
+
+
 def _build_error_event(exc: BaseException) -> dict:
     """Build the SSE `error` event payload from a pipeline exception.
 
@@ -188,11 +204,13 @@ def _build_error_event(exc: BaseException) -> dict:
 
     event: dict = {
         "step": "error",
-        "detail": str(exc),
+        "detail": _GENERIC_REMIX_ERROR_DETAIL,
         "progress": 0,
     }
 
     error_class = getattr(exc, "error_class", None)
+    if isinstance(exc, YouTubeDownloadError):
+        event["detail"] = str(exc)
     if isinstance(exc, YouTubeDownloadError) and error_class:
         event["error_class"] = error_class
 
@@ -373,7 +391,7 @@ def _youtube_pipeline_wrapper(
         emit_progress(session.events, progress_event(
             "cancelled", "Remix cancelled", 0,
         ), session=session)
-    except BaseException as exc:
+    except Exception as exc:
         logger.exception("Session %s: YouTube pipeline failed", session_id)
         session.status = "error"
         emit_progress(session.events, _build_error_event(exc), session=session)
@@ -382,7 +400,7 @@ def _youtube_pipeline_wrapper(
         _process_next_queued(app_state)
 
 
-def _process_next_queued(app_state) -> None:
+def _process_next_queued(app_state, *, slot_already_acquired: bool = False) -> None:
     """Pull the next valid item from the wait queue and submit it.
 
     Called from the pipeline finally block after releasing the processing lock.
@@ -392,11 +410,14 @@ def _process_next_queued(app_state) -> None:
     from musicmixer.services.pipeline import emit_progress, progress_event
 
     queue_entry_ttl_s = settings.queue_entry_ttl_minutes * 60
+    have_slot = slot_already_acquired
 
     while True:
         try:
             item: _QueueItem = app_state.wait_queue.get_nowait()
         except queue.Empty:
+            if have_slot:
+                app_state.processing_lock.release()
             return
 
         # Broadcast updated positions to remaining queued sessions
@@ -430,16 +451,18 @@ def _process_next_queued(app_state) -> None:
             )
             continue
 
-        if not app_state.processing_lock.acquire(blocking=False):
-            # Slot was taken (race condition); re-queue the item
-            try:
-                app_state.wait_queue.put_nowait(item)
-            except queue.Full:
-                item.session.status = "error"
-                emit_progress(item.session.events, _plain_error_event(
-                    "Server overloaded, please try again",
-                ), session=item.session)
-            return
+        if not have_slot:
+            if not app_state.processing_lock.acquire(blocking=False):
+                # Slot was taken (race condition); re-queue the item
+                try:
+                    app_state.wait_queue.put_nowait(item)
+                except queue.Full:
+                    item.session.status = "error"
+                    emit_progress(item.session.events, _plain_error_event(
+                        "Server overloaded, please try again",
+                    ), session=item.session)
+                return
+            have_slot = True
 
         emit_progress(item.session.events, progress_event(
             "processing_started", "Your remix is starting now", 0,
@@ -449,6 +472,7 @@ def _process_next_queued(app_state) -> None:
             app_state.executor.submit(item.run_fn)
         except Exception:
             app_state.processing_lock.release()
+            have_slot = False
             logger.exception("Session %s: failed to submit queued pipeline", item.session_id)
             item.session.status = "error"
             emit_progress(item.session.events, _plain_error_event(
@@ -540,6 +564,9 @@ def _enqueue_or_start(app_state, session_id: str, session: SessionState, run_fn:
         session_id, position, total,
     )
 
+    if processing_lock.acquire(blocking=False):
+        _process_next_queued(app_state, slot_already_acquired=True)
+
 
 @router.post("/remix/youtube")
 def create_youtube_remix(
@@ -554,6 +581,8 @@ def create_youtube_remix(
     """
     if not settings.youtube_enabled:
         raise HTTPException(403, "YouTube input is disabled")
+
+    _validate_prompt_length(body.prompt)
 
     # Validate both URLs (SSRF prevention) before doing any work
     _validate_youtube_url(body.url_a)
@@ -659,6 +688,7 @@ def create_remix(
     Returns 503 if the queue is full.
     """
     max_bytes = settings.max_file_size_mb * 1024 * 1024
+    _validate_prompt_length(prompt)
 
     # Validate extensions
     for label, file in [("song_a", song_a), ("song_b", song_b)]:
@@ -710,7 +740,13 @@ def create_remix(
     max_dur = settings.max_upload_duration_seconds
     for label, path in [("song_a", song_a_path), ("song_b", song_b_path)]:
         duration = probe_duration(path)
-        if duration is not None and duration > max_dur:
+        if duration is None:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise HTTPException(
+                422,
+                f"Could not determine audio duration for {label}",
+            )
+        if duration > max_dur:
             shutil.rmtree(upload_dir, ignore_errors=True)
             raise HTTPException(
                 413,
@@ -772,6 +808,30 @@ async def cancel_remix(session_id: str, request: Request):
 # E.164: '+' followed by 10-15 digits
 _E164_RE = re.compile(r"^\+\d{10,15}$")
 
+# Abuse controls for the unauthenticated notify-sms endpoint.
+_NOTIFY_MAX_NUMBERS_PER_SESSION = 3
+_NOTIFY_RATE_MAX_REQUESTS = 5
+_NOTIFY_RATE_WINDOW_S = 60.0
+_notify_rate_lock = threading.Lock()
+_notify_rate_hits: dict[str, list[float]] = {}
+
+
+def _notify_rate_limit_ok(client_ip: str) -> bool:
+    """Allow up to _NOTIFY_RATE_MAX_REQUESTS per _NOTIFY_RATE_WINDOW_S per IP."""
+    now = time.monotonic()
+    cutoff = now - _NOTIFY_RATE_WINDOW_S
+    with _notify_rate_lock:
+        if len(_notify_rate_hits) > 4096:
+            stale = [ip for ip, ts in _notify_rate_hits.items() if not ts or ts[-1] < cutoff]
+            for ip in stale:
+                del _notify_rate_hits[ip]
+        hits = _notify_rate_hits.setdefault(client_ip, [])
+        hits[:] = [t for t in hits if t >= cutoff]
+        if len(hits) >= _NOTIFY_RATE_MAX_REQUESTS:
+            return False
+        hits.append(now)
+        return True
+
 
 class NotifySmsRequest(BaseModel):
     phone: str
@@ -789,9 +849,14 @@ def register_sms_notification(
     - 200: session already complete, ready notification sent directly
     - 409: session in error state
     - 422: invalid phone format
+    - 429: too many requests (per-IP rate limit) or too many numbers for this session
     - 503: SMS feature disabled
     """
     _validate_uuid(session_id)
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _notify_rate_limit_ok(client_ip):
+        raise HTTPException(429, "Too many requests, please slow down")
 
     if not settings.sms_enabled:
         raise HTTPException(503, "SMS notifications are not available")
@@ -807,30 +872,38 @@ def register_sms_notification(
     if session.status == "error":
         raise HTTPException(409, "Session failed — cannot register for notification")
 
-    if session.status == "complete":
-        # Remix already done — send ready notification directly, no confirmation
-        from musicmixer.services.sms import send_remix_ready
+    phone = body.phone
+    known_number = phone in session.notify_numbers
+    if not known_number and len(session.notify_numbers) >= _NOTIFY_MAX_NUMBERS_PER_SESSION:
+        raise HTTPException(429, "Too many phone numbers registered for this remix")
 
-        try:
-            send_remix_ready(body.phone, session_id)
-        except Exception:
-            logger.exception(
-                "Session %s: failed to send ready SMS", session_id
-            )
+    if session.status == "complete":
+        # Remix already done — send ready notification directly, no confirmation.
+        # Dedup: a number already seen for this session is a no-op success.
+        if not known_number:
+            session.notify_numbers.add(phone)
+            from musicmixer.services.sms import send_remix_ready
+
+            try:
+                send_remix_ready(phone, session_id)
+            except Exception:
+                logger.exception("Session %s: failed to send ready SMS", session_id)
         return {"status": "sent", "message": "Remix is already ready — notification sent"}
 
-    # Store phone on session (idempotent: overwrites any previous value)
-    session.notify_phone = body.phone
+    # Store phone on session (last registration wins for the ready notification).
+    session.notify_numbers.add(phone)
+    session.notify_phone = phone
 
-    # Send confirmation SMS (best-effort — failure is non-blocking)
-    from musicmixer.services.sms import send_confirmation
+    # Confirmation SMS is sent at most once per session (best-effort — failure
+    # is non-blocking and does not un-set the flag).
+    if not session.notify_confirmation_sent:
+        session.notify_confirmation_sent = True
+        from musicmixer.services.sms import send_confirmation
 
-    try:
-        send_confirmation(body.phone)
-    except Exception:
-        logger.exception(
-            "Session %s: failed to send confirmation SMS", session_id
-        )
+        try:
+            send_confirmation(phone)
+        except Exception:
+            logger.exception("Session %s: failed to send confirmation SMS", session_id)
 
     return JSONResponse(
         status_code=202,
@@ -904,7 +977,7 @@ async def _event_stream(
         last_step = session.last_event.get("step", "")
         last_detail = session.last_event.get("detail", "")
         last_progress = session.last_event.get("progress", 0.0)
-        if last_step in ("complete", "error"):
+        if last_step in _TERMINAL_STEPS:
             return
 
     # Drain stale events that arrived before the client connected
@@ -913,6 +986,10 @@ async def _event_stream(
             session.events.get_nowait()
         except queue.Empty:
             break
+
+    if session.last_event and session.last_event.get("step") in _TERMINAL_STEPS:
+        yield f"data: {json.dumps(session.last_event)}\n\n"
+        return
 
     while True:
         # 20-minute safety cap
@@ -952,6 +1029,8 @@ async def _event_stream(
             # Client disconnected — let the pipeline continue running.
             # Client can reconnect via /progress endpoint to resume updates.
             logger.info("Session %s: SSE client disconnected (pipeline continues)", session_id)
+            if session.status == "queued":
+                session.status = "abandoned"
             break
 
         session.last_event = event
@@ -960,7 +1039,7 @@ async def _event_stream(
         last_progress = max(last_progress, event.get("progress", last_progress))
         yield f"data: {json.dumps(event)}\n\n"
 
-        if event.get("step") in ("complete", "error", "cancelled"):
+        if event.get("step") in _TERMINAL_STEPS:
             break
 
 
@@ -977,7 +1056,12 @@ async def get_status(session_id: str, request: Request):
     return {
         "session_id": session_id,
         "status": session.status,
-        "remix_path": session.remix_path,
+        "ready": session.status == "complete" and bool(session.remix_path),
+        "audio_url": (
+            f"/api/remix/{session_id}/audio"
+            if session.status == "complete" and session.remix_path
+            else None
+        ),
         "explanation": session.explanation,
         "last_event": session.last_event,
     }

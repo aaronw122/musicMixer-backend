@@ -15,7 +15,6 @@ payloads itself — it just threads those handles through.
 import logging
 import shutil
 import subprocess
-import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -224,8 +223,17 @@ def restore_fully_cached_youtube_remix(
 
     # Copy only after BOTH roles are confirmed ready — otherwise "A ok, B missing"
     # would orphan A's stems on fallback.
-    get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
-    get_cached_stems(cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir)
+    restored_a = get_cached_stems(cached_song_a.video_id, ROLE_VOCAL, song_a_stems_dir)
+    restored_b = get_cached_stems(
+        cached_song_b.video_id, ROLE_INSTRUMENTAL, song_b_stems_dir
+    )
+    if not (restored_a and restored_b):
+        logger.warning(
+            "Session %s: Cached stems disappeared during restore, falling back to full pipeline",
+            session_id,
+        )
+        shutil.rmtree(stems_dir, ignore_errors=True)
+        return FullyCachedRestore(used_cache=False)
 
     song_a_stems = {f.stem: f for f in song_a_stems_dir.glob("*.wav")}
     song_b_stems = {f.stem: f for f in song_b_stems_dir.glob("*.wav")}
@@ -604,25 +612,19 @@ def analyze_and_checkpoint_youtube_pair(
 
 def thumbnail_from_youtube_url(url: str) -> str | None:
     """Derive a YouTube thumbnail URL from a video URL. Returns None on failure."""
-    parsed = urllib.parse.urlparse(url)
-    hostname = parsed.hostname or ""
-    path_parts = [p for p in parsed.path.split("/") if p]
+    from musicmixer.services.youtube import extract_video_id
 
-    video_id = None
-    if hostname == "youtu.be" and path_parts:
-        video_id = path_parts[0]
-    else:
-        qs = urllib.parse.parse_qs(parsed.query)
-        if qs.get("v"):
-            video_id = qs["v"][0]
-        elif path_parts and path_parts[0] in {"shorts", "embed"} and len(path_parts) > 1:
-            video_id = path_parts[1]
-
+    video_id = extract_video_id(url)
     return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
 
 
 def probe_duration(file_path: Path) -> float | None:
-    """Return audio duration in seconds via ffprobe, or None on failure."""
+    """Return audio duration in seconds via ffprobe, or None on failure.
+
+    Uploads that pass the maximum-upload-duration gate but exceed the processing
+    duration are pre-trimmed before separation/analysis. The original duration
+    is returned so callers can still enforce the upload-duration limit.
+    """
     try:
         result = subprocess.run(
             [
@@ -634,10 +636,31 @@ def probe_duration(file_path: Path) -> float | None:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
+            duration = float(result.stdout.strip())
+            _pre_trim_upload_if_needed(file_path, duration)
+            return duration
     except (subprocess.TimeoutExpired, ValueError, OSError):
         pass
     return None
+
+
+def _pre_trim_upload_if_needed(file_path: Path, duration_seconds: float) -> None:
+    """Apply the same pre-processing trim to uploads that YouTube downloads use."""
+    from musicmixer.config import settings
+
+    max_upload_duration = settings.max_upload_duration_seconds
+    max_processing_duration = settings.processing_max_duration_seconds
+    if duration_seconds > max_upload_duration:
+        return
+    if duration_seconds <= max_processing_duration:
+        return
+
+    from musicmixer.services.processor import pre_trim_for_processing
+
+    pre_trim_for_processing(
+        file_path,
+        max_duration_seconds=max_processing_duration,
+    )
 
 
 def upload_extension(filename: str | None) -> str:
@@ -658,15 +681,17 @@ def write_upload_file(file: BinaryIO, dest: Path, max_bytes: int) -> None:
     buffering the whole payload.
     """
     file.seek(0)
-    chunks = []
     total = 0
-    while True:
-        chunk = file.read(UPLOAD_CHUNK_SIZE_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise UploadTooLargeError
-        chunks.append(chunk)
-    data = b"".join(chunks)
-    dest.write_bytes(data)
+    try:
+        with dest.open("wb") as out:
+            while True:
+                chunk = file.read(UPLOAD_CHUNK_SIZE_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UploadTooLargeError
+                out.write(chunk)
+    except UploadTooLargeError:
+        dest.unlink(missing_ok=True)
+        raise

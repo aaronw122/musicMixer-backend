@@ -1,7 +1,7 @@
 """Tests for the remix API endpoints."""
 import time
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 from fastapi.testclient import TestClient
 
@@ -31,7 +31,8 @@ def client(tmp_path):
         # Also patch settings in the remix module since it imports at module level
         with patch("musicmixer.api.remix.settings", mock_settings), \
              patch("musicmixer.main.settings", mock_settings), \
-             patch("musicmixer.api.remix.cleanup_expired_sessions"):
+             patch("musicmixer.api.remix.cleanup_expired_sessions"), \
+             patch("musicmixer.api.remix.probe_duration", return_value=300.0):
             with TestClient(app) as c:
                 yield c
 
@@ -84,8 +85,53 @@ class TestCreateRemix:
                 data={"prompt": "test"},
             )
             assert response.status_code == 200
-            data = response.json()
-            assert "session_id" in data
+
+    def test_pipeline_wrapper_emits_generic_error_detail(self, tmp_path):
+        """Background upload wrapper should not stream raw exception text."""
+        from musicmixer.api.remix import _GENERIC_REMIX_ERROR_DETAIL, _pipeline_wrapper
+        from musicmixer.models import SessionState
+
+        session = SessionState()
+        processing_lock = MagicMock()
+        app_state = MagicMock()
+
+        with patch("musicmixer.services.pipeline.run_pipeline", side_effect=RuntimeError("/secret/path")), \
+             patch("musicmixer.api.remix._process_next_queued"):
+            _pipeline_wrapper(
+                "11111111-1111-1111-1111-111111111111",
+                tmp_path / "a.mp3",
+                tmp_path / "b.mp3",
+                "",
+                session,
+                processing_lock,
+                app_state,
+            )
+
+        assert session.status == "error"
+        assert session.last_event == {
+            "step": "error",
+            "detail": _GENERIC_REMIX_ERROR_DETAIL,
+            "progress": 0,
+        }
+        assert "/secret/path" not in session.last_event["detail"]
+
+    def test_pipeline_wrapper_does_not_catch_base_exception(self, tmp_path):
+        """KeyboardInterrupt should propagate out of the wrapper."""
+        from musicmixer.api.remix import _pipeline_wrapper
+        from musicmixer.models import SessionState
+
+        with patch("musicmixer.services.pipeline.run_pipeline", side_effect=KeyboardInterrupt), \
+             patch("musicmixer.api.remix._process_next_queued"):
+            with pytest.raises(KeyboardInterrupt):
+                _pipeline_wrapper(
+                    "11111111-1111-1111-1111-111111111111",
+                    tmp_path / "a.mp3",
+                    tmp_path / "b.mp3",
+                    "",
+                    SessionState(),
+                    MagicMock(),
+                    MagicMock(),
+                )
 
     def test_successful_remix_returns_session_id(self, client, tmp_path):
         """Should return session_id on successful remix."""
@@ -298,8 +344,8 @@ class TestUploadDurationGuard:
             )
             assert response.status_code == 200
 
-    def test_accepts_upload_when_ffprobe_fails(self, client):
-        """Should not reject when ffprobe can't determine duration."""
+    def test_rejects_upload_when_ffprobe_fails(self, client):
+        """Should reject when ffprobe can't determine duration."""
         def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
             session.status = "complete"
             processing_lock.release()
@@ -314,7 +360,8 @@ class TestUploadDurationGuard:
                 },
                 data={"prompt": "test"},
             )
-            assert response.status_code == 200
+            assert response.status_code == 422
+            assert "could not determine audio duration" in response.json()["detail"].lower()
 
 
 class TestCreateRemixNoPrompt:
@@ -357,6 +404,19 @@ class TestCreateRemixNoPrompt:
             assert response.status_code == 200
             data = response.json()
             assert "session_id" in data
+
+    def test_rejects_prompt_over_length_limit(self, client):
+        """Should reject multipart remix prompts over the route-level cap."""
+        response = client.post(
+            "/api/remix",
+            files={
+                "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
+                "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
+            },
+            data={"prompt": "x" * 2001},
+        )
+        assert response.status_code == 422
+        assert "2000 characters" in response.json()["detail"]
 
     def test_pipeline_receives_empty_prompt_when_omitted(self, client, tmp_path):
         """When no prompt is sent, the pipeline wrapper should receive empty string."""
@@ -403,6 +463,18 @@ class TestYouTubeRemixRequestModel:
             prompt="mix the vocals with the beat",
         )
         assert req.prompt == "mix the vocals with the beat"
+
+    def test_prompt_over_length_limit_rejected(self):
+        """YouTubeRemixRequest should reject prompts over the route-level cap."""
+        from pydantic import ValidationError
+        from musicmixer.api.remix import YouTubeRemixRequest
+
+        with pytest.raises(ValidationError):
+            YouTubeRemixRequest(
+                url_a="https://www.youtube.com/watch?v=abc",
+                url_b="https://www.youtube.com/watch?v=xyz",
+                prompt="x" * 2001,
+            )
 
 
 class TestGetAudio:

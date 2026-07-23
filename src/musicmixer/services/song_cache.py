@@ -18,6 +18,7 @@ Only stem separation is role-dependent, so stems get their own role-qualified ke
 from __future__ import annotations
 
 import errno
+import asyncio
 import json
 import logging
 import os
@@ -836,7 +837,10 @@ def get_cached_audio(video_id: str) -> tuple[Path, dict[str, Any]] | None:
 
     ttl_hours = settings.audio_cache_ttl_hours
     if ttl_hours > 0:
-        age_seconds = time.time() - path.stat().st_mtime
+        try:
+            age_seconds = time.time() - path.stat().st_mtime
+        except OSError:
+            return None
         if age_seconds > ttl_hours * 3600:
             logger.info("Cached audio for video %s expired (age %.1fh)", video_id, age_seconds / 3600)
             path.unlink(missing_ok=True)
@@ -1457,6 +1461,9 @@ def sweep_orphaned_staging_dirs(coordinator: StemCacheCoordinator | None = None)
             except OSError:
                 continue
 
+            if not _orphaned_dir_old_enough(sibling):
+                continue
+
             if _OLD_INFIX in name:
                 if _remove_dir(sibling):
                     removed += 1
@@ -1476,6 +1483,18 @@ def sweep_orphaned_staging_dirs(coordinator: StemCacheCoordinator | None = None)
     if removed:
         logger.info("Swept %d orphaned staging/old stem dirs", removed)
     return removed
+
+
+def _orphaned_dir_old_enough(path: Path) -> bool:
+    min_age = max(
+        settings.stem_lock_lease_seconds * 2,
+        settings.stem_lock_renew_interval_seconds * 2,
+        60,
+    )
+    try:
+        return (time.time() - path.stat().st_mtime) >= min_age
+    except OSError:
+        return False
 
 
 def _parse_staging_name(name: str) -> tuple[SongRole | None, str | None]:
@@ -1632,7 +1651,13 @@ class _LeaseRenewer:
         self.stop()
 
     def _run(self) -> None:
-        interval = max(settings.stem_lock_renew_interval_seconds, 1)
+        interval = max(
+            min(
+                settings.stem_lock_renew_interval_seconds,
+                settings.stem_lock_lease_seconds / 3,
+            ),
+            0.1,
+        )
         while not self._stop.wait(interval):
             try:
                 renewed = self._coordinator.renew(self._lease)
@@ -1688,8 +1713,14 @@ def _copy_ready_stems(
         if state is None or state.status != "ready" or not state.path:
             return None
         src_dir = Path(state.path)
+        if state.separator_version != settings.stem_separator_version:
+            coordinator.invalidate_ready(video_id, role)
+            shutil.rmtree(src_dir, ignore_errors=True)
+            return None
         manifest = _validate_role_dir(role, src_dir)
         if manifest is None:
+            coordinator.invalidate_ready(video_id, role)
+            shutil.rmtree(src_dir, ignore_errors=True)
             return None
         try:
             stems = _copy_dir_wavs(src_dir, output_dir)
@@ -1770,11 +1801,23 @@ def _run_as_owner(
                 lease_renew_count=renewer.renew_count,
                 separator_version=settings.stem_separator_version,
             )
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
     except BaseException as exc:
         error_code = _categorize_separation_exception(exc)
         # Only fail the shared state if we still own the lock; mark_failed releases it.
         recorded_failed = False
-        if coordinator._owns_lock(lease):
+        try:
+            owns_lock = coordinator._owns_lock(lease)
+        except redis.RedisError:
+            owns_lock = False
+            logger.warning(
+                "Could not verify lock ownership after separation error for %s/%s",
+                video_id, role, exc_info=True,
+            )
+        if owns_lock:
             try:
                 coordinator.mark_failed(lease, error_code)
                 recorded_failed = True
@@ -1855,6 +1898,8 @@ def _wait_for_owner(
             return None  # ready vanished mid-copy -> compete
 
         if state.status == "failed":
+            if state.retry_after is not None and _utcnow() >= _parse_iso(state.retry_after):
+                return None
             code: StemErrorCode = state.error_code or STEM_ERROR_TRANSIENT
             raise StemSeparationError(
                 f"Separation failed for {video_id}/{role} ({code})", code

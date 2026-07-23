@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from musicmixer.services.ducking import spectral_duck
+from musicmixer.services.ducking import _smooth_activity_mask, spectral_duck
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -81,6 +81,20 @@ def _mid_band_rms(
 
 class TestSpectralDuckBasic:
     """Core functionality tests."""
+
+    def test_activity_mask_attack_then_release_direction(self):
+        """Envelope should not pre-engage before onset and should trail release."""
+        raw = np.zeros(SR, dtype=np.float64)
+        start = int(0.4 * SR)
+        end = int(0.5 * SR)
+        raw[start:end] = 1.0
+
+        smoothed = _smooth_activity_mask(raw, SR)
+
+        assert np.all(smoothed[:start] == 0.0)
+        assert 0.0 < smoothed[start] < smoothed[start + int(0.03 * SR)]
+        assert smoothed[end] > 0.0
+        assert smoothed[end + int(0.03 * SR)] > smoothed[end + int(0.12 * SR)]
 
     def test_reduces_mid_band_when_vocals_active(self):
         """Ducking should reduce instrumental mid-band energy during vocal activity.

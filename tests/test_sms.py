@@ -29,6 +29,38 @@ def mock_twilio_client():
         yield client_instance
 
 
+class TestMaskPhone:
+    def test_redacts_full_number_keeps_last_four(self):
+        from musicmixer.services.sms import _mask_phone
+
+        masked = _mask_phone("+15551234567")
+
+        assert "5551234" not in masked
+        assert masked != "+15551234567"
+        assert masked.endswith("4567")
+        assert masked.startswith("+1")
+
+    def test_masks_middle_digits(self):
+        from musicmixer.services.sms import _mask_phone
+
+        assert _mask_phone("+15551234567") == "+1******4567"
+
+    @pytest.mark.parametrize("value", [None, "", "123", 15551234567])
+    def test_short_or_invalid_input_fully_masked(self, value):
+        from musicmixer.services.sms import _mask_phone
+
+        assert _mask_phone(value) == "***"
+
+    def test_without_plus_prefix(self):
+        from musicmixer.services.sms import _mask_phone
+
+        masked = _mask_phone("5551234567")
+
+        assert not masked.startswith("+")
+        assert masked.endswith("4567")
+        assert "5551234" not in masked
+
+
 class TestSendRemixReady:
     def test_sends_correct_message(self, sms_settings, mock_twilio_client):
         """Should send SMS with correct body and recipient."""
@@ -52,6 +84,16 @@ class TestSendRemixReady:
 
         assert result is False
         mock_twilio_client.messages.create.assert_not_called()
+
+    def test_log_masks_phone_number(self, sms_settings, mock_twilio_client, caplog):
+        """Success log should contain the masked number, never the raw one."""
+        from musicmixer.services.sms import send_remix_ready
+
+        with caplog.at_level(logging.INFO):
+            send_remix_ready("+15551234567", "abc-123")
+
+        assert "+15551234567" not in caplog.text
+        assert "+1******4567" in caplog.text
 
     def test_catches_twilio_exception(self, sms_settings, mock_twilio_client, caplog):
         """Should catch TwilioRestException and return False."""
@@ -78,6 +120,60 @@ class TestSendRemixReady:
 
         assert result is False
         assert "Unexpected error sending remix-ready SMS" in caplog.text
+
+
+class TestGlobalSendBudget:
+    """Tests for the process-wide hourly send budget backstop."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_budget(self):
+        from musicmixer.services import sms as sms_mod
+
+        with sms_mod._sms_budget_lock:
+            sms_mod._sms_budget_hits.clear()
+        yield
+        with sms_mod._sms_budget_lock:
+            sms_mod._sms_budget_hits.clear()
+
+    def test_sends_skipped_past_budget(self, sms_settings, mock_twilio_client, monkeypatch):
+        """Once the hourly budget is exhausted, further sends are skipped."""
+        from musicmixer.services import sms as sms_mod
+
+        monkeypatch.setattr(sms_mod, "_SMS_BUDGET_PER_HOUR", 2)
+
+        r1 = sms_mod.send_confirmation("+15551111111")
+        r2 = sms_mod.send_confirmation("+15552222222")
+        r3 = sms_mod.send_confirmation("+15553333333")
+
+        assert (r1, r2, r3) == (True, True, False)
+        assert mock_twilio_client.messages.create.call_count == 2
+
+    def test_budget_shared_across_send_types(self, sms_settings, mock_twilio_client, monkeypatch):
+        """Confirmation and ready sends draw from the same budget."""
+        from musicmixer.services import sms as sms_mod
+
+        monkeypatch.setattr(sms_mod, "_SMS_BUDGET_PER_HOUR", 1)
+
+        first = sms_mod.send_confirmation("+15551111111")
+        second = sms_mod.send_remix_ready("+15552222222", "abc-123")
+
+        assert first is True
+        assert second is False
+        assert mock_twilio_client.messages.create.call_count == 1
+
+    def test_budget_warning_masks_phone(self, sms_settings, mock_twilio_client, monkeypatch, caplog):
+        """The skipped-send warning logs a masked number, never the raw one."""
+        from musicmixer.services import sms as sms_mod
+
+        monkeypatch.setattr(sms_mod, "_SMS_BUDGET_PER_HOUR", 0)
+
+        with caplog.at_level(logging.WARNING):
+            result = sms_mod.send_confirmation("+15551234567")
+
+        assert result is False
+        assert "+15551234567" not in caplog.text
+        assert "+1******4567" in caplog.text
+        mock_twilio_client.messages.create.assert_not_called()
 
 
 class TestSendConfirmation:

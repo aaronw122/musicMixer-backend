@@ -5,11 +5,13 @@ import io
 import soundfile as sf
 
 from musicmixer.config import settings
+from musicmixer.models import SONG_A_STEMS, SONG_B_STEMS
 
 logger = logging.getLogger(__name__)
 
 # Stem names for vocal-song separation (Song A via MelBand Roformer Karaoke)
-VOCAL_SONG_STEMS = {"lead_vocals", "backing_vocals", "instrumental"}
+VOCAL_SONG_STEMS = set(SONG_A_STEMS)
+INSTRUMENTAL_SONG_STEMS = set(SONG_B_STEMS)
 
 
 def separate_stems(
@@ -75,7 +77,7 @@ def _separate_modal(
         progress_callback("Stems received, saving...")
 
     # Validate stem count
-    expected = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+    expected = INSTRUMENTAL_SONG_STEMS
     received = set(stem_bytes_map.keys())
     if received != expected:
         missing = expected - received

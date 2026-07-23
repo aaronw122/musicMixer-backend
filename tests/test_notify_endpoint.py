@@ -65,6 +65,19 @@ def client_sms_disabled(tmp_path):
                 yield c
 
 
+@pytest.fixture(autouse=True)
+def _reset_abuse_state():
+    """Clear per-IP rate-limit and global-budget module state between tests."""
+    from musicmixer.api import remix as remix_mod
+    from musicmixer.services import sms as sms_mod
+
+    with remix_mod._notify_rate_lock:
+        remix_mod._notify_rate_hits.clear()
+    with sms_mod._sms_budget_lock:
+        sms_mod._sms_budget_hits.clear()
+    yield
+
+
 def _add_session(client, session_id: str, session: SessionState) -> None:
     """Insert a session directly into the app state."""
     with client.app.state.sessions_lock:
@@ -215,6 +228,91 @@ class TestNotifyEndpointBehavior:
             )
 
         assert session.notify_phone == "+15552222222"
+
+
+class TestNotifyAbuseControls:
+    """Tests for the three anti-abuse layers on POST /notify-sms."""
+
+    def test_same_number_registered_twice_sends_one_confirmation(self, client):
+        """Re-registering the same number is a no-op that still returns 202."""
+        mock_confirm = MagicMock(return_value=True)
+
+        session_id = str(uuid.uuid4())
+        session = SessionState()
+        session.status = "processing"
+        _add_session(client, session_id, session)
+
+        with patch("musicmixer.services.sms.send_confirmation", mock_confirm):
+            r1 = client.post(f"/api/remix/{session_id}/notify-sms", json={"phone": "+15551234567"})
+            r2 = client.post(f"/api/remix/{session_id}/notify-sms", json={"phone": "+15551234567"})
+
+        assert r1.status_code == 202
+        assert r2.status_code == 202
+        assert mock_confirm.call_count == 1
+        assert session.notify_numbers == {"+15551234567"}
+
+    def test_second_distinct_number_does_not_resend_confirmation(self, client):
+        """A different number under the cap updates notify_phone but sends no 2nd confirmation."""
+        mock_confirm = MagicMock(return_value=True)
+
+        session_id = str(uuid.uuid4())
+        session = SessionState()
+        session.status = "processing"
+        _add_session(client, session_id, session)
+
+        with patch("musicmixer.services.sms.send_confirmation", mock_confirm):
+            client.post(f"/api/remix/{session_id}/notify-sms", json={"phone": "+15551111111"})
+            client.post(f"/api/remix/{session_id}/notify-sms", json={"phone": "+15552222222"})
+
+        assert mock_confirm.call_count == 1
+        assert session.notify_phone == "+15552222222"
+
+    def test_distinct_number_cap_returns_429(self, client):
+        """Beyond the distinct-number cap, further numbers are rejected with 429."""
+        mock_confirm = MagicMock(return_value=True)
+
+        session_id = str(uuid.uuid4())
+        session = SessionState()
+        session.status = "processing"
+        _add_session(client, session_id, session)
+
+        with patch("musicmixer.services.sms.send_confirmation", mock_confirm):
+            for i in range(3):  # cap is 3 distinct numbers
+                r = client.post(
+                    f"/api/remix/{session_id}/notify-sms",
+                    json={"phone": f"+1555000000{i}"},
+                )
+                assert r.status_code == 202
+            over = client.post(
+                f"/api/remix/{session_id}/notify-sms",
+                json={"phone": "+15559999999"},
+            )
+
+        assert over.status_code == 429
+        assert len(session.notify_numbers) == 3
+
+    def test_per_ip_rate_limit_returns_429(self, client):
+        """After N rapid requests from one IP, further requests get 429."""
+        mock_confirm = MagicMock(return_value=True)
+
+        session_id = str(uuid.uuid4())
+        session = SessionState()
+        session.status = "processing"
+        _add_session(client, session_id, session)
+
+        codes = []
+        # Same number keeps the distinct-number cap out of the picture, so any
+        # 429 here comes strictly from the per-IP rate limiter (max 5 / 60s).
+        with patch("musicmixer.services.sms.send_confirmation", mock_confirm):
+            for _ in range(6):
+                r = client.post(
+                    f"/api/remix/{session_id}/notify-sms",
+                    json={"phone": "+15551234567"},
+                )
+                codes.append(r.status_code)
+
+        assert codes[:5] == [202, 202, 202, 202, 202]
+        assert codes[5] == 429
 
 
 class TestPipelineSmsHook:

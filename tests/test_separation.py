@@ -193,9 +193,15 @@ class TestTokenizeStemFilename:
             "my-drums-track",
             "input.guitar",
             "Song_VOCALS",
+            "input_(vocals)",
         ]
         for case in cases:
             assert local_tok(case) == modal_tok(case), f"Mismatch for: {case}"
+
+    def test_parentheses_are_delimiters(self):
+        from musicmixer.services.separation_local import _tokenize_stem_filename
+
+        assert _tokenize_stem_filename("input_(vocals)") == ["input", "vocals"]
 
 
 class TestStemNameMatching:
@@ -532,6 +538,36 @@ class TestSeparateVocalSongLocal:
         assert result["lead_vocals"] is not None
         assert result["backing_vocals"] is None
         assert result["instrumental"] is not None
+        assert (output_dir / "lead_vocals.wav").is_file()
+        assert (output_dir / "instrumental.wav").is_file()
+        assert not (output_dir / "vocals.wav").exists()
+        assert not (output_dir / "other.wav").exists()
+
+    def test_removes_non_vocal_role_wavs_from_output_dir(self, tmp_path):
+        """Local vocal fallback must leave a publishable vocal cache shape."""
+        from musicmixer.services.separation_local import separate_vocal_song_local
+
+        output_dir = tmp_path / "stems"
+        output_dir.mkdir(parents=True)
+
+        sr = 44100
+        t = np.linspace(0, 0.1, int(sr * 0.1), endpoint=False)
+        mono = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        stereo = np.column_stack([mono, mono])
+
+        for name in ["vocals", "drums", "bass", "other"]:
+            sf.write(str(output_dir / f"{name}.wav"), stereo, sr, format="WAV", subtype="FLOAT")
+
+        with patch(
+            "musicmixer.services.separation_local.separate_stems_local",
+            return_value=self._mock_stems_local(output_dir),
+        ):
+            separate_vocal_song_local(tmp_path / "input.wav", output_dir)
+
+        assert {p.name for p in output_dir.glob("*.wav")} == {
+            "lead_vocals.wav",
+            "instrumental.wav",
+        }
 
     def test_backing_vocals_always_none(self, tmp_path):
         """Local fallback cannot split lead/backing, so backing_vocals is always None."""

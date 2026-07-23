@@ -10,6 +10,7 @@ tests key off ``test_``-prefixed video IDs.
 """
 
 import struct
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from musicmixer.services.song_cache import (
     StemCacheState,
     StemLease,
     _get_redis,
+    _orphaned_dir_old_enough,
     _retry_delay_seconds,
     _stem_lock_key,
     _stems_key,
@@ -39,6 +41,8 @@ def clean_redis():
     import musicmixer.services.song_cache as _mod
     _mod._redis_client = None
     r = _get_redis()
+    for key in r.scan_iter("song:test_*"):
+        r.delete(key)
     yield r
     for key in r.scan_iter("song:test_*"):
         r.delete(key)
@@ -82,6 +86,14 @@ def _make_role_dir(base: Path, stems: tuple[str, ...]) -> Path:
     for stem in stems:
         _write_wav(base / f"{stem}.wav")
     return base
+
+
+def _backdate(path: Path, seconds: int = 300) -> None:
+    old_time = time.time() - seconds
+    path.touch(exist_ok=True) if path.is_file() else None
+    import os
+
+    os.utime(path, (old_time, old_time))
 
 
 @pytest.fixture
@@ -666,6 +678,7 @@ class TestSweeper:
         staging = _make_role_dir(
             cache_dir / "test_sweep" / ".vocal.staging.deadtoken", _VOCAL_STEMS
         )
+        _backdate(staging)
         removed = sweep_orphaned_staging_dirs()
         assert removed == 1
         assert not staging.exists()
@@ -686,6 +699,7 @@ class TestSweeper:
         old = _make_role_dir(
             cache_dir / "test_sweep_old" / ".vocal.old.abc123", _VOCAL_STEMS
         )
+        _backdate(old)
         removed = sweep_orphaned_staging_dirs()
         assert removed == 1
         assert not old.exists()
@@ -694,3 +708,12 @@ class TestSweeper:
         published = _make_role_dir(cache_dir / "test_sweep_keep" / "vocal", _VOCAL_STEMS)
         sweep_orphaned_staging_dirs()
         assert published.is_dir()
+
+    def test_keeps_young_unlocked_staging(self, clean_redis, cache_dir):
+        staging = _make_role_dir(
+            cache_dir / "test_sweep_young" / ".vocal.staging.deadtoken", _VOCAL_STEMS
+        )
+        assert _orphaned_dir_old_enough(staging) is False
+        removed = sweep_orphaned_staging_dirs()
+        assert removed == 0
+        assert staging.exists()

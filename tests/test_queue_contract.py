@@ -102,6 +102,25 @@ class TestQueuedCancellation:
         processing_lock.acquire.assert_not_called()
         app_state.executor.submit.assert_not_called()
 
+    def test_process_next_queued_skips_abandoned_item(self):
+        """A queued item abandoned after SSE disconnect is skipped."""
+        processing_lock = MagicMock()
+        app_state = _make_app_state(processing_lock)
+
+        abandoned_session = SessionState(status="abandoned")
+        item = _QueueItem(
+            session_id="abandoned-one",
+            session=abandoned_session,
+            run_fn=MagicMock(),
+        )
+        app_state.wait_queue.put(item)
+
+        with patch("musicmixer.api.remix._broadcast_queue_positions"):
+            _process_next_queued(app_state)
+
+        processing_lock.acquire.assert_not_called()
+        app_state.executor.submit.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Queue TTL expiry — "Queue wait time exceeded" error event
@@ -243,3 +262,18 @@ class TestQueueFull503:
                 "progress": 0,
             }
         ]
+
+    def test_enqueue_rechecks_slot_after_queueing(self):
+        """If a slot frees during enqueue, queued work starts immediately."""
+        processing_lock = MagicMock()
+        processing_lock.acquire.side_effect = [False, True]
+        app_state = _make_app_state(processing_lock, queue_maxsize=10)
+
+        session = SessionState(status="queued")
+        run_fn = MagicMock()
+        with patch("musicmixer.api.remix._AVG_REMIX_DURATION_S", 600.0):
+            _enqueue_or_start(app_state, "queued-one", session, run_fn)
+
+        assert app_state.wait_queue.empty()
+        app_state.executor.submit.assert_called_once_with(run_fn)
+        assert any(event.get("step") == "processing_started" for event in _drain(session))

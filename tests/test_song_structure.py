@@ -683,6 +683,19 @@ class TestVocalProminence:
         # 20 * log10(0.5 / 0.1) ~ 14 dB
         assert prom == pytest.approx(14.0, abs=1.0)
 
+    def test_song_a_vocal_shape_uses_lead_and_backing(self) -> None:
+        """Song A lead/backing vocal bus should produce prominence."""
+        bar_rms = {
+            "lead_vocals": np.array([0.3, 0.3, 0.0, 0.0]),
+            "backing_vocals": np.array([0.2, 0.2, 0.0, 0.0]),
+            "instrumental": np.array([0.1, 0.1, 0.1, 0.1]),
+        }
+        vocal_active = np.array([True, True, False, False])
+
+        prom = compute_vocal_prominence(bar_rms, vocal_active)
+
+        assert prom == pytest.approx(14.0, abs=1.0)
+
 
 class TestComputeRelationships:
     def test_returns_all_fields(self) -> None:

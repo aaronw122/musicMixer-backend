@@ -66,6 +66,8 @@ class SessionState:
     key_warning: str | None = None              # Key convergence warning (included in SSE complete event)
     last_event: dict | None = None              # Most recent event (for reconnecting SSE clients)
     notify_phone: str | None = None             # Deleted after SMS send
+    notify_numbers: set[str] = field(default_factory=set)  # Distinct numbers registered (abuse cap)
+    notify_confirmation_sent: bool = False       # At most one confirmation SMS per session
     used_fallback: bool = False                  # Set at pipeline completion if fallback stems were used
     warnings: list[str] = field(default_factory=list)  # Accumulated pipeline warnings
     thumbnail_url_a: str | None = None           # YouTube thumbnail for song A (for shared link record art)

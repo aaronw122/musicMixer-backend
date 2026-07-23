@@ -16,14 +16,26 @@ import logging
 
 import numpy as np
 
-from musicmixer.models import Section
+from musicmixer.models import Section, VOCAL_BUS_STEMS
 
 logger = logging.getLogger(__name__)
 
-# Stem names routed to the vocal bus. Includes the legacy "vocals" key
-# (BS-RoFormer output before lead/backing split) and the new MelBand Roformer
-# names so the renderer handles both old cached stems and new separations.
-_VOCAL_BUS_STEMS = frozenset(("vocals", "lead_vocals", "backing_vocals"))
+_VOCAL_BUS_STEMS = VOCAL_BUS_STEMS
+
+
+def _gain_curve_key(
+    stem_name: str,
+    gain_curves: dict[str, np.ndarray],
+    explicit_legacy_vocal_gain: bool,
+) -> str:
+    """Map legacy vocal stems onto the current lead-vocal gain curve."""
+    if (
+        stem_name == "vocals"
+        and not explicit_legacy_vocal_gain
+        and "lead_vocals" in gain_curves
+    ):
+        return "lead_vocals"
+    return stem_name
 
 
 def beats_to_samples(
@@ -58,6 +70,8 @@ def beats_to_samples(
 
     if len(beat_frames) < 2:
         # Degenerate case: no usable beat grid
+        if target_bpm and target_bpm > 0:
+            return int(beat_index * 60.0 / target_bpm * sr)
         return beat_index * sr
 
     if beat_index >= len(beat_frames):
@@ -210,9 +224,11 @@ def render_arrangement(
         return empty, empty
 
     # Collect all stem names referenced in any section
-    all_stem_names = sorted(
-        {name for section in sections for name in section.stem_gains}
-    )
+    explicit_legacy_vocal_gain = any("vocals" in section.stem_gains for section in sections)
+    all_stem_names_set = {name for section in sections for name in section.stem_gains}
+    if "vocals" in vocal_stems and "vocals" not in all_stem_names_set:
+        all_stem_names_set.add("vocals")
+    all_stem_names = sorted(all_stem_names_set)
 
     # Build continuous gain curves
     gain_curves = _build_gain_curves(
@@ -226,11 +242,15 @@ def render_arrangement(
 
     # Apply gain curves to each stem and add to appropriate bus
     for stem_name in all_stem_names:
-        curve = gain_curves[stem_name]
+        curve = gain_curves.get(
+            _gain_curve_key(stem_name, gain_curves, explicit_legacy_vocal_gain)
+        )
+        if curve is None:
+            continue
 
         # Get stem audio — route vocal-family stems from the vocal dict,
         # everything else from the instrumental dict.
-        if stem_name in _VOCAL_BUS_STEMS:
+        if stem_name in VOCAL_BUS_STEMS:
             stem_audio = vocal_stems.get(stem_name)
         else:
             stem_audio = instrumental_stems.get(stem_name)
@@ -248,7 +268,7 @@ def render_arrangement(
         # Apply gain curve (vectorized multiply)
         gained = stem_audio[:usable_len] * curve[:usable_len, np.newaxis]
 
-        if stem_name in _VOCAL_BUS_STEMS:
+        if stem_name in VOCAL_BUS_STEMS:
             vocal_bus[:usable_len] += gained
         else:
             instrumental_bus[:usable_len] += gained

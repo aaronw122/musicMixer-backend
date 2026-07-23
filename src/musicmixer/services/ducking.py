@@ -16,9 +16,49 @@ import logging
 import math
 
 import numpy as np
-from scipy.signal import butter, lfilter, sosfiltfilt
+from scipy.signal import butter, sosfiltfilt
 
 logger = logging.getLogger(__name__)
+
+
+def _smooth_activity_mask(
+    raw_mask: np.ndarray,
+    sr: int,
+    attack_seconds: float = 0.03,
+    release_seconds: float = 0.15,
+) -> np.ndarray:
+    """Apply causal attack and trailing release smoothing to a binary mask."""
+    if len(raw_mask) == 0:
+        return raw_mask.astype(np.float64)
+
+    active = raw_mask > 0
+    smoothed = np.zeros(len(raw_mask), dtype=np.float64)
+    if not np.any(active):
+        return smoothed
+
+    attack_decay = math.exp(-1.0 / (attack_seconds * sr))
+    release_decay = math.exp(-1.0 / (release_seconds * sr))
+
+    edges = np.diff(np.r_[False, active, False].astype(np.int8))
+    starts = np.flatnonzero(edges == 1)
+    ends = np.flatnonzero(edges == -1)
+
+    for idx, (start, end) in enumerate(zip(starts, ends)):
+        attack_len = end - start
+        if attack_len > 0:
+            attack = 1.0 - attack_decay ** np.arange(1, attack_len + 1)
+            smoothed[start:end] = np.maximum(smoothed[start:end], attack)
+
+        next_start = starts[idx + 1] if idx + 1 < len(starts) else len(raw_mask)
+        release_len = next_start - end
+        if release_len <= 0:
+            continue
+
+        start_level = smoothed[end - 1] if end > start else 1.0
+        release = start_level * release_decay ** np.arange(1, release_len + 1)
+        smoothed[end:next_start] = np.maximum(smoothed[end:next_start], release)
+
+    return smoothed
 
 
 def spectral_duck(
@@ -127,18 +167,10 @@ def spectral_duck(
     else:
         mask_overlap = raw_mask[:min_len]
 
-    # Exponential IIR smoothing: 30ms attack, 150ms release
-    attack_alpha = 1 - math.exp(-1.0 / (0.03 * sr))
-    release_alpha = 1 - math.exp(-1.0 / (0.15 * sr))
-
-    # Two-pass lfilter approximation (runs in <0.05s vs 5-15s for naive loop)
-    attack_smoothed = lfilter(
-        [attack_alpha], [1, -(1 - attack_alpha)], mask_overlap
-    )
-    release_smoothed = lfilter(
-        [release_alpha], [1, -(1 - release_alpha)], mask_overlap[::-1]
-    )[::-1]
-    mask_overlap = np.maximum(attack_smoothed, release_smoothed)
+    # Exponential smoothing: 30ms attack after vocal onset, 150ms release
+    # after phrase end. This is intentionally causal so ducking does not
+    # pre-engage before a vocal phrase.
+    mask_overlap = _smooth_activity_mask(mask_overlap, sr)
 
     # Zero-pad mask to full instrumental length.
     # Zeros beyond min_len = no ducking = instrumental passes through cleanly

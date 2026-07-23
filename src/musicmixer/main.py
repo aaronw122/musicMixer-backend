@@ -13,6 +13,7 @@ from musicmixer.api import health, remix, shelf, stats, thumbnail
 from musicmixer.config import settings
 from musicmixer.logging_config import setup_logging
 from musicmixer.services.cleanup import cleanup_expired_sessions
+from musicmixer.services.song_cache import sweep_orphaned_staging_dirs
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ async def lifespan(app: FastAPI):
         app.state.sessions,
         app.state.sessions_lock,
     )
+    await asyncio.to_thread(sweep_orphaned_staging_dirs)
 
     # Background task: run cleanup every 30 minutes
     async def _periodic_cleanup() -> None:
@@ -112,7 +114,14 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
-    logger.info("musicMixer backend shutting down")
+    # Guard shutdown logging: under pytest's fd capture (and other harnesses),
+    # the log stream's file descriptor can be closed before lifespan teardown
+    # runs, making logging raise OSError (EBADF). A shutdown log must never be
+    # able to crash the process, so swallow stream errors here.
+    try:
+        logger.info("musicMixer backend shutting down")
+    except (OSError, ValueError):
+        pass
     app.state.executor.shutdown(wait=False)
     app.state.sse_executor.shutdown(wait=False)
 
