@@ -2010,7 +2010,7 @@ def _coordinated_get_or_create(
             continue  # ready vanished mid-copy -> re-enter
 
         if state is not None and state.status == "failed":
-            if state.retry_after is not None and _utcnow() < _parse_iso(state.retry_after):
+            if state.retry_after is None or _utcnow() < _parse_iso(state.retry_after):
                 _log_stem_cache_outcome(
                     "failed_backoff", video_id, role,
                     error_code=state.error_code,
@@ -2020,7 +2020,7 @@ def _coordinated_get_or_create(
                     f"Separation for {video_id}/{role} is in backoff",
                     state.error_code or STEM_ERROR_TRANSIENT,
                 )
-            # retry_after elapsed (or held with no retry): compete for a fresh lease.
+            # retry_after elapsed: compete for a fresh lease.
 
         # A pre-existing ``processing`` record whose lock we can now acquire means
         # the prior owner's lease expired: this acquire is a takeover.
