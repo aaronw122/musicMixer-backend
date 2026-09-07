@@ -93,7 +93,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "https://evil.com/watch?v=abc123",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -106,7 +105,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "ftp://youtube.com/watch?v=abc123",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -118,7 +116,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "https://youtube.com@evil.com/watch?v=abc123",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -130,7 +127,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "https://192.168.1.1/watch?v=abc123",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -142,7 +138,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "https://www.youtube.com:8080/watch?v=abc123",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -150,14 +145,13 @@ class TestYouTubeURLValidation:
     def test_accepts_youtu_be_shortlink(self, client):
         """youtu.be shortlinks should be accepted."""
         with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
-            mock_wrapper.side_effect = lambda *a, **kw: a[5].release()
+            mock_wrapper.side_effect = lambda *a, **kw: a[4].release()
 
             response = client.post(
                 "/api/remix/youtube",
                 json={
                     "url_a": "https://youtu.be/dQw4w9WgXcQ",
                     "url_b": "https://youtu.be/9bZkp7q19f0",
-                    "prompt": "test remix",
                 },
             )
             assert response.status_code == 200
@@ -165,14 +159,13 @@ class TestYouTubeURLValidation:
     def test_accepts_music_youtube_url(self, client):
         """music.youtube.com URLs should be accepted."""
         with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
-            mock_wrapper.side_effect = lambda *a, **kw: a[5].release()
+            mock_wrapper.side_effect = lambda *a, **kw: a[4].release()
 
             response = client.post(
                 "/api/remix/youtube",
                 json={
                     "url_a": "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
                     "url_b": "https://music.youtube.com/watch?v=9bZkp7q19f0",
-                    "prompt": "test remix",
                 },
             )
             assert response.status_code == 200
@@ -184,7 +177,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": VALID_YT_URL_A,
                 "url_b": "https://notyoutube.com/watch?v=abc",
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -196,7 +188,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "http://www.youtube.com/watch?v=dQw4w9WgXcQ",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -209,7 +200,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "https://evil.com/watch?v=abc123",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -225,7 +215,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "javascript:alert(1)",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -237,7 +226,6 @@ class TestYouTubeURLValidation:
             json={
                 "url_a": "",
                 "url_b": VALID_YT_URL_B,
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -250,7 +238,7 @@ class TestYouTubeRemixEndpoint:
         """Successful request should return a valid session_id immediately."""
         with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
             # Simulate the wrapper releasing the lock
-            def fake_wrapper(session_id, url_a, url_b, prompt, session, lock, app_state=None, **kwargs):
+            def fake_wrapper(session_id, url_a, url_b, session, lock, app_state=None, **kwargs):
                 lock.release()
                 if app_state:
                     from musicmixer.api.remix import _process_next_queued
@@ -263,7 +251,6 @@ class TestYouTubeRemixEndpoint:
                 json={
                     "url_a": VALID_YT_URL_A,
                     "url_b": VALID_YT_URL_B,
-                    "prompt": "Hendrix guitar with MF Doom rapping",
                 },
             )
 
@@ -285,7 +272,6 @@ class TestYouTubeRemixEndpoint:
                 json={
                     "url_a": VALID_YT_URL_A,
                     "url_b": VALID_YT_URL_B,
-                    "prompt": "test remix",
                 },
             )
             # Request should be queued, not rejected
@@ -318,7 +304,6 @@ class TestYouTubeRemixEndpoint:
                 json={
                     "url_a": VALID_YT_URL_A,
                     "url_b": VALID_YT_URL_B,
-                    "prompt": "test remix",
                 },
             )
             assert response.status_code == 503
@@ -331,9 +316,9 @@ class TestYouTubeRemixEndpoint:
         """Session should be stored in app.state.sessions."""
         with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
             def _fake(*a):
-                a[5].release()  # processing_lock
+                a[4].release()  # processing_lock
                 from musicmixer.api.remix import _process_next_queued
-                _process_next_queued(a[6])  # app_state
+                _process_next_queued(a[5])  # app_state
             mock_wrapper.side_effect = _fake
 
             response = client.post(
@@ -341,7 +326,6 @@ class TestYouTubeRemixEndpoint:
                 json={
                     "url_a": VALID_YT_URL_A,
                     "url_b": VALID_YT_URL_B,
-                    "prompt": "test remix",
                 },
             )
 
@@ -358,52 +342,16 @@ class TestYouTubeRemixEndpoint:
                 json={
                     "url_a": VALID_YT_URL_A,
                     "url_b": VALID_YT_URL_B,
-                    "prompt": "test remix",
                 },
             )
             assert response.status_code == 403
             assert "disabled" in response.json()["detail"]
-
-    def test_missing_prompt_field_accepted(self, client):
-        """Missing prompt field should be accepted (defaults to empty string)."""
-        with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
-            mock_wrapper.side_effect = lambda *a, **kw: a[5].release()
-
-            response = client.post(
-                "/api/remix/youtube",
-                json={
-                    "url_a": VALID_YT_URL_A,
-                    "url_b": VALID_YT_URL_B,
-                    # missing prompt — should default to ""
-                },
-            )
-            assert response.status_code == 200
-            data = response.json()
-            assert "session_id" in data
-
-    def test_empty_prompt_accepted(self, client):
-        """Explicitly empty prompt should be accepted."""
-        with patch("musicmixer.api.remix._youtube_pipeline_wrapper") as mock_wrapper:
-            mock_wrapper.side_effect = lambda *a, **kw: a[5].release()
-
-            response = client.post(
-                "/api/remix/youtube",
-                json={
-                    "url_a": VALID_YT_URL_A,
-                    "url_b": VALID_YT_URL_B,
-                    "prompt": "",
-                },
-            )
-            assert response.status_code == 200
-            data = response.json()
-            assert "session_id" in data
 
     def test_missing_url_fields(self, client):
         """Missing URL fields should return 422."""
         response = client.post(
             "/api/remix/youtube",
             json={
-                "prompt": "test remix",
             },
         )
         assert response.status_code == 422
@@ -414,7 +362,7 @@ class TestPreQueueUrlCacheHit:
     consuming the processing slot or enqueuing work.
 
     This is the sensitive bypass path described in the orchestration refactor
-    plan: same URLs + prompt -> served instantly, the pipeline wrapper is never
+    plan: same URL pair -> served instantly, the pipeline wrapper is never
     invoked, the processing lock is never acquired, and the wait queue stays
     empty.
     """
@@ -575,7 +523,6 @@ class TestYouTubePipelineWrapper:
                         session_id="test-session",
                         url_a=VALID_YT_URL_A,
                         url_b=VALID_YT_URL_B,
-                        prompt="test prompt",
                         session=session,
                         processing_lock=lock,
                         app_state=mock_app_state,
@@ -644,7 +591,6 @@ class TestYouTubePipelineWrapper:
                         session_id="test-session",
                         url_a=VALID_YT_URL_A,
                         url_b=VALID_YT_URL_B,
-                        prompt="test",
                         session=session,
                         processing_lock=lock,
                         app_state=mock_app_state,
@@ -702,7 +648,6 @@ class TestYouTubePipelineWrapper:
                     session_id="test-session",
                     url_a=VALID_YT_URL_A,
                     url_b=VALID_YT_URL_B,
-                    prompt="test",
                     session=session,
                     processing_lock=lock,
                     app_state=mock_app_state,
@@ -721,19 +666,6 @@ class TestYouTubePipelineWrapper:
         error_events = [e for e in events if e.get("step") == "error"]
         assert len(error_events) >= 1
         assert error_events[-1]["detail"] == "Something went wrong while creating your remix"
-
-    def test_rejects_prompt_over_length_limit(self, client):
-        """YouTube remix prompts over the route-level cap should return 422."""
-        response = client.post(
-            "/api/remix/youtube",
-            json={
-                "url_a": VALID_YT_URL_A,
-                "url_b": VALID_YT_URL_B,
-                "prompt": "x" * 2001,
-            },
-        )
-
-        assert response.status_code == 422
 
 
 class TestAnalyzeAndCheckpointStage:
@@ -823,7 +755,7 @@ class TestYouTubeProgressFlow:
         """After wrapper runs, last_event should reflect download progress."""
         completed = threading.Event()
 
-        def fake_wrapper(session_id, url_a, url_b, prompt, session, lock, app_state=None, **kwargs):
+        def fake_wrapper(session_id, url_a, url_b, session, lock, app_state=None, **kwargs):
             from musicmixer.services.pipeline import emit_progress
             emit_progress(session.events, {
                 "step": "downloading",
@@ -853,7 +785,6 @@ class TestYouTubeProgressFlow:
                 json={
                     "url_a": VALID_YT_URL_A,
                     "url_b": VALID_YT_URL_B,
-                    "prompt": "test remix",
                 },
             )
             session_id = response.json()["session_id"]

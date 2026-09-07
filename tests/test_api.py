@@ -53,7 +53,6 @@ class TestCreateRemix:
                 "song_a": ("song.txt", b"not audio", "text/plain"),
                 "song_b": ("song.mp3", b"fake mp3", "audio/mpeg"),
             },
-            data={"prompt": "test"},
         )
         assert response.status_code == 422
 
@@ -65,13 +64,12 @@ class TestCreateRemix:
                 "song_a": ("song.ogg", b"not audio", "audio/ogg"),
                 "song_b": ("song.flac", b"not audio", "audio/flac"),
             },
-            data={"prompt": "test"},
         )
         assert response.status_code == 422
 
     def test_accepts_mp3_files_with_mocked_pipeline(self, client, tmp_path):
         """Should accept .mp3 files and run pipeline successfully when mocked."""
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+        def fake_wrapper(session_id, song_a_path, song_b_path, session, processing_lock, *args, **kwargs):
             session.status = "complete"
             processing_lock.release()
 
@@ -82,7 +80,6 @@ class TestCreateRemix:
                     "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
                     "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
                 },
-                data={"prompt": "test"},
             )
             assert response.status_code == 200
 
@@ -101,7 +98,6 @@ class TestCreateRemix:
                 "11111111-1111-1111-1111-111111111111",
                 tmp_path / "a.mp3",
                 tmp_path / "b.mp3",
-                "",
                 session,
                 processing_lock,
                 app_state,
@@ -127,7 +123,6 @@ class TestCreateRemix:
                     "11111111-1111-1111-1111-111111111111",
                     tmp_path / "a.mp3",
                     tmp_path / "b.mp3",
-                    "",
                     SessionState(),
                     MagicMock(),
                     MagicMock(),
@@ -135,7 +130,7 @@ class TestCreateRemix:
 
     def test_successful_remix_returns_session_id(self, client, tmp_path):
         """Should return session_id on successful remix."""
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+        def fake_wrapper(session_id, song_a_path, song_b_path, session, processing_lock, *args, **kwargs):
             session.status = "complete"
             processing_lock.release()
 
@@ -146,7 +141,6 @@ class TestCreateRemix:
                     "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
                     "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
                 },
-                data={"prompt": "test"},
             )
             assert response.status_code == 200
             data = response.json()
@@ -158,7 +152,7 @@ class TestCreateRemix:
 
     def test_uploads_saved_to_disk(self, client, tmp_path):
         """Should save uploaded files to the upload directory."""
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+        def fake_wrapper(session_id, song_a_path, song_b_path, session, processing_lock, *args, **kwargs):
             session.status = "complete"
             processing_lock.release()
 
@@ -169,7 +163,6 @@ class TestCreateRemix:
                     "song_a": ("song_a.mp3", b"song a content", "audio/mpeg"),
                     "song_b": ("song_b.wav", b"song b content", "audio/x-wav"),
                 },
-                data={"prompt": "test"},
             )
             assert response.status_code == 200
             session_id = response.json()["session_id"]
@@ -187,7 +180,7 @@ class TestCreateRemix:
 
         POST now returns 200 immediately; errors are reported via /status endpoint.
         """
-        def fake_failing_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+        def fake_failing_wrapper(session_id, song_a_path, song_b_path, session, processing_lock, *args, **kwargs):
             session.status = "error"
             session.error = "Pipeline exploded"
             processing_lock.release()
@@ -199,7 +192,6 @@ class TestCreateRemix:
                     "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
                     "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
                 },
-                data={"prompt": "test"},
             )
             # Day 2: POST returns 200 immediately (pipeline runs in background)
             assert response.status_code == 200
@@ -215,7 +207,7 @@ class TestCreateRemix:
 
     def test_accepts_wav_files(self, client, tmp_path):
         """Should accept .wav files."""
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+        def fake_wrapper(session_id, song_a_path, song_b_path, session, processing_lock, *args, **kwargs):
             session.status = "complete"
             processing_lock.release()
 
@@ -226,7 +218,6 @@ class TestCreateRemix:
                     "song_a": ("song_a.wav", b"fake wav data", "audio/x-wav"),
                     "song_b": ("song_b.wav", b"fake wav data", "audio/x-wav"),
                 },
-                data={"prompt": "test"},
             )
             assert response.status_code == 200
 
@@ -246,7 +237,6 @@ class TestCreateRemix:
                     "song_a": ("song_a.mp3", b"some data", "audio/mpeg"),
                     "song_b": ("song_b.mp3", b"some data", "audio/mpeg"),
                 },
-                data={"prompt": "test"},
             )
         assert response.status_code == 413
 
@@ -266,7 +256,6 @@ class TestCreateRemix:
                     "song_a": ("song_a.mp3", oversized_data, "audio/mpeg"),
                     "song_b": ("song_b.mp3", b"small", "audio/mpeg"),
                 },
-                data={"prompt": "test"},
             )
             assert response.status_code == 413
             assert "song_a" in response.json()["detail"]
@@ -289,21 +278,19 @@ class TestCreateRemix:
                         "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
                         "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
                     },
-                    data={"prompt": "test"},
                 )
         finally:
             client.app.state.executor = original_executor
 
         # If the slot leaked, this follow-up request would return 409.
         with patch("musicmixer.api.remix._pipeline_wrapper") as mock_wrapper:
-            mock_wrapper.side_effect = lambda *args, **kwargs: args[5].release()
+            mock_wrapper.side_effect = lambda *args, **kwargs: args[4].release()
             response = client.post(
                 "/api/remix",
                 files={
                     "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
                     "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
                 },
-                data={"prompt": "test"},
             )
             assert response.status_code == 200
 
@@ -321,14 +308,13 @@ class TestUploadDurationGuard:
                     "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
                     "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
                 },
-                data={"prompt": "test"},
             )
             assert response.status_code == 413
             assert "duration" in response.json()["detail"].lower()
 
     def test_accepts_upload_under_duration_limit(self, client):
         """Should pass through when duration is under the limit."""
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+        def fake_wrapper(session_id, song_a_path, song_b_path, session, processing_lock, *args, **kwargs):
             session.status = "complete"
             processing_lock.release()
 
@@ -346,7 +332,7 @@ class TestUploadDurationGuard:
 
     def test_rejects_upload_when_ffprobe_fails(self, client):
         """Should reject when ffprobe can't determine duration."""
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
+        def fake_wrapper(session_id, song_a_path, song_b_path, session, processing_lock, *args, **kwargs):
             session.status = "complete"
             processing_lock.release()
 
@@ -362,119 +348,6 @@ class TestUploadDurationGuard:
             )
             assert response.status_code == 422
             assert "could not determine audio duration" in response.json()["detail"].lower()
-
-
-class TestCreateRemixNoPrompt:
-    """Tests that the /remix endpoint works without a prompt parameter."""
-
-    def test_accepts_mp3_files_without_prompt(self, client, tmp_path):
-        """Should accept .mp3 files without a prompt and return session_id."""
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
-            session.status = "complete"
-            processing_lock.release()
-
-        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
-            response = client.post(
-                "/api/remix",
-                files={
-                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
-                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
-                },
-                # No prompt data — should default to ""
-            )
-            assert response.status_code == 200
-            data = response.json()
-            assert "session_id" in data
-
-    def test_empty_prompt_accepted(self, client, tmp_path):
-        """Should accept an explicitly empty prompt string."""
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
-            session.status = "complete"
-            processing_lock.release()
-
-        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
-            response = client.post(
-                "/api/remix",
-                files={
-                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
-                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
-                },
-                data={"prompt": ""},
-            )
-            assert response.status_code == 200
-            data = response.json()
-            assert "session_id" in data
-
-    def test_rejects_prompt_over_length_limit(self, client):
-        """Should reject multipart remix prompts over the route-level cap."""
-        response = client.post(
-            "/api/remix",
-            files={
-                "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
-                "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
-            },
-            data={"prompt": "x" * 2001},
-        )
-        assert response.status_code == 422
-        assert "2000 characters" in response.json()["detail"]
-
-    def test_pipeline_receives_empty_prompt_when_omitted(self, client, tmp_path):
-        """When no prompt is sent, the pipeline wrapper should receive empty string."""
-        captured_prompt = []
-
-        def fake_wrapper(session_id, song_a_path, song_b_path, prompt, session, processing_lock, *args, **kwargs):
-            captured_prompt.append(prompt)
-            session.status = "complete"
-            processing_lock.release()
-
-        with patch("musicmixer.api.remix._pipeline_wrapper", fake_wrapper):
-            response = client.post(
-                "/api/remix",
-                files={
-                    "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
-                    "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
-                },
-                # No prompt
-            )
-            assert response.status_code == 200
-
-            # Give the background thread a moment to run
-            time.sleep(0.5)
-
-            assert len(captured_prompt) == 1
-            assert captured_prompt[0] == ""
-
-
-class TestYouTubeRemixRequestModel:
-    """Tests for the YouTubeRemixRequest model with optional prompt."""
-
-    def test_prompt_defaults_to_empty_string(self):
-        """YouTubeRemixRequest should accept missing prompt, defaulting to empty string."""
-        from musicmixer.api.remix import YouTubeRemixRequest
-        req = YouTubeRemixRequest(url_a="https://www.youtube.com/watch?v=abc", url_b="https://www.youtube.com/watch?v=xyz")
-        assert req.prompt == ""
-
-    def test_prompt_preserved_when_provided(self):
-        """YouTubeRemixRequest should preserve prompt when explicitly provided."""
-        from musicmixer.api.remix import YouTubeRemixRequest
-        req = YouTubeRemixRequest(
-            url_a="https://www.youtube.com/watch?v=abc",
-            url_b="https://www.youtube.com/watch?v=xyz",
-            prompt="mix the vocals with the beat",
-        )
-        assert req.prompt == "mix the vocals with the beat"
-
-    def test_prompt_over_length_limit_rejected(self):
-        """YouTubeRemixRequest should reject prompts over the route-level cap."""
-        from pydantic import ValidationError
-        from musicmixer.api.remix import YouTubeRemixRequest
-
-        with pytest.raises(ValidationError):
-            YouTubeRemixRequest(
-                url_a="https://www.youtube.com/watch?v=abc",
-                url_b="https://www.youtube.com/watch?v=xyz",
-                prompt="x" * 2001,
-            )
 
 
 class TestGetAudio:

@@ -601,7 +601,6 @@ def _backfill(
 def generate_candidates(
     meta_a: AudioMetadata,
     meta_b: AudioMetadata,
-    prompt: str = "",  # for future prompt-aware generation
     target_count: int = 12,
     min_count: int = 8,
     max_count: int = 16,
@@ -615,7 +614,6 @@ def generate_candidates(
     Args:
         meta_a: Audio metadata for song A (vocal source).
         meta_b: Audio metadata for song B (instrumental source).
-        prompt: User prompt (reserved for future prompt-aware generation).
         target_count: Target number of candidates to generate.
         min_count: Minimum candidates after dedup (triggers backfill if below).
         max_count: Maximum candidates to return.

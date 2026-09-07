@@ -530,7 +530,7 @@ class TestInterpretPromptCaching:
             mock_client.messages.create.return_value = mock_response
             mock_anthropic.Anthropic.return_value = mock_client
 
-            plan = interpret_prompt("test prompt", meta_a, meta_b)
+            plan = interpret_prompt(meta_a, meta_b)
 
             # Verify the system= kwarg was a list of dicts
             call_kwargs = mock_client.messages.create.call_args
@@ -603,7 +603,7 @@ class TestInterpretPromptCaching:
             mock_anthropic.Anthropic.return_value = mock_client
 
             # Should not raise even without cache_read_input_tokens / cache_creation_input_tokens
-            plan = interpret_prompt("test prompt", meta_a, meta_b)
+            plan = interpret_prompt(meta_a, meta_b)
             assert isinstance(plan, IntentPlan)
 
     def test_stem_backend_local_raises(self):
@@ -615,7 +615,7 @@ class TestInterpretPromptCaching:
             mock_settings.stem_backend = "local"
 
             with pytest.raises(ValueError, match="stem_backend='local' is not supported"):
-                interpret_prompt("test prompt", meta_a, meta_b)
+                interpret_prompt(meta_a, meta_b)
 
 
 # ---------------------------------------------------------------------------
@@ -1037,7 +1037,7 @@ def _interpret_with_mock(mock_responses):
         mock_client.messages.create.side_effect = mock_responses
         mock_anthropic.Anthropic.return_value = mock_client
 
-        plan = interpret_prompt("test prompt", meta_a, meta_b)
+        plan = interpret_prompt(meta_a, meta_b)
         return plan, mock_client
 
 
@@ -1104,7 +1104,7 @@ class TestRetryMessageReplacement:
             mock_client.messages.create.side_effect = [short_response, good_response]
             mock_anthropic.Anthropic.return_value = mock_client
 
-            plan = interpret_prompt("test prompt", meta_a, meta_b)
+            plan = interpret_prompt(meta_a, meta_b)
 
             # Both calls should have the same number of messages
             first_call_msgs = mock_client.messages.create.call_args_list[0].kwargs["messages"]
@@ -1137,15 +1137,15 @@ class TestRetryMessageReplacement:
             mock_client.messages.create.side_effect = [short_response, good_response]
             mock_anthropic.Anthropic.return_value = mock_client
 
-            interpret_prompt("test prompt", meta_a, meta_b)
+            interpret_prompt(meta_a, meta_b)
 
             # Second call's last user message should contain retry guidance
             second_call_msgs = mock_client.messages.create.call_args_list[1].kwargs["messages"]
             last_user_msg = second_call_msgs[-1]
             assert "IMPORTANT" in last_user_msg["content"]
             assert "REJECTED" in last_user_msg["content"]
-            # Original prompt content should still be present
-            assert "test prompt" in last_user_msg["content"]
+            # Original task content should still be present
+            assert "Create a mashup using vocals from Song A" in last_user_msg["content"]
 
 
 class TestLLMMaxTokensConstant:

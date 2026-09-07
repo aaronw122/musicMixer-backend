@@ -56,7 +56,6 @@ class PreQueueCacheHit:
 def restore_prequeue_cached_remix(
     url_a: str,
     url_b: str,
-    prompt: str,
     *,
     session_id: str,
     cache_dir: Path,
@@ -64,7 +63,7 @@ def restore_prequeue_cached_remix(
 ) -> PreQueueCacheHit | None:
     """Resolve a URL-cache hit before queueing, or return ``None`` to fall through.
 
-    Same URLs + prompt always produce the same remix, so a hit can be served
+    The same URL pair always produces the same remix, so a hit can be served
     instantly without consuming a processing slot. On a hit, the cached remix is
     copied into the session's output dir and the metadata-derived fields are
     returned. Any failure returns ``None`` so the route enqueues normally.
@@ -76,7 +75,7 @@ def restore_prequeue_cached_remix(
     )
 
     try:
-        url_key = compute_url_cache_key(url_a, url_b, prompt)
+        url_key = compute_url_cache_key(url_a, url_b)
         cached_path = get_cached_remix(url_key, cache_dir)
         if cached_path is None:
             return None

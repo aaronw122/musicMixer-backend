@@ -41,7 +41,6 @@ from musicmixer.api.shelf import ensure_on_shelf
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-PROMPT_MAX_CHARS = 2000
 _GENERIC_REMIX_ERROR_DETAIL = "Something went wrong while creating your remix"
 _TERMINAL_STEPS = {"complete", "error", "cancelled"}
 
@@ -72,7 +71,6 @@ def _pipeline_wrapper(
     session_id: str,
     song_a_path: Path,
     song_b_path: Path,
-    prompt: str,
     session: SessionState,
     processing_lock,
     app_state,
@@ -94,7 +92,6 @@ def _pipeline_wrapper(
             session_id=session_id,
             song_a_path=str(song_a_path),
             song_b_path=str(song_b_path),
-            prompt=prompt,
             event_queue=session.events,
             session=session,
             song_a_original_filename=song_a_original_filename,
@@ -147,7 +144,6 @@ def _validate_youtube_url(url: str) -> None:
 class YouTubeRemixRequest(BaseModel):
     url_a: str  # YouTube URL for song A
     url_b: str  # YouTube URL for song B
-    prompt: str = Field(default="", max_length=PROMPT_MAX_CHARS)
 
 
 # Structured-error wire contract (producer side; the frontend is the consumer).
@@ -182,13 +178,6 @@ def _plain_error_event(detail: str) -> dict:
     """
     return {"step": "error", "detail": detail, "progress": 0}
 
-
-def _validate_prompt_length(prompt: str) -> None:
-    if len(prompt) > PROMPT_MAX_CHARS:
-        raise HTTPException(
-            422,
-            f"Prompt must be {PROMPT_MAX_CHARS} characters or fewer",
-        )
 
 
 def _build_error_event(exc: BaseException) -> dict:
@@ -278,7 +267,6 @@ def _youtube_pipeline_wrapper(
     session_id: str,
     url_a: str,
     url_b: str,
-    prompt: str,
     session: SessionState,
     processing_lock,
     app_state,
@@ -333,7 +321,6 @@ def _youtube_pipeline_wrapper(
                 run_remix(
                     session_id=session_id,
                     analysis=cached.analysis,
-                    prompt=prompt,
                     event_queue=session.events,
                     session=session,
                     source_quality_a=cached.source_quality_a,
@@ -376,7 +363,6 @@ def _youtube_pipeline_wrapper(
         run_remix(
             session_id=session_id,
             analysis=analyzed.analysis,
-            prompt=prompt,
             event_queue=session.events,
             session=session,
             source_quality_a=analyzed.source_quality_a,
@@ -582,7 +568,6 @@ def create_youtube_remix(
     if not settings.youtube_enabled:
         raise HTTPException(403, "YouTube input is disabled")
 
-    _validate_prompt_length(body.prompt)
 
     # Validate both URLs (SSRF prevention) before doing any work
     _validate_youtube_url(body.url_a)
@@ -611,14 +596,13 @@ def create_youtube_remix(
     # Clean up expired sessions before processing
     cleanup_expired_sessions(request.app.state.sessions, request.app.state.sessions_lock)
 
-    # Same URLs + prompt always produce the same remix. Check before queueing
+    # The same URL pair always produces the same remix. Check before queueing
     # so cached remixes are served instantly without consuming a processing slot.
     if settings.remix_cache_enabled:
         cache_session_id = str(uuid.uuid4())
         cache_hit = restore_prequeue_cached_remix(
             body.url_a,
             body.url_b,
-            body.prompt,
             session_id=cache_session_id,
             cache_dir=settings.remix_cache_dir,
             data_dir=settings.data_dir,
@@ -648,7 +632,7 @@ def create_youtube_remix(
     if settings.remix_cache_enabled:
         try:
             from musicmixer.services.remix_cache import compute_url_cache_key
-            session.url_cache_key = compute_url_cache_key(body.url_a, body.url_b, body.prompt)
+            session.url_cache_key = compute_url_cache_key(body.url_a, body.url_b)
         except Exception:
             pass
     with request.app.state.sessions_lock:
@@ -662,7 +646,6 @@ def create_youtube_remix(
             session_id,
             body.url_a,
             body.url_b,
-            body.prompt,
             session,
             processing_lock,
             app_state,
@@ -680,7 +663,6 @@ def create_remix(
     request: Request,
     song_a: UploadFile = File(...),
     song_b: UploadFile = File(...),
-    prompt: str = Form(""),
 ):
     """Accept two songs, start async pipeline, return session ID immediately.
 
@@ -688,7 +670,6 @@ def create_remix(
     Returns 503 if the queue is full.
     """
     max_bytes = settings.max_file_size_mb * 1024 * 1024
-    _validate_prompt_length(prompt)
 
     # Validate extensions
     for label, file in [("song_a", song_a), ("song_b", song_b)]:
@@ -766,7 +747,6 @@ def create_remix(
             session_id,
             song_a_path,
             song_b_path,
-            prompt,
             session,
             processing_lock,
             app_state,

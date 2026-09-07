@@ -147,7 +147,6 @@ def _run_pipeline_with_mock_separation(pipeline_tmp, session=None, settings_over
                 session_id="test-session",
                 song_a_path=str(pipeline_tmp["song_a_path"]),
                 song_b_path=str(pipeline_tmp["song_b_path"]),
-                prompt="test remix",
                 event_queue=event_queue,
                 session=session,
                 **pipeline_kwargs,
@@ -291,7 +290,6 @@ class TestPipelineHandlesSeparationError:
                     session_id="test-session",
                     song_a_path=str(pipeline_tmp["song_a_path"]),
                     song_b_path=str(pipeline_tmp["song_b_path"]),
-                    prompt="test remix",
                     event_queue=event_queue,
                     session=session,
                 )

@@ -1,8 +1,8 @@
 """Remix output caching by composite content hash.
 
-Avoids re-running the full pipeline for identical (song_a, song_b, prompt)
+Avoids re-running the full pipeline for identical (song_a, song_b)
 requests. The cache key is SHA-256 of the concatenation of the two song
-content hashes and the normalized prompt.
+content hashes.
 
 Cache layout:
     data/remix_cache/{sha256_hex}/remix.mp3
@@ -42,29 +42,26 @@ def get_cache_key(audio_path: Path) -> str:
     return h.hexdigest()
 
 
-def compute_url_cache_key(url_a: str, url_b: str, prompt: str) -> str:
-    """Compute a cache key from YouTube URLs + prompt (no file I/O needed).
+def compute_url_cache_key(url_a: str, url_b: str) -> str:
+    """Compute a cache key from the YouTube URL pair (no file I/O needed).
 
     Uses the same SHA-256 scheme as the file-based key but substitutes
     URL strings for content hashes. This allows a fast pre-queue cache
-    lookup before songs are downloaded.
     """
-    normalized_prompt = prompt.strip().lower()
-    composite = f"url:{url_a}:{url_b}:{normalized_prompt}"
+    composite = f"url:{url_a}:{url_b}"
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
 
-def compute_remix_cache_key(song_a_path: Path, song_b_path: Path, prompt: str) -> str:
+def compute_remix_cache_key(song_a_path: Path, song_b_path: Path) -> str:
     """Compute an order-aware cache key for a remix request.
 
-    The key is SHA-256 of ``song_a_hash + ":" + song_b_hash + ":" + normalized_prompt``.
+    The key is SHA-256 of ``song_a_hash + ":" + song_b_hash``.
     Swapping song_a and song_b produces a different key (intentional -- the
     pipeline assigns vocals from A and instrumentals from B).
     """
     song_a_hash = get_cache_key(song_a_path)
     song_b_hash = get_cache_key(song_b_path)
-    normalized_prompt = prompt.strip().lower()
-    composite = f"{song_a_hash}:{song_b_hash}:{normalized_prompt}"
+    composite = f"{song_a_hash}:{song_b_hash}"
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()
 
 
