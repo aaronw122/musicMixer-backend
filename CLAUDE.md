@@ -206,6 +206,7 @@ This downloads the Whisper base model, pyannote VAD model, and wav2vec2 alignmen
 
 - **Kill background agents before `uv run dev`.** Agents writing files in the backend dir trigger `--reload` restart loops. See "File Watcher" section above. Quick check: `pgrep -lf 'claude -p|codex exec'`
 - **Verify port is free before starting server.** Zombie processes hold ports after `Ctrl+C`. Check: `lsof -i :8000`. Kill: `kill $(lsof -i :8000 -t)`
+- **Modal remounts `/tmp` fresh at runtime — never bake files there at image build.** audio-separator defaults `model_file_dir` to `/tmp/audio-separator-models/`, so a build-time model pre-download silently vanishes and every cold container re-downloads ~700MB (~82s). Always pass `model_file_dir="/models"` (or any non-`/tmp` path) at both build and runtime. Cost us ~120s of cold start until 2026-09-07.
 - **No `.env` = Modal default.** Without `STEM_BACKEND=local` in `.env`, the server tries Modal (hangs if unconfigured).
 - **Long silences during separation are normal.** Stem separation produces no intermediate output (Modal is ~16s/song warm but adds a ~25s cold start; local CPU is 10-20 min/song). Don't assume it's stuck during these windows.
 - **Each session produces ~500MB of stem data.** Clean between test runs: `rm -rf data/stems/* data/uploads/* data/remixes/*`

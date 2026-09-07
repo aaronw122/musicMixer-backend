@@ -61,7 +61,7 @@ class TestSeparateModalValidation:
         """Should raise RuntimeError if Modal returns fewer than 6 stems."""
         from musicmixer.services.separation import _separate_modal
 
-        # Mock separate_stems_remote to return only 4 stems
+        # Mock InstrumentalSeparator.separate to return only 4 stems
         incomplete_stems = {
             "vocals": _make_float32_wav_bytes(440),
             "drums": _make_float32_wav_bytes(220),
@@ -70,13 +70,13 @@ class TestSeparateModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = incomplete_stems
+        mock_remote.return_value.separate.remote.return_value = incomplete_stems
 
         # Create a real input file
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             with pytest.raises(RuntimeError, match="Expected 6 stems"):
                 _separate_modal(input_path, tmp_path / "out")
 
@@ -94,14 +94,14 @@ class TestSeparateModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = complete_stems
+        mock_remote.return_value.separate.remote.return_value = complete_stems
 
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
         output_dir = tmp_path / "out"
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             result = _separate_modal(input_path, output_dir)
 
         assert set(result.keys()) == {"vocals", "drums", "bass", "guitar", "piano", "other"}
@@ -133,14 +133,14 @@ class TestSeparateModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = complete_stems
+        mock_remote.return_value.separate.remote.return_value = complete_stems
 
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
         output_dir = tmp_path / "out"
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             with caplog.at_level(logging.WARNING, logger="musicmixer.services.separation"):
                 result = _separate_modal(input_path, output_dir)
 
@@ -407,12 +407,12 @@ class TestSeparateVocalSongModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = incomplete_stems
+        mock_remote.return_value.separate.remote.return_value = incomplete_stems
 
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             with pytest.raises(RuntimeError, match="Expected vocal-song stems"):
                 _separate_vocal_song_modal(input_path, tmp_path / "out")
 
@@ -427,14 +427,14 @@ class TestSeparateVocalSongModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = complete_stems
+        mock_remote.return_value.separate.remote.return_value = complete_stems
 
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
         output_dir = tmp_path / "out"
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             result = _separate_vocal_song_modal(input_path, output_dir)
 
         assert set(result.keys()) == {"lead_vocals", "backing_vocals", "instrumental"}
@@ -462,12 +462,12 @@ class TestSeparateVocalSongModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = complete_stems
+        mock_remote.return_value.separate.remote.return_value = complete_stems
 
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             with caplog.at_level(logging.WARNING, logger="musicmixer.services.separation"):
                 result = _separate_vocal_song_modal(input_path, tmp_path / "out")
 
@@ -486,12 +486,12 @@ class TestSeparateVocalSongModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = extra_stems
+        mock_remote.return_value.separate.remote.return_value = extra_stems
 
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             with pytest.raises(RuntimeError, match="Expected vocal-song stems"):
                 _separate_vocal_song_modal(input_path, tmp_path / "out")
 

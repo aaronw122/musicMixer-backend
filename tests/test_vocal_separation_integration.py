@@ -255,12 +255,12 @@ class TestSeparateVocalModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = incomplete
+        mock_remote.return_value.separate.remote.return_value = incomplete
 
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             with pytest.raises(RuntimeError, match="Expected vocal-song stems"):
                 _separate_vocal_song_modal(input_path, tmp_path / "out")
 
@@ -275,12 +275,12 @@ class TestSeparateVocalModalValidation:
         }
 
         mock_remote = MagicMock()
-        mock_remote.remote.return_value = complete
+        mock_remote.return_value.separate.remote.return_value = complete
 
         input_path = tmp_path / "input.wav"
         input_path.write_bytes(_make_float32_wav_bytes())
 
-        with patch("modal.Function.from_name", return_value=mock_remote):
+        with patch("modal.Cls.from_name", return_value=mock_remote):
             result = _separate_vocal_song_modal(input_path, tmp_path / "out")
 
         assert set(result.keys()) == {"lead_vocals", "backing_vocals", "instrumental"}

@@ -64,11 +64,11 @@ def _separate_modal(
     # Read audio file as bytes
     audio_bytes = audio_path.read_bytes()
 
-    # Look up the deployed function by name
-    separate_fn = modal.Function.from_name(
-        "musicmixer-separation", "separate_stems_remote"
+    # Look up the deployed class by name
+    separator_cls = modal.Cls.from_name(
+        "musicmixer-separation", "InstrumentalSeparator"
     )
-    stem_bytes_map = separate_fn.remote(
+    stem_bytes_map = separator_cls().separate.remote(
         audio_bytes=audio_bytes,
         filename=audio_path.name,
     )
@@ -109,10 +109,10 @@ def _separate_vocal_song_modal(
 
     audio_bytes = audio_path.read_bytes()
 
-    separate_fn = modal.Function.from_name(
-        "musicmixer-separation", "separate_vocal_song_remote"
+    separator_cls = modal.Cls.from_name(
+        "musicmixer-separation", "VocalSeparator"
     )
-    stem_bytes_map = separate_fn.remote(
+    stem_bytes_map = separator_cls().separate.remote(
         audio_bytes=audio_bytes,
         filename=audio_path.name,
     )
