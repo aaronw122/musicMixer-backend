@@ -47,6 +47,7 @@ def compute_url_cache_key(url_a: str, url_b: str) -> str:
 
     Uses the same SHA-256 scheme as the file-based key but substitutes
     URL strings for content hashes. This allows a fast pre-queue cache
+    lookup before songs are downloaded.
     """
     composite = f"url:{url_a}:{url_b}"
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()

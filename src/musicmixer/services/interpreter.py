@@ -187,6 +187,14 @@ REMIX_PLAN_TOOL: dict = {
 }
 
 
+# The fixed remix task sent to the LLM on every request. Users never supply
+# prompts; creative variation comes entirely from the song-data layers.
+REMIX_TASK = (
+    "Create a mashup using vocals from Song A over the instrumentals "
+    "from Song B. Analyze the song structures and make smart arrangement decisions."
+)
+
+
 # ---------------------------------------------------------------------------
 # System prompt construction
 # ---------------------------------------------------------------------------
@@ -799,14 +807,12 @@ def _build_few_shot_messages() -> list[dict]:
     B. "Edge Case": Moderate tempo gap, sparse metadata (no lyrics),
        6 sections, sparser arrangements, bridge label.
     """
-    default_prompt = REMIX_TASK
-
     return [
         # Example A: "Bread and Butter" — well-matched songs, full data, lyrics
         {
             "role": "user",
             "content": (
-                f'Create a remix plan for this prompt: "{default_prompt}"\n\n'
+                f'Create a remix plan for this prompt: "{REMIX_TASK}"\n\n'
                 "DURATION: Target = 210s = ~413 beats at 118 BPM (1 beat = 0.51s, 1 bar = 4 beats).\n"
                 "Arrangements shorter than 147s will be REJECTED.\n\n"
                 "SONG DATA:\n\n"
@@ -894,7 +900,7 @@ def _build_few_shot_messages() -> list[dict]:
         {
             "role": "user",
             "content": (
-                f'Create a remix plan for this prompt: "{default_prompt}"\n\n'
+                f'Create a remix plan for this prompt: "{REMIX_TASK}"\n\n'
                 "DURATION: Target = 210s = ~308 beats at 88 BPM (1 beat = 0.68s, 1 bar = 4 beats).\n"
                 "Arrangements shorter than 147s will be REJECTED.\n\n"
                 "SONG DATA:\n\n"
@@ -1230,17 +1236,10 @@ def _warn_vocal_stretch_limits(plan: IntentPlan, stretch_pct: float) -> None:
 # Main LLM entry point
 # ---------------------------------------------------------------------------
 
-# The fixed remix task sent to the LLM on every request. Users never supply
-# prompts; creative variation comes entirely from the song-data layers.
-REMIX_TASK = (
-    "Create a mashup using vocals from Song A over the instrumentals "
-    "from Song B. Analyze the song structures and make smart arrangement decisions."
-)
-
 
 def interpret_prompt(
-    song_a_meta: AudioMetadata = None,
-    song_b_meta: AudioMetadata = None,
+    song_a_meta: AudioMetadata,
+    song_b_meta: AudioMetadata,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
 ) -> IntentPlan | RemixPlan:

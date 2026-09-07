@@ -179,7 +179,6 @@ def _plain_error_event(detail: str) -> dict:
     return {"step": "error", "detail": detail, "progress": 0}
 
 
-
 def _build_error_event(exc: BaseException) -> dict:
     """Build the SSE `error` event payload from a pipeline exception.
 
@@ -567,7 +566,6 @@ def create_youtube_remix(
     """
     if not settings.youtube_enabled:
         raise HTTPException(403, "YouTube input is disabled")
-
 
     # Validate both URLs (SSRF prevention) before doing any work
     _validate_youtube_url(body.url_a)

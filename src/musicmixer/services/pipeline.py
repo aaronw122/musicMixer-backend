@@ -825,7 +825,7 @@ def _step_interpret_prompt(
     from musicmixer.services.gain_mapper import map_intent_to_gains
     from musicmixer.services.interpreter import interpret_prompt
 
-    logger.info("Session %s: [4/17] interpreting prompt via LLM...", session_id)
+    logger.info("Session %s: [4/17] LLM remix planning...", session_id)
     emit_progress(event_queue, progress_event(
         "interpreting", "Your AI DJ is planning the mix...", 0.58,
     ), session=session)
