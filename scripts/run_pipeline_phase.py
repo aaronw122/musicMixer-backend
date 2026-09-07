@@ -35,11 +35,6 @@ def main() -> int:
         help="Source quality string for song B (e.g., youtube-opus-128kbps)",
     )
     parser.add_argument(
-        "--prompt",
-        default="",
-        help="Remix prompt to pass to the LLM interpreter",
-    )
-    parser.add_argument(
         "--force-vocal-source",
         default=None,
         choices=["song_a", "song_b"],
@@ -54,7 +49,6 @@ def main() -> int:
         session_id=f"ab-{args.phase}",
         song_a_path=args.song_a,
         song_b_path=args.song_b,
-        prompt=args.prompt,
         event_queue=events,
         session=session,
         source_quality_a=args.source_quality_a,

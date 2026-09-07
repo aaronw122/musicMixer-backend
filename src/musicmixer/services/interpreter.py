@@ -187,6 +187,14 @@ REMIX_PLAN_TOOL: dict = {
 }
 
 
+# The fixed remix task sent to the LLM on every request. Users never supply
+# prompts; creative variation comes entirely from the song-data layers.
+REMIX_TASK = (
+    "Create a mashup using vocals from Song A over the instrumentals "
+    "from Song B. Analyze the song structures and make smart arrangement decisions."
+)
+
+
 # ---------------------------------------------------------------------------
 # System prompt construction
 # ---------------------------------------------------------------------------
@@ -799,18 +807,12 @@ def _build_few_shot_messages() -> list[dict]:
     B. "Edge Case": Moderate tempo gap, sparse metadata (no lyrics),
        6 sections, sparser arrangements, bridge label.
     """
-    # The actual default prompt used when user provides nothing
-    default_prompt = (
-        "Create a mashup using vocals from Song A over the instrumentals "
-        "from Song B. Analyze the song structures and make smart arrangement decisions."
-    )
-
     return [
         # Example A: "Bread and Butter" — well-matched songs, full data, lyrics
         {
             "role": "user",
             "content": (
-                f'Create a remix plan for this prompt: "{default_prompt}"\n\n'
+                f'Create a remix plan for this prompt: "{REMIX_TASK}"\n\n'
                 "DURATION: Target = 210s = ~413 beats at 118 BPM (1 beat = 0.51s, 1 bar = 4 beats).\n"
                 "Arrangements shorter than 147s will be REJECTED.\n\n"
                 "SONG DATA:\n\n"
@@ -898,7 +900,7 @@ def _build_few_shot_messages() -> list[dict]:
         {
             "role": "user",
             "content": (
-                f'Create a remix plan for this prompt: "{default_prompt}"\n\n'
+                f'Create a remix plan for this prompt: "{REMIX_TASK}"\n\n'
                 "DURATION: Target = 210s = ~308 beats at 88 BPM (1 beat = 0.68s, 1 bar = 4 beats).\n"
                 "Arrangements shorter than 147s will be REJECTED.\n\n"
                 "SONG DATA:\n\n"
@@ -1234,14 +1236,14 @@ def _warn_vocal_stretch_limits(plan: IntentPlan, stretch_pct: float) -> None:
 # Main LLM entry point
 # ---------------------------------------------------------------------------
 
+
 def interpret_prompt(
-    prompt: str = "",
-    song_a_meta: AudioMetadata = None,
-    song_b_meta: AudioMetadata = None,
+    song_a_meta: AudioMetadata,
+    song_b_meta: AudioMetadata,
     lyrics_a: LyricsData | None = None,
     lyrics_b: LyricsData | None = None,
 ) -> IntentPlan | RemixPlan:
-    """Convert user prompt + song metadata into a structured IntentPlan.
+    """Convert song metadata into a structured IntentPlan via the LLM.
 
     Returns IntentPlan (musical intent with stem roles + energy levels) on
     LLM success. The gain mapper module converts IntentPlan -> RemixPlan.
@@ -1251,14 +1253,7 @@ def interpret_prompt(
     isinstance() or used_fallback to determine which path was taken.
 
     Synchronous -- runs in the pipeline thread, NOT the async event loop.
-
-    When no prompt is provided, uses a default prompt that lets the LLM
-    analyze song structure and make intelligent mixing decisions.
     """
-    # Default prompt when user doesn't provide one
-    if not prompt or not prompt.strip():
-        prompt = "Create a mashup using vocals from Song A over the instrumentals from Song B. Analyze the song structures and make smart arrangement decisions."
-        logger.info("No user prompt provided, using default prompt for LLM interpretation")
 
     # Guard: interpreter requires 6-stem separation (Modal)
     if settings.stem_backend != "modal":
@@ -1309,7 +1304,7 @@ def interpret_prompt(
     )
 
     # Build messages: few-shot examples + user prompt with dynamic context
-    user_content = f'{dynamic_context}\n\nCreate a remix plan for this prompt: "{prompt}"'
+    user_content = f'{dynamic_context}\n\nCreate a remix plan for this prompt: "{REMIX_TASK}"'
     messages = _build_few_shot_messages() + [
         {"role": "user", "content": user_content},
     ]
@@ -1318,8 +1313,8 @@ def interpret_prompt(
 
     # Log request
     logger.info(
-        "LLM request: prompt=%r, song_a_bpm=%.1f, song_b_bpm=%.1f, model=%s",
-        prompt, song_a_meta.bpm, song_b_meta.bpm, settings.llm_model,
+        "LLM request: song_a_bpm=%.1f, song_b_bpm=%.1f, model=%s",
+        song_a_meta.bpm, song_b_meta.bpm, settings.llm_model,
     )
 
     start = time.monotonic()

@@ -122,7 +122,6 @@ def _check_remix_cache(
     session_id: str,
     song_a_path,
     song_b_path,
-    prompt: str,
     output_path,
     session: SessionState,
     event_queue: queue.Queue,
@@ -148,7 +147,7 @@ def _check_remix_cache(
         )
         import shutil as _shutil
 
-        remix_cache_key = compute_remix_cache_key(song_a_path, song_b_path, prompt)
+        remix_cache_key = compute_remix_cache_key(song_a_path, song_b_path)
         cached_path = get_cached_remix(remix_cache_key, settings.remix_cache_dir)
 
         if cached_path is not None:
@@ -812,14 +811,13 @@ def _step_measure_stem_lufs(
 
 def _step_interpret_prompt(
     session_id: str,
-    prompt: str,
     meta_a, meta_b,
     lyrics_a_data, lyrics_b_data,
     vocal_stem_lufs: dict[str, float],
     inst_stem_lufs: dict[str, float],
     event_queue, session,
 ) -> tuple:
-    """Step 4: Interpret prompt via LLM, map gains.
+    """Step 4: LLM remix planning, map gains.
 
     Returns (plan, vocal_type).
     """
@@ -827,13 +825,13 @@ def _step_interpret_prompt(
     from musicmixer.services.gain_mapper import map_intent_to_gains
     from musicmixer.services.interpreter import interpret_prompt
 
-    logger.info("Session %s: [4/17] interpreting prompt via LLM...", session_id)
+    logger.info("Session %s: [4/17] LLM remix planning...", session_id)
     emit_progress(event_queue, progress_event(
-        "interpreting", "Your AI DJ is reading the prompt...", 0.58,
+        "interpreting", "Your AI DJ is planning the mix...", 0.58,
     ), session=session)
 
     intent_or_plan = interpret_prompt(
-        prompt, meta_a, meta_b,
+        meta_a, meta_b,
         lyrics_a=lyrics_a_data,
         lyrics_b=lyrics_b_data,
     )
@@ -2044,7 +2042,6 @@ def analyze_songs(
 def run_remix(
     session_id: str,
     analysis: AnalyzedSongs,
-    prompt: str = "",
     event_queue: queue.Queue | None = None,
     session: SessionState | None = None,
     source_quality_a: str | None = None,
@@ -2054,7 +2051,7 @@ def run_remix(
 ) -> None:
     """Remix phase (steps 4-16): LLM planning, DSP processing, export.
 
-    Takes pre-analyzed song data and a prompt, produces a finished MP3.
+    Takes pre-analyzed song data, produces a finished MP3.
     """
     assert event_queue is not None
     assert session is not None
@@ -2075,10 +2072,10 @@ def run_remix(
     if hasattr(session, "_analysis_step_times"):
         _step_times.update(session._analysis_step_times)  # type: ignore[attr-defined]
 
-    # === STEP 4: Interpret prompt ===
+    # === STEP 4: LLM remix planning ===
     _t0 = time.monotonic()
     plan, vocal_type = _step_interpret_prompt(
-        session_id, prompt, meta_a, meta_b,
+        session_id, meta_a, meta_b,
         analysis.lyrics_a, analysis.lyrics_b,
         analysis.vocal_stem_lufs, analysis.inst_stem_lufs,
         event_queue, session,
@@ -2311,7 +2308,6 @@ def run_pipeline(
     session_id: str,
     song_a_path: str | Path,
     song_b_path: str | Path,
-    prompt: str = "",
     event_queue: queue.Queue | None = None,
     session: SessionState | None = None,
     song_a_original_filename: str = "",
@@ -2337,11 +2333,11 @@ def run_pipeline(
     remix_dir.mkdir(parents=True, exist_ok=True)
     output_path = remix_dir / "remix.mp3"
 
-    logger.info("Session %s: pipeline started (prompt=%r)", session_id, prompt[:80])
+    logger.info("Session %s: pipeline started", session_id)
 
     # === REMIX CACHE CHECK ===
     remix_cache_key = _check_remix_cache(
-        session_id, _song_a, _song_b, prompt,
+        session_id, _song_a, _song_b,
         output_path, session, event_queue,
     )
     if session.status == "complete":
@@ -2368,7 +2364,6 @@ def run_pipeline(
     run_remix(
         session_id=session_id,
         analysis=analysis,
-        prompt=prompt,
         event_queue=event_queue,
         session=session,
         source_quality_a=source_quality_a,

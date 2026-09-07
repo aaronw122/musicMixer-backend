@@ -111,7 +111,6 @@ def _run_wrapper_with_download(download_side_effect):
             session_id="11111111-1111-1111-1111-111111111111",
             url_a="https://youtube.com/watch?v=aaa",
             url_b="https://youtube.com/watch?v=bbb",
-            prompt="",
             session=session,
             processing_lock=processing_lock,
             app_state=app_state,

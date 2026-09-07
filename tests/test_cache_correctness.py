@@ -653,7 +653,6 @@ class TestFullyCachedFastPath:
                 session_id=session_id,
                 url_a="https://www.youtube.com/watch?v=" + vid_a,
                 url_b="https://www.youtube.com/watch?v=" + vid_b,
-                prompt="test prompt",
                 session=session,
                 processing_lock=processing_lock,
                 app_state=app_state,
@@ -666,6 +665,5 @@ class TestFullyCachedFastPath:
 
         assert "kwargs" in remix_calls, "wrapper must visibly call run_remix on a hit"
         assert remix_calls["kwargs"]["session_id"] == session_id
-        assert remix_calls["kwargs"]["prompt"] == "test prompt"
         assert remix_calls["kwargs"]["analysis"] is not None
         assert avg_calls["n"] == 1, "wrapper must update average duration on a hit"

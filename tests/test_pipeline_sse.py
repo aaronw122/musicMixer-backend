@@ -55,7 +55,7 @@ def client(tmp_path):
 @pytest.fixture
 def mock_pipeline_fast(tmp_path):
     """Mock pipeline that completes instantly, emitting progress events."""
-    def _mock_run_pipeline(session_id, song_a_path, song_b_path, prompt, event_queue, session, **kwargs):
+    def _mock_run_pipeline(session_id, song_a_path, song_b_path, event_queue, session, **kwargs):
         from musicmixer.services.pipeline import emit_progress
 
         emit_progress(event_queue, {
@@ -91,7 +91,7 @@ def mock_pipeline_slow():
     go_event = threading.Event()
     done_event = threading.Event()
 
-    def _mock_run_pipeline(session_id, song_a_path, song_b_path, prompt, event_queue, session, **kwargs):
+    def _mock_run_pipeline(session_id, song_a_path, song_b_path, event_queue, session, **kwargs):
         from musicmixer.services.pipeline import emit_progress
 
         session.status = "processing"
@@ -123,7 +123,6 @@ def _post_remix(client):
             "song_a": ("song_a.mp3", b"fake mp3 data", "audio/mpeg"),
             "song_b": ("song_b.mp3", b"fake mp3 data", "audio/mpeg"),
         },
-        data={"prompt": "test remix"},
     )
 
 
@@ -134,7 +133,6 @@ def _post_youtube(client):
         json={
             "url_a": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             "url_b": "https://www.youtube.com/watch?v=9bZkp7q19f0",
-            "prompt": "test remix",
         },
     )
 
@@ -202,7 +200,6 @@ class TestPostRemixAsync:
             session_id,
             song_a_path,
             song_b_path,
-            prompt,
             session,
             processing_lock,
             *_args,
@@ -219,7 +216,6 @@ class TestPostRemixAsync:
             session_id,
             url_a,
             url_b,
-            prompt,
             session,
             processing_lock,
             *_args,
