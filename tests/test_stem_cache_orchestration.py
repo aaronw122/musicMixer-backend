@@ -578,6 +578,33 @@ class TestFailedRetryAfterWaiter:
 
         assert waited is None
 
+    def test_held_failed_state_does_not_rerun_separation(self, clean_redis, cache_dir, fast_coord, tmp_path):
+        """Past max attempts, retry_after is None: reject without a new separation."""
+        coord = StemCacheCoordinator()
+        coord._write_state(
+            "test_held_failed",
+            ROLE_VOCAL,
+            StemCacheState(
+                status="failed",
+                retry_after=None,
+                attempt=settings.stem_retry_max_attempts,
+                error_code=STEM_ERROR_TRANSIENT,
+            ),
+        )
+
+        sep = _Separator()
+        with pytest.raises(StemSeparationError):
+            get_or_create_cached_stems(
+                video_id="test_held_failed", role=ROLE_VOCAL, audio_path=tmp_path / "a.mp3",
+                session_output_dir=tmp_path / "session", separate_fn=sep,
+                check_cancelled=_noop_cancel,
+            )
+
+        assert sep.calls == 0
+        state = coord.get_state("test_held_failed", ROLE_VOCAL)
+        assert state is not None and state.status == "failed"
+        assert state.attempt == settings.stem_retry_max_attempts
+
 
 # ---------------------------------------------------------------------------
 # Redis-outage fallback runs local separation
