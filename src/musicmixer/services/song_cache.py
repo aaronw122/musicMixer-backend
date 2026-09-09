@@ -1918,6 +1918,34 @@ def _wait_for_owner(
         time.sleep(max(settings.stem_wait_poll_seconds, 0))
 
 
+def stem_cache_ready(video_id: str, role: SongRole) -> bool:
+    """True iff a ready-copy of (video_id, role) would succeed right now.
+
+    Applies the same checks as ``_copy_ready_stems`` (ready state, current
+    separator version, valid on-disk role dir) without copying. Redis errors
+    propagate.
+    """
+    coordinator = StemCacheCoordinator()
+    coordinator.reconcile_disk(video_id, role)
+    state = coordinator.get_state(video_id, role)
+    if state is None or state.status != "ready" or not state.path:
+        return False
+    if state.separator_version != settings.stem_separator_version:
+        return False
+    return _validate_role_dir(role, Path(state.path)) is not None
+
+
+def _restore_stems_from_disk(video_id: str, role: SongRole, output_dir: Path) -> StemPaths | None:
+    src_dir = _stems_dir_for(video_id, role)
+    if _validate_role_dir(role, src_dir) is None:
+        return None
+    try:
+        return _copy_dir_wavs(src_dir, output_dir)
+    except FileNotFoundError:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        return None
+
+
 def get_or_create_cached_stems(
     *,
     video_id: str | None,
@@ -1957,11 +1985,19 @@ def get_or_create_cached_stems(
             on_wait=on_wait,
         )
     except (redis.ConnectionError, redis.TimeoutError):
+        shutil.rmtree(session_output_dir, ignore_errors=True)
+        if not audio_path.exists():
+            stems = _restore_stems_from_disk(video_id, role, session_output_dir)
+            if stems is not None:
+                logger.warning(
+                    "stem_cache outcome=redis_outage_disk_restore video=%s role=%s",
+                    video_id, role, exc_info=True,
+                )
+                return stems
         logger.warning(
             "stem_cache outcome=redis_outage_fallback video=%s role=%s; running local separation",
             video_id, role, exc_info=True,
         )
-        shutil.rmtree(session_output_dir, ignore_errors=True)
         return _run_uncached_separation(separate_fn, audio_path, session_output_dir)
 
 

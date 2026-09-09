@@ -145,6 +145,19 @@ class FullyCachedRestore:
     restored_stems_dir: Path | None = None
 
 
+def _stem_role_ready(session_id: str, video_id: str, role) -> bool:
+    from musicmixer.services.song_cache import stem_cache_ready
+
+    try:
+        return stem_cache_ready(video_id, role)
+    except Exception:
+        logger.warning(
+            "Session %s: stem-cache state check failed for %s/%s; falling back",
+            session_id, video_id, role, exc_info=True,
+        )
+        return False
+
+
 def restore_fully_cached_youtube_remix(
     inputs: FullyCachedInputs,
     *,
@@ -171,7 +184,6 @@ def restore_fully_cached_youtube_remix(
     from musicmixer.services.song_cache import (
         ROLE_INSTRUMENTAL,
         ROLE_VOCAL,
-        StemCacheCoordinator,
         get_cached_stems,
     )
 
@@ -191,28 +203,9 @@ def restore_fully_cached_youtube_remix(
     song_a_stems_dir = stems_dir / "song_a"
     song_b_stems_dir = stems_dir / "song_b"
 
-    # Require a ``ready`` state with a compatible validated manifest for BOTH
-    # roles before skipping work. reconcile_disk lazily adopts a valid on-disk
-    # role dir (legacy cache / Redis flush) into ``ready`` so existing caches
-    # still short-circuit. A Redis outage leaves get_state None -> miss -> full
-    # pipeline, which is the safe degraded behavior.
-    coordinator = StemCacheCoordinator()
-
-    def _role_ready(video_id: str, role) -> bool:
-        try:
-            coordinator.reconcile_disk(video_id, role)
-            state = coordinator.get_state(video_id, role)
-        except Exception:
-            logger.warning(
-                "Session %s: stem-cache state check failed for %s/%s; falling back",
-                session_id, video_id, role, exc_info=True,
-            )
-            return False
-        return state is not None and state.status == "ready"
-
     if not (
-        _role_ready(cached_song_a.video_id, ROLE_VOCAL)
-        and _role_ready(cached_song_b.video_id, ROLE_INSTRUMENTAL)
+        _stem_role_ready(session_id, cached_song_a.video_id, ROLE_VOCAL)
+        and _stem_role_ready(session_id, cached_song_b.video_id, ROLE_INSTRUMENTAL)
     ):
         logger.warning(
             "Session %s: Cached stems not ready, falling back to full pipeline",
@@ -380,12 +373,10 @@ def download_youtube_pair(
     Mid-download progress events flow through API-owned callbacks; this stage
     never constructs SSE payloads. Cancellation stays with the API via
     ``callbacks.check_cancelled``.
-
-    ``cached_song_a``/``_b`` are accepted for signature symmetry with the
-    wrapper's cache-aware path; the fully-cached short-circuit is handled before
-    this stage runs, so here both songs are always downloaded.
     """
+    from musicmixer.services.song_cache import ROLE_INSTRUMENTAL, ROLE_VOCAL
     from musicmixer.services.youtube import (
+        YouTubeAudioResult,
         download_youtube_audio,
         extract_video_id,
     )
@@ -399,7 +390,29 @@ def download_youtube_pair(
     video_id_a = extract_video_id(url_a)
     video_id_b = extract_video_id(url_b)
 
+    def _cached_result(cached_song, role, progress_callback):
+        if not (cached_song is not None and cached_song.has_stems
+                and _stem_role_ready(session_id, cached_song.video_id, role)):
+            return None
+        logger.info(
+            "Session %s: Song %s stems + metadata cached, skipping download",
+            session_id, cached_song.video_id,
+        )
+        progress_callback(1.0, "Already had this one!")
+        return YouTubeAudioResult(
+            wav_path=upload_dir / f"{cached_song.video_id}.cached",
+            title=cached_song.title,
+            duration_seconds=cached_song.meta.duration_seconds,
+            source_codec="cached",
+            source_bitrate=0,
+        )
+
+    cached_result_a = _cached_result(cached_song_a, ROLE_VOCAL, callbacks.on_song_a_download_progress)
+    cached_result_b = _cached_result(cached_song_b, ROLE_INSTRUMENTAL, callbacks.on_song_b_download_progress)
+
     def _download_a():
+        if cached_result_a is not None:
+            return cached_result_a
         return _run_sync(download_youtube_audio(
             url=url_a,
             output_dir=upload_dir,
@@ -408,6 +421,8 @@ def download_youtube_pair(
         ))
 
     def _download_b():
+        if cached_result_b is not None:
+            return cached_result_b
         return _run_sync(download_youtube_audio(
             url=url_b,
             output_dir=upload_dir,
@@ -442,8 +457,10 @@ def download_youtube_pair(
     callbacks.on_download_pair_finished()
 
     max_processing_duration = settings.processing_max_duration_seconds
-    _pre_trim_youtube_download(result_a, max_processing_duration)
-    _pre_trim_youtube_download(result_b, max_processing_duration)
+    if cached_result_a is None:
+        _pre_trim_youtube_download(result_a, max_processing_duration)
+    if cached_result_b is None:
+        _pre_trim_youtube_download(result_b, max_processing_duration)
 
     # Check cancellation before starting heavy pipeline work
     callbacks.check_cancelled()
@@ -457,8 +474,14 @@ def download_youtube_pair(
         result_b.source_codec, result_b.source_bitrate,
     )
 
-    source_quality_a = f"youtube-{result_a.source_codec}-{result_a.source_bitrate}kbps"
-    source_quality_b = f"youtube-{result_b.source_codec}-{result_b.source_bitrate}kbps"
+    source_quality_a = (
+        cached_song_a.meta.source_quality if cached_result_a is not None
+        else f"youtube-{result_a.source_codec}-{result_a.source_bitrate}kbps"
+    )
+    source_quality_b = (
+        cached_song_b.meta.source_quality if cached_result_b is not None
+        else f"youtube-{result_b.source_codec}-{result_b.source_bitrate}kbps"
+    )
 
     logger.info(
         "Session %s: Source quality: A=%s, B=%s",

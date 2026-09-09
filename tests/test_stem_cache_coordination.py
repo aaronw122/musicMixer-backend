@@ -592,6 +592,37 @@ class TestMarkReady:
         assert not (cache_dir / "test_pub_bad" / "vocal").exists()
 
 
+class TestStemCacheReady:
+    def _publish(self, coord, cache_dir, video_id):
+        lease = coord.acquire(video_id, ROLE_VOCAL)
+        staging = _make_role_dir(
+            cache_dir / video_id / ".vocal.staging.x", _VOCAL_STEMS
+        )
+        coord.mark_ready(lease, staging)
+        coord.release(lease)
+
+    def test_ready_record_is_ready(self, clean_redis, cache_dir):
+        from musicmixer.services.song_cache import stem_cache_ready
+        self._publish(_coordinator(), cache_dir, "test_ready_ok")
+        assert stem_cache_ready("test_ready_ok", ROLE_VOCAL) is True
+
+    def test_unknown_video_not_ready(self, clean_redis):
+        from musicmixer.services.song_cache import stem_cache_ready
+        assert stem_cache_ready("test_ready_none", ROLE_VOCAL) is False
+
+    def test_version_bump_not_ready(self, clean_redis, cache_dir, monkeypatch):
+        from musicmixer.services.song_cache import stem_cache_ready
+        self._publish(_coordinator(), cache_dir, "test_ready_ver")
+        monkeypatch.setattr(settings, "stem_separator_version", "v2")
+        assert stem_cache_ready("test_ready_ver", ROLE_VOCAL) is False
+
+    def test_missing_wav_not_ready(self, clean_redis, cache_dir):
+        from musicmixer.services.song_cache import _stems_dir_for, stem_cache_ready
+        self._publish(_coordinator(), cache_dir, "test_ready_miss")
+        (_stems_dir_for("test_ready_miss", ROLE_VOCAL) / "lead_vocals.wav").unlink()
+        assert stem_cache_ready("test_ready_miss", ROLE_VOCAL) is False
+
+
 # ---------------------------------------------------------------------------
 # invalidate_ready
 # ---------------------------------------------------------------------------
