@@ -178,20 +178,13 @@ class TestRestoreFullyCachedYouTubeRemix:
             restore_fully_cached_youtube_remix,
         )
 
-        class _ReadyCoordinator:
-            def reconcile_disk(self, *_args, **_kwargs):
-                return None
-
-            def get_state(self, *_args, **_kwargs):
-                return SimpleNamespace(status="ready")
-
         calls = {"restore": 0}
 
         def _fake_get_cached_stems(*_args, **_kwargs):
             calls["restore"] += 1
             return False
 
-        monkeypatch.setattr(song_cache, "StemCacheCoordinator", _ReadyCoordinator)
+        monkeypatch.setattr(song_cache, "stem_cache_ready", lambda video_id, role: True)
         monkeypatch.setattr(song_cache, "get_cached_stems", _fake_get_cached_stems)
 
         settings = SimpleNamespace(data_dir=tmp_path / "data")
@@ -214,3 +207,120 @@ class TestRestoreFullyCachedYouTubeRemix:
         assert result.used_cache is False
         assert calls["restore"] == 2
         assert not (settings.data_dir / "stems" / "s1").exists()
+
+
+class TestDownloadYouTubePair:
+    def test_skips_download_for_song_with_cached_stems(self, monkeypatch, tmp_path):
+        from musicmixer.services import remix_stages, song_cache
+        from musicmixer.services.remix_stages import (
+            DownloadPairCallbacks,
+            download_youtube_pair,
+        )
+        from musicmixer.services.youtube import YouTubeAudioResult
+
+        monkeypatch.setattr(song_cache, "stem_cache_ready", lambda video_id, role: True)
+
+        downloaded: list[str] = []
+
+        async def _fake_download(url, output_dir, progress_callback, video_id):
+            downloaded.append(video_id)
+            wav = output_dir / f"{video_id}.wav"
+            wav.write_bytes(b"")
+            return YouTubeAudioResult(
+                wav_path=wav, title="fresh", duration_seconds=100.0,
+                source_codec="opus", source_bitrate=128,
+            )
+
+        monkeypatch.setattr(
+            "musicmixer.services.youtube.download_youtube_audio", _fake_download,
+        )
+        monkeypatch.setattr(
+            remix_stages, "_pre_trim_youtube_download",
+            lambda result, max_duration_seconds: None,
+        )
+
+        progress_b: list[tuple[float, str]] = []
+        callbacks = DownloadPairCallbacks(
+            check_cancelled=lambda: None,
+            tag_failed_song=lambda exc, slot: None,
+            on_download_pair_started=lambda: None,
+            on_song_a_download_progress=lambda pct, msg: None,
+            on_song_b_download_progress=lambda pct, msg: progress_b.append((pct, msg)),
+            on_download_pair_finished=lambda: None,
+        )
+        cached_b = SimpleNamespace(
+            video_id="9bZkp7q19f0", title="Cached B", has_stems=True,
+            meta=SimpleNamespace(duration_seconds=210.0, source_quality="youtube-opus-128kbps"),
+        )
+        settings = SimpleNamespace(
+            data_dir=tmp_path / "data", processing_max_duration_seconds=210,
+        )
+
+        pair = download_youtube_pair(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=9bZkp7q19f0",
+            session_id="s1",
+            callbacks=callbacks,
+            cached_song_a=None,
+            cached_song_b=cached_b,
+            settings=settings,
+        )
+
+        assert downloaded == ["dQw4w9WgXcQ"]
+        assert pair.result_b.title == "Cached B"
+        assert pair.result_b.duration_seconds == 210.0
+        assert not pair.result_b.wav_path.exists()
+        assert pair.source_quality_b == "youtube-opus-128kbps"
+        assert progress_b == [(1.0, "Already had this one!")]
+
+    def test_metadata_only_cache_still_downloads(self, monkeypatch, tmp_path):
+        from musicmixer.services import remix_stages
+        from musicmixer.services.remix_stages import (
+            DownloadPairCallbacks,
+            download_youtube_pair,
+        )
+        from musicmixer.services.youtube import YouTubeAudioResult
+
+        downloaded: list[str] = []
+
+        async def _fake_download(url, output_dir, progress_callback, video_id):
+            downloaded.append(video_id)
+            return YouTubeAudioResult(
+                wav_path=output_dir / f"{video_id}.wav", title="fresh",
+                duration_seconds=100.0, source_codec="opus", source_bitrate=128,
+            )
+
+        monkeypatch.setattr(
+            "musicmixer.services.youtube.download_youtube_audio", _fake_download,
+        )
+        monkeypatch.setattr(
+            remix_stages, "_pre_trim_youtube_download",
+            lambda result, max_duration_seconds: None,
+        )
+        callbacks = DownloadPairCallbacks(
+            check_cancelled=lambda: None,
+            tag_failed_song=lambda exc, slot: None,
+            on_download_pair_started=lambda: None,
+            on_song_a_download_progress=lambda pct, msg: None,
+            on_song_b_download_progress=lambda pct, msg: None,
+            on_download_pair_finished=lambda: None,
+        )
+        cached_b = SimpleNamespace(
+            video_id="9bZkp7q19f0", title="Cached B", has_stems=False,
+            meta=SimpleNamespace(duration_seconds=210.0),
+        )
+        settings = SimpleNamespace(
+            data_dir=tmp_path / "data", processing_max_duration_seconds=210,
+        )
+
+        download_youtube_pair(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=9bZkp7q19f0",
+            session_id="s1",
+            callbacks=callbacks,
+            cached_song_a=None,
+            cached_song_b=cached_b,
+            settings=settings,
+        )
+
+        assert sorted(downloaded) == ["9bZkp7q19f0", "dQw4w9WgXcQ"]

@@ -633,3 +633,28 @@ class TestRedisOutageFallback:
         assert sep.calls == 1
         assert set(result) == set(_VOCAL_STEMS)
         assert (out / "lead_vocals.wav").is_file()
+
+    def test_outage_with_missing_audio_restores_from_disk(self, clean_redis, cache_dir, monkeypatch, tmp_path):
+        import redis as redis_lib
+
+        for stem in _VOCAL_STEMS:
+            _write_wav(_stems_dir_for("test_outage_disk", ROLE_VOCAL) / f"{stem}.wav")
+
+        class _DeadRedis:
+            def __getattr__(self, _name):
+                def _raise(*a, **k):
+                    raise redis_lib.ConnectionError("simulated outage")
+                return _raise
+
+        monkeypatch.setattr(song_cache, "_get_redis", lambda: _DeadRedis())
+
+        sep = _Separator()
+        out = tmp_path / "session"
+        result = get_or_create_cached_stems(
+            video_id="test_outage_disk", role=ROLE_VOCAL,
+            audio_path=tmp_path / "missing.cached",
+            session_output_dir=out, separate_fn=sep, check_cancelled=_noop_cancel,
+        )
+        assert sep.calls == 0
+        assert set(result) == set(_VOCAL_STEMS)
+        assert (out / "lead_vocals.wav").is_file()
