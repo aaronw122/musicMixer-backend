@@ -1427,28 +1427,24 @@ def _step_post_stretch_beat_grid(
     return post_stretch_beat_frames, beat_grid_source
 
 
-def _step_compress_and_level_match(
+def _step_compress_and_prelimit(
     session_id: str,
     vocal_audio: dict,
     inst_audio: dict,
     sr: int,
     event_queue, session,
-) -> tuple[dict, dict, float]:
-    """Steps 11, 11.5, 11.8: Vocal compression, cross-song level matching, pre-limiting.
+) -> tuple[dict, dict]:
+    """Steps 11, 11.8: Vocal compression, pre-limiting.
 
-    Returns updated (vocal_audio, inst_audio, level_match_gain_db).
+    Returns updated (vocal_audio, inst_audio).
     """
-    import numpy as np
     from musicmixer.services.processor import (
         compress_dynamic_range,
-        cross_song_level_match,
         true_peak,
         true_peak_limit,
     )
 
     # === STEP 11: Compress vocal dynamic range ===
-    # Compress BEFORE level matching so the LUFS measurement reflects
-    # post-compression loudness (otherwise level match is wasted).
     emit_progress(event_queue, progress_event(
         "processing", "Balancing the volume...", 0.90,
     ), session=session)
@@ -1470,41 +1466,6 @@ def _step_compress_and_level_match(
             "Session %s: Vocal compression applied (makeup_db=%.1f) to %s",
             session_id, vocal_makeup_db, sorted(vocal_audio.keys()),
         )
-
-    # === STEP 11.5: Cross-song level matching ===
-    # Runs AFTER compression so LUFS measurement reflects actual vocal loudness.
-    import pyloudnorm as _pyln_lm
-    _lm_meter = _pyln_lm.Meter(sr)
-    _pre_lm_lufs = None
-    _level_match_gain_db = 0.0
-
-    # Use the primary vocal stem for level matching: lead_vocals preferred, fall back to vocals.
-    _primary_vocal_key = None
-    for _vk in ("lead_vocals", "vocals"):
-        if _vk in vocal_audio:
-            _primary_vocal_key = _vk
-            break
-
-    if _primary_vocal_key is not None and inst_audio:
-        vocal_audio_main = vocal_audio[_primary_vocal_key]
-        _pre_lm_lufs = _lm_meter.integrated_loudness(vocal_audio_main)
-
-        # Sum instrumental stems for LUFS measurement
-        inst_arrays = list(inst_audio.values())
-        inst_sum_for_lufs = inst_arrays[0].copy()
-        for arr in inst_arrays[1:]:
-            min_len = min(len(inst_sum_for_lufs), len(arr))
-            inst_sum_for_lufs = inst_sum_for_lufs[:min_len] + arr[:min_len]
-
-        # Apply cross-song level match to ALL vocal stems using the same gain
-        # derived from the primary vocal stem's LUFS vs instrumentals.
-        for _vk_apply in list(vocal_audio.keys()):
-            vocal_audio[_vk_apply] = cross_song_level_match(
-                vocal_audio[_vk_apply], inst_sum_for_lufs, sr,
-            )
-
-        _post_lm_lufs = _lm_meter.integrated_loudness(vocal_audio[_primary_vocal_key])
-        _level_match_gain_db = _post_lm_lufs - _pre_lm_lufs if _pre_lm_lufs > -70 else 0.0
 
     # === STEP 11.8: Pre-limit drum and bass transients ===
     emit_progress(event_queue, progress_event(
@@ -1544,7 +1505,7 @@ def _step_compress_and_level_match(
 
     check_cancelled(session)
 
-    return vocal_audio, inst_audio, _level_match_gain_db
+    return vocal_audio, inst_audio
 
 
 def _step_render_and_duck(
@@ -1557,11 +1518,12 @@ def _step_render_and_duck(
     target_bpm: float,
     event_queue, session,
 ) -> tuple:
-    """Steps 12 + 12.5: Render arrangement into buses and apply spectral ducking.
+    """Steps 12, 12.3, 12.5: Render buses, level them per section, spectral duck.
 
-    Returns (vocal_bus, instrumental_bus, ducked_instrumental).
+    Returns (vocal_bus, ducked_instrumental, section_levels).
     """
     from musicmixer.services.renderer import render_arrangement
+    from musicmixer.services.leveling import level_buses
     from musicmixer.services.ducking import spectral_duck
     from musicmixer.services.interpreter import TARGET_REMIX_DURATION_SECONDS
 
@@ -1595,15 +1557,21 @@ def _step_render_and_duck(
                 (_pr_actual_duration - _pr_estimated_duration) / _pr_estimated_duration * 100,
             )
 
+    # === STEP 12.3: Per-section bus leveling ===
+    logger.info("Session %s: [12.3/17] leveling sections...", session_id)
+    emit_progress(event_queue, progress_event(
+        "rendering", "Balancing the volume...", 0.935,
+    ), session=session)
+    vocal_bus, instrumental_bus, section_levels = level_buses(
+        vocal_bus, instrumental_bus, plan.sections,
+        post_stretch_beat_frames, sr, target_bpm,
+    )
+
     # === STEP 12.5: Spectral ducking ===
     # Carve a mid-range pocket (300-3000 Hz) in the instrumental where vocals
     # are active. This is the highest-ROI mixing improvement -- without it,
     # vocals and instruments compete in the 300Hz-5kHz range with zero
     # frequency-aware interaction.
-    #
-    # CRITICAL: Use a NEW variable (ducked_instrumental). Do NOT mutate
-    # instrumental_bus -- the auto-leveler at step 13.7 must continue using
-    # the un-ducked instrumental_bus as its detector signal.
     logger.info("Session %s: [12.5/17] applying spectral ducking...", session_id)
     emit_progress(event_queue, progress_event(
         "rendering", "Making room so nothing clashes...", 0.94,
@@ -1611,73 +1579,27 @@ def _step_render_and_duck(
 
     ducked_instrumental = spectral_duck(instrumental_bus, vocal_bus, sr)
 
-    return vocal_bus, instrumental_bus, ducked_instrumental
+    return vocal_bus, ducked_instrumental, section_levels
 
 
-def _step_sum_and_auto_level(
-    session_id: str,
-    vocal_bus,
-    instrumental_bus,
-    ducked_instrumental,
-    sr: int,
-):
-    """Steps 13 + 13.7: Sum buses into final mix and apply auto-leveler.
-
-    Returns mixed array.
-    """
+def _step_sum_buses(session_id: str, vocal_bus, ducked_instrumental, sr: int):
+    """Step 13: Sum buses into the final mix. Returns mixed array."""
     import numpy as np
     import pyloudnorm as pyln
-    from musicmixer.services.processor import auto_level
 
-    # === STEP 13: Sum buses into final mix ===
-    # Ensure buses are the same length (pad shorter one).
-    # Use ducked_instrumental for the sum, but keep instrumental_bus intact
-    # for the auto-leveler detector (pad it to match too).
     max_len = max(len(vocal_bus), len(ducked_instrumental))
     if len(vocal_bus) < max_len:
         vocal_bus = np.pad(vocal_bus, ((0, max_len - len(vocal_bus)), (0, 0)))
     if len(ducked_instrumental) < max_len:
         ducked_instrumental = np.pad(ducked_instrumental, ((0, max_len - len(ducked_instrumental)), (0, 0)))
-    if len(instrumental_bus) < max_len:
-        instrumental_bus = np.pad(instrumental_bus, ((0, max_len - len(instrumental_bus)), (0, 0)))
 
     mixed = vocal_bus + ducked_instrumental
 
-    # LUFS checkpoint: after bus sum
-    _meter = pyln.Meter(sr)
-    _lufs_post_sum = _meter.integrated_loudness(mixed)
+    # Mix bus compression REMOVED -- vocal compression (step 11) + section
+    # leveling (step 12.3) handle dynamics. A second 3:1 compressor at the same
+    # threshold produced ~9:1 effective ratio on vocals, making them flat and lifeless.
+    _lufs_post_sum = pyln.Meter(sr).integrated_loudness(mixed)
     logger.info("Session %s: LUFS after bus sum: %.1f", session_id, _lufs_post_sum)
-
-    # Mix bus compression REMOVED -- vocal compression (step 11) + auto-leveler
-    # (step 13.7) handle dynamics. A second 3:1 compressor at the same threshold
-    # produced ~9:1 effective ratio on vocals, making them flat and lifeless.
-
-    # === STEP 13.7: Slow auto-leveler ===
-    # Maintains consistent overall volume over multi-second windows.
-    # Gently boosts instrumental-only moments (between vocal phrases)
-    # and slightly reduces the loudest peaks. Uses long window so
-    # gain changes are imperceptible (no pumping).
-    auto_level_kwargs: dict[str, Any] = dict(window_sec=4.0, max_boost_db=1.5, max_cut_db=2.5)
-
-    # CRITICAL: detector_audio must be set to instrumental_bus to avoid the volume-dip
-    # regression (the ~11s/~22s dip bug). Without this, auto_level uses the mixed signal
-    # for detection, which causes vocals to trigger gain reduction on themselves.
-    auto_level_kwargs["detector_audio"] = instrumental_bus
-    auto_level_kwargs["target_percentile"] = 50.0
-    auto_level_kwargs["active_floor_db"] = -50.0
-
-    mixed = auto_level(mixed, sr, **auto_level_kwargs)
-    logger.info(
-        "Session %s: Auto-leveler applied (window_sec=%.1f, max_boost_db=%.1f, max_cut_db=%.1f)",
-        session_id,
-        auto_level_kwargs["window_sec"],
-        auto_level_kwargs["max_boost_db"],
-        auto_level_kwargs["max_cut_db"],
-    )
-
-    # LUFS checkpoint: after auto-level
-    _lufs_post_autolevel = _meter.integrated_loudness(mixed)
-    logger.info("Session %s: LUFS after auto-level: %.1f", session_id, _lufs_post_autolevel)
 
     return mixed
 
@@ -2211,42 +2133,36 @@ def run_remix(
         metrics.post_stretch_beat_count = len(post_stretch_beat_frames)
         metrics.log_beat_grid()
 
-    # === STEPS 11-11.8: Compress, level match, pre-limit ===
+    # === STEPS 11-11.8: Compress, pre-limit ===
     _t0 = time.monotonic()
-    vocal_audio, inst_audio, level_match_gain_db = _step_compress_and_level_match(
+    vocal_audio, inst_audio = _step_compress_and_prelimit(
         session_id, vocal_audio, inst_audio, sr,
         event_queue, session,
     )
-    _step_times["11 compress_level"] = time.monotonic() - _t0
+    _step_times["11 compress_prelimit"] = time.monotonic() - _t0
 
-    # --- Structured metrics: processing ---
-    if metrics is not None:
-        metrics.level_match_gain_db = level_match_gain_db
-        metrics.log_processing()
-
-    # === STEPS 12+12.5: Render arrangement + spectral ducking ===
+    # === STEPS 12-12.5: Render arrangement + section leveling + spectral ducking ===
     _t0 = time.monotonic()
-    vocal_bus, instrumental_bus, ducked_instrumental = _step_render_and_duck(
+    vocal_bus, ducked_instrumental, section_levels = _step_render_and_duck(
         session_id, plan, vocal_audio, inst_audio,
         post_stretch_beat_frames, sr, target_bpm,
         event_queue, session,
     )
-    _step_times["12 render_duck"] = time.monotonic() - _t0
+    _step_times["12 render_level_duck"] = time.monotonic() - _t0
 
-    # --- Structured metrics: render ---
+    # --- Structured metrics: leveling + render ---
     if metrics is not None:
+        metrics.section_levels = [lv.as_dict() for lv in section_levels]
+        metrics.log_processing()
         metrics.render_duration_s = vocal_bus.shape[0] / sr
-        # Check duration mismatch
         if plan.sections and target_bpm > 0:
             estimated_duration = plan.sections[-1].end_beat * 60 / target_bpm
             metrics.check_duration_mismatch(estimated_duration)
 
-    # === STEPS 13+13.7: Sum buses + auto-leveler ===
+    # === STEP 13: Sum buses ===
     _t0 = time.monotonic()
-    mixed = _step_sum_and_auto_level(
-        session_id, vocal_bus, instrumental_bus, ducked_instrumental, sr,
-    )
-    _step_times["13 sum_autolevel"] = time.monotonic() - _t0
+    mixed = _step_sum_buses(session_id, vocal_bus, ducked_instrumental, sr)
+    _step_times["13 sum"] = time.monotonic() - _t0
 
     # === STEPS 14-14.6: Mastering chain ===
     _t0 = time.monotonic()

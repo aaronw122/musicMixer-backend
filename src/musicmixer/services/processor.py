@@ -493,44 +493,6 @@ def compute_tempo_plan(
 # ---------------------------------------------------------------------------
 
 
-def cross_song_level_match(
-    vocal_audio: np.ndarray,
-    instrumental_sum: np.ndarray,
-    sr: int,
-) -> np.ndarray:
-    """Match vocal loudness to instrumental level.
-
-    Measures LUFS of vocal and instrumental via pyloudnorm.
-    Safety cap: clip gain to [-12, +12] dB.
-    """
-    meter = pyloudnorm.Meter(sr)
-    vocal_lufs = meter.integrated_loudness(vocal_audio)
-    instrumental_lufs = meter.integrated_loudness(instrumental_sum)
-
-    if vocal_lufs < LUFS_FLOOR or instrumental_lufs < LUFS_FLOOR:
-        logger.warning(
-            "Skipping level matching: vocal=%.1f LUFS, instrumental=%.1f LUFS",
-            vocal_lufs,
-            instrumental_lufs,
-        )
-        return vocal_audio
-
-    # Vocals and instrumentals at equal LUFS. Per-section stem_gains in the
-    # arrangement handle the artistic balance (vocals forward in chorus, etc.).
-    # +2 dB compromise: +3 clipped with compressor makeup, 0 buried vocals. Revisit with spectral ducking (Day 4).
-    vocal_offset_db = 2.0
-    target_vocal_lufs = instrumental_lufs + vocal_offset_db
-    gain_db = target_vocal_lufs - vocal_lufs
-    gain_db = float(np.clip(gain_db, -12.0, 12.0))
-    logger.info(
-        "Level match: vocal=%.1f LUFS, inst=%.1f LUFS, gain=%.1f dB",
-        vocal_lufs,
-        instrumental_lufs,
-        gain_db,
-    )
-    return vocal_audio * (10 ** (gain_db / 20.0))
-
-
 def compress_dynamic_range(
     audio: np.ndarray,
     sr: int,

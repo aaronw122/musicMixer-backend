@@ -1597,10 +1597,8 @@ def default_arrangement(total_beats: int) -> list[Section]:
         three_quarter = max(quarter + MIN_SECTION_BEATS, min(three_quarter, total_beats - 2 * MIN_SECTION_BEATS))
         seven_eighth = max(three_quarter + MIN_SECTION_BEATS, min(seven_eighth, total_beats - MIN_SECTION_BEATS))
 
-    # Build and main MUST share identical instrumental gains to prevent volume dips
-    # at the build->main transition. The auto-leveler's detector_audio uses the
-    # instrumental bus -- different gains would change detected energy at boundaries,
-    # re-triggering the volume dip bug fixed in the 2026-02-25 investigation.
+    # Build and main share identical instrumental gains so the build->main
+    # transition has no gain step to ramp.
     inst_body =      {"drums": 0.7, "bass": 0.7, "guitar": 0.5, "piano": 0.4, "other": 0.5}
     inst_intro =     {"drums": 0.6, "bass": 0.5, "guitar": 0.3, "piano": 0.2, "other": 0.3}
     inst_breakdown = {"drums": 0.1, "bass": 0.4, "guitar": 0.6, "piano": 0.7, "other": 0.5}

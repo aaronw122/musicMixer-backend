@@ -350,6 +350,7 @@ def intent_section_to_section(
         stem_gains=gains,
         transition_in=intent_section.transition_in,
         transition_beats=intent_section.transition_beats,
+        energy=intent_section.energy,
     )
 
 
@@ -396,6 +397,7 @@ def map_intent_to_gains(
             stem_gains=gains,
             transition_in=intent_section.transition_in,
             transition_beats=intent_section.transition_beats,
+            energy=intent_section.energy,
         ))
 
     return RemixPlan(
