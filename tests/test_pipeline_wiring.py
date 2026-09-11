@@ -509,45 +509,6 @@ class TestLoudnessFixPipeline:
 # ---------------------------------------------------------------------------
 
 
-class TestPipelineAutoLeveler:
-    """Verify auto-leveler uses hardcoded parameters after flag cleanup."""
-
-    @pytest.fixture(autouse=True)
-    def _patch_auto_level(self):
-        """Patch auto_level to capture its kwargs without running the full pipeline."""
-        self.captured_kwargs = {}
-
-        def _capture_auto_level(audio, sr, **kwargs):
-            self.captured_kwargs = kwargs
-            return audio  # pass through
-
-        with patch("musicmixer.services.processor.auto_level", side_effect=_capture_auto_level):
-            yield
-
-    def test_hardcoded_params(self, pipeline_tmp):
-        """Auto-leveler should use hardcoded tuned params: 4s/1.5/2.5."""
-        self.captured_kwargs = {}
-        _run_pipeline_with_mock_separation(pipeline_tmp)
-        kw = self.captured_kwargs
-        assert kw["max_boost_db"] == 1.5
-        assert kw["max_cut_db"] == 2.5
-        assert kw["window_sec"] == 4.0
-
-    def test_detector_audio_is_always_set(self, pipeline_tmp):
-        """detector_audio must always be the instrumental bus (not None)."""
-        self.captured_kwargs = {}
-        _run_pipeline_with_mock_separation(pipeline_tmp)
-        assert "detector_audio" in self.captured_kwargs
-        assert self.captured_kwargs["detector_audio"] is not None
-
-    def test_active_floor_is_minus_50(self, pipeline_tmp):
-        """active_floor_db must be -50.0 (lowered to prevent volume drops)."""
-        self.captured_kwargs = {}
-        _run_pipeline_with_mock_separation(pipeline_tmp)
-        assert self.captured_kwargs["active_floor_db"] == -50.0
-        assert self.captured_kwargs["target_percentile"] == 50.0
-
-
 class TestPipelineOutputQuality:
     """Verify the pipeline (with all enhancements baked in) produces valid output.
 

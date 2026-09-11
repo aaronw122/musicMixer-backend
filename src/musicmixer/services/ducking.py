@@ -76,9 +76,7 @@ def spectral_duck(
     delay; subtracting a phase-shifted mid-band from the original creates
     metallic/hollow coloration.
 
-    CRITICAL: Returns a NEW array -- does NOT mutate the input instrumental.
-    The caller must use a separate variable (``ducked_instrumental``) so the
-    auto-leveler continues to see the un-ducked ``instrumental_bus``.
+    Returns a NEW array -- does NOT mutate the input instrumental.
 
     CRITICAL: Preserves the full-length instrumental array. Ducking is only
     applied to the overlapping region ``[:min_len]``; beyond that the
