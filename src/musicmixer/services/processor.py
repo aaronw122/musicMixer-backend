@@ -593,32 +593,21 @@ def auto_level(
     max_boost_db: float = 6.0,
     max_cut_db: float = 4.0,
     target_percentile: float = 50.0,
-    detector_audio: np.ndarray | None = None,
     active_floor_db: float = -45.0,
 ) -> np.ndarray:
     """Slow automatic gain control that maintains consistent RMS level.
 
     Unlike compression (which only reduces peaks), this can BOOST quiet
-    sections to maintain overall consistency.  Uses a long analysis window
-    (2s default) so gain changes are imperceptible — no "pumping".
-
-    This specifically addresses the gap between vocal phrases: when the
-    vocal drops to silence between bars, the instrumental-only mix is
-    quieter.  The leveler gently boosts those moments so the overall
-    volume feels consistent.
+    passages. Uses a long analysis window so gain changes are imperceptible.
 
     active_floor_db: RMS floor in dBFS below which a window is considered
         inactive (tail/silence). Inactive windows are never boosted —
         only cuts are applied if they exceed threshold. Default -45 dBFS.
     """
-    # Use a separate detector signal for RMS analysis if provided.
-    # This lets the caller drive leveling from the instrumental bus so
-    # vocal gain transitions don't trigger reactive cuts/boosts.
-    det = detector_audio if detector_audio is not None else audio
-    if det.ndim == 2:
-        mono = np.mean(det, axis=1)
+    if audio.ndim == 2:
+        mono = np.mean(audio, axis=1)
     else:
-        mono = det
+        mono = audio
 
     # Convert dBFS floor to linear RMS threshold
     active_floor_linear = 10.0 ** (active_floor_db / 20.0)

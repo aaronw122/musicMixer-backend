@@ -1552,6 +1552,14 @@ def generate_fallback_plan(meta_a: AudioMetadata, meta_b: AudioMetadata) -> Remi
     )
 
 
+_FALLBACK_ENERGY = {
+    "intro": "low", "outro": "low", "breakdown": "low",
+    "build": "medium", "verse": "medium",
+    "main": "high", "chorus": "high",
+    "drop": "peak",
+}
+
+
 def default_arrangement(total_beats: int) -> list[Section]:
     """Build a 5-, 6-, or 8-section fallback arrangement.
 
@@ -1562,6 +1570,13 @@ def default_arrangement(total_beats: int) -> list[Section]:
     Beat boundaries are snapped to 4-bar (16-beat) phrase boundaries for
     musically coherent transitions.
     """
+    sections = _default_sections(total_beats)
+    for s in sections:
+        s.energy = _FALLBACK_ENERGY.get(s.label, "medium")
+    return sections
+
+
+def _default_sections(total_beats: int) -> list[Section]:
     MIN_SECTION_BEATS = 8  # Absolute minimum -- shorter sections are musically meaningless
 
     def snap_to_phrase(beat: int, phrase_beats: int = 16) -> int:

@@ -61,20 +61,19 @@ def buses():
     return vocal, bed, sections, _beat_frames(beats), third
 
 
-def test_each_section_mix_lands_on_energy_target(buses):
+def test_bed_holds_energy_target_with_or_without_vocal(buses):
     vocal, bed, sections, frames, third = buses
-    leveled_vocal, leveled_bed, levels = level_buses(vocal, bed, sections, frames, SR, BPM)
-    mix = leveled_vocal + leveled_bed
+    _, leveled_bed, levels = level_buses(vocal, bed, sections, frames, SR, BPM)
 
     for i, energy in enumerate(("low", "high", "low")):
-        got = _lufs(mix[i * third:(i + 1) * third])
+        got = _lufs(leveled_bed[i * third:(i + 1) * third])
         assert got == pytest.approx(SECTION_TARGET_LUFS + ENERGY_OFFSET_DB[energy], abs=1.0), (
-            f"section {i} ({energy}) landed at {got:.1f} LUFS"
+            f"section {i} ({energy}) bed landed at {got:.1f} LUFS"
         )
     assert levels[0].bed_gain_db > 6.0   # the quiet intro was actually raised
 
 
-def test_vocal_sits_margin_above_bed_and_bed_makes_room(buses):
+def test_vocal_sits_margin_above_bed(buses):
     vocal, bed, sections, frames, third = buses
     leveled_vocal, leveled_bed, levels = level_buses(vocal, bed, sections, frames, SR, BPM)
 
@@ -82,11 +81,6 @@ def test_vocal_sits_margin_above_bed_and_bed_makes_room(buses):
     vocal_lufs = _lufs(leveled_vocal[third:2 * third])
     assert vocal_lufs - bed_under_vocal == pytest.approx(VOCAL_OVER_BED_DB, abs=1.0)
     assert levels[1].vocal_gain_db < 0  # it started far too hot
-
-    # bed sits below the section target under the vocal, at target without it
-    assert bed_under_vocal < SECTION_TARGET_LUFS - 2.0
-    bed_alone = _lufs(leveled_bed[2 * third:])
-    assert bed_alone == pytest.approx(SECTION_TARGET_LUFS + ENERGY_OFFSET_DB["low"], abs=1.0)
 
 
 def test_unplanned_vocal_sections_inherit_neighbour_gain(buses):

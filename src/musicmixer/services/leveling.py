@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 SECTION_TARGET_LUFS = -18.0
 ENERGY_OFFSET_DB: dict[str, float] = {"low": -3.0, "medium": -1.5, "high": 0.0, "peak": 1.0}
-VOCAL_OVER_BED_DB = 2.0
+VOCAL_OVER_BED_DB = 1.0
 BED_GAIN_RANGE_DB = (-6.0, 12.0)
 VOCAL_GAIN_RANGE_DB = (-12.0, 12.0)
 MIN_MEASURE_SEC = 3.0
@@ -91,10 +91,8 @@ def level_buses(
     1. Smooth intra-section swings on the bed alone (slow leveler; the vocal
        is not in the detector, so it cannot pump the bed).
     2. Put the bed at the section target (``SECTION_TARGET_LUFS`` plus the
-       energy offset).
-    3. Where the plan has a vocal, set it ``VOCAL_OVER_BED_DB`` above the bed,
-       then trim both so the summed section lands on the target: the bed makes
-       room under the vocal and comes back up when it leaves.
+       energy offset) and hold it there whether or not a vocal is present.
+    3. Where the plan has a vocal, set it ``VOCAL_OVER_BED_DB`` above the bed.
 
     Gain changes ramp over section transitions via ``build_section_curve``.
     """
@@ -129,21 +127,11 @@ def level_buses(
         for section, (s, e) in zip(sections, bounds)
     ]
     vocal_gains: list[float | None] = [None] * len(sections)
-    for i, (s, e) in enumerate(bounds):
+    for i in range(len(sections)):
         if math.isnan(vocal_lufs[i]):
             continue
         leveled_bed = targets[i] if math.isnan(bed_lufs[i]) else bed_lufs[i] + bed_gains_db[i]
-        vocal_gain = float(np.clip(leveled_bed + VOCAL_OVER_BED_DB - vocal_lufs[i], *VOCAL_GAIN_RANGE_DB))
-
-        summed = (
-            instrumental_bus[s:e] * _db_to_lin(bed_gains_db[i])
-            + vocal_bus[s:e] * _db_to_lin(vocal_gain)
-        )
-        trim = targets[i] - _measure(meter, summed, sr)
-        if not math.isnan(trim):
-            bed_gains_db[i] = float(np.clip(bed_gains_db[i] + trim, *BED_GAIN_RANGE_DB))
-            vocal_gain = float(np.clip(vocal_gain + trim, *VOCAL_GAIN_RANGE_DB))
-        vocal_gains[i] = vocal_gain
+        vocal_gains[i] = float(np.clip(leveled_bed + VOCAL_OVER_BED_DB - vocal_lufs[i], *VOCAL_GAIN_RANGE_DB))
     vocal_gains_db = _fill_unmeasured(vocal_gains)
 
     bed_curve = build_section_curve(
