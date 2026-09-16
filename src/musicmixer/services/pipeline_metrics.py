@@ -96,7 +96,7 @@ class PipelineMetrics:
     per_stem_lufs: dict[str, float] = field(default_factory=dict)
 
     # Processing fields
-    level_match_gain_db: float = 0.0
+    section_levels: list[dict] = field(default_factory=list)
 
     # Render fields
     render_duration_s: float = 0.0
@@ -228,13 +228,13 @@ class PipelineMetrics:
         self._check_stem_health_flags()
 
     def log_processing(self) -> None:
-        """Log processing details."""
+        """Log per-section bed/vocal leveling."""
         logger.info(
-            "Level matching applied",
+            "Section leveling applied",
             extra={
                 "session_id": self.session_id,
                 "pipeline_step": "processing",
-                "level_match_gain_db": round(self.level_match_gain_db, 1),
+                "section_levels": self.section_levels,
             },
         )
 
@@ -415,7 +415,7 @@ class PipelineMetrics:
                 "stems_inactive": self.stems_inactive,
                 "per_stem_lufs": {k: round(v, 1) for k, v in self.per_stem_lufs.items()},
                 # Processing
-                "level_match_gain_db": round(self.level_match_gain_db, 1),
+                "section_levels": self.section_levels,
                 # Render
                 "render_duration_s": round(self.render_duration_s, 1),
                 "per_step_times": {k: round(v, 2) for k, v in self.per_step_times.items()},

@@ -325,6 +325,7 @@ class Section:
     stem_gains: dict[str, float]   # {"vocals": 1.0, "drums": 0.7, "bass": 0.8, ...}
     transition_in: str              # "fade" | "crossfade" | "cut"
     transition_beats: int           # Length of transition envelope
+    energy: str = "medium"          # "low" | "medium" | "high" | "peak" — drives bed loudness offset
 
 
 # ---------------------------------------------------------------------------

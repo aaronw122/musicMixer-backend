@@ -23,7 +23,6 @@ from musicmixer.services.processor import (
     bandpass_filter,
     check_rubberband_version,
     compute_tempo_plan,
-    cross_song_level_match,
     export_mp3,
     highpass_filter,
     lufs_normalize,
@@ -431,26 +430,6 @@ class TestComputeTempoPlan:
 # ---------------------------------------------------------------------------
 # Step 4: LUFS Normalization + Peak Limiter + Fades + Export
 # ---------------------------------------------------------------------------
-
-
-class TestCrossSongLevelMatch:
-    def test_silent_input(self):
-        """Near-silent input returns unchanged audio."""
-        sr = SR
-        vocal = _make_stereo_sine(amplitude=0.0001)
-        instrumental = _make_stereo_sine(amplitude=0.5)
-        result = cross_song_level_match(vocal, instrumental, sr)
-        # Should return vocal unchanged (near-silent = below LUFS_FLOOR)
-        np.testing.assert_array_equal(result, vocal)
-
-    def test_normal_matching(self):
-        """Vocal audio is adjusted when both inputs are audible."""
-        sr = SR
-        vocal = _make_stereo_sine(amplitude=0.1)
-        instrumental = _make_stereo_sine(amplitude=0.5)
-        result = cross_song_level_match(vocal, instrumental, sr)
-        # Result should be louder than input (boosted to match instrumental + 3dB)
-        assert np.max(np.abs(result)) > np.max(np.abs(vocal))
 
 
 class TestLufsNormalize:

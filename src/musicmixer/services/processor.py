@@ -493,44 +493,6 @@ def compute_tempo_plan(
 # ---------------------------------------------------------------------------
 
 
-def cross_song_level_match(
-    vocal_audio: np.ndarray,
-    instrumental_sum: np.ndarray,
-    sr: int,
-) -> np.ndarray:
-    """Match vocal loudness to instrumental level.
-
-    Measures LUFS of vocal and instrumental via pyloudnorm.
-    Safety cap: clip gain to [-12, +12] dB.
-    """
-    meter = pyloudnorm.Meter(sr)
-    vocal_lufs = meter.integrated_loudness(vocal_audio)
-    instrumental_lufs = meter.integrated_loudness(instrumental_sum)
-
-    if vocal_lufs < LUFS_FLOOR or instrumental_lufs < LUFS_FLOOR:
-        logger.warning(
-            "Skipping level matching: vocal=%.1f LUFS, instrumental=%.1f LUFS",
-            vocal_lufs,
-            instrumental_lufs,
-        )
-        return vocal_audio
-
-    # Vocals and instrumentals at equal LUFS. Per-section stem_gains in the
-    # arrangement handle the artistic balance (vocals forward in chorus, etc.).
-    # +2 dB compromise: +3 clipped with compressor makeup, 0 buried vocals. Revisit with spectral ducking (Day 4).
-    vocal_offset_db = 2.0
-    target_vocal_lufs = instrumental_lufs + vocal_offset_db
-    gain_db = target_vocal_lufs - vocal_lufs
-    gain_db = float(np.clip(gain_db, -12.0, 12.0))
-    logger.info(
-        "Level match: vocal=%.1f LUFS, inst=%.1f LUFS, gain=%.1f dB",
-        vocal_lufs,
-        instrumental_lufs,
-        gain_db,
-    )
-    return vocal_audio * (10 ** (gain_db / 20.0))
-
-
 def compress_dynamic_range(
     audio: np.ndarray,
     sr: int,
@@ -631,32 +593,21 @@ def auto_level(
     max_boost_db: float = 6.0,
     max_cut_db: float = 4.0,
     target_percentile: float = 50.0,
-    detector_audio: np.ndarray | None = None,
     active_floor_db: float = -45.0,
 ) -> np.ndarray:
     """Slow automatic gain control that maintains consistent RMS level.
 
     Unlike compression (which only reduces peaks), this can BOOST quiet
-    sections to maintain overall consistency.  Uses a long analysis window
-    (2s default) so gain changes are imperceptible — no "pumping".
-
-    This specifically addresses the gap between vocal phrases: when the
-    vocal drops to silence between bars, the instrumental-only mix is
-    quieter.  The leveler gently boosts those moments so the overall
-    volume feels consistent.
+    passages. Uses a long analysis window so gain changes are imperceptible.
 
     active_floor_db: RMS floor in dBFS below which a window is considered
         inactive (tail/silence). Inactive windows are never boosted —
         only cuts are applied if they exceed threshold. Default -45 dBFS.
     """
-    # Use a separate detector signal for RMS analysis if provided.
-    # This lets the caller drive leveling from the instrumental bus so
-    # vocal gain transitions don't trigger reactive cuts/boosts.
-    det = detector_audio if detector_audio is not None else audio
-    if det.ndim == 2:
-        mono = np.mean(det, axis=1)
+    if audio.ndim == 2:
+        mono = np.mean(audio, axis=1)
     else:
-        mono = det
+        mono = audio
 
     # Convert dBFS floor to linear RMS threshold
     active_floor_linear = 10.0 ** (active_floor_db / 20.0)

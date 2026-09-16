@@ -97,6 +97,82 @@ def beats_to_samples(
     return int(beat_frames[beat_index] * hop_length * sr_scale)
 
 
+def section_sample_bounds(
+    sections: list[Section],
+    total_samples: int,
+    beat_frames: np.ndarray,
+    sr: int,
+    hop_length: int = 512,
+    target_bpm: float | None = None,
+) -> list[tuple[int, int]]:
+    """Clamped [start, end) sample range for each section."""
+    bounds = []
+    for section in sections:
+        start = beats_to_samples(section.start_beat, beat_frames, sr, hop_length, target_bpm=target_bpm)
+        end = beats_to_samples(section.end_beat, beat_frames, sr, hop_length, target_bpm=target_bpm)
+        start = max(0, min(start, total_samples))
+        end = max(start, min(end, total_samples))
+        bounds.append((start, end))
+    return bounds
+
+
+def build_section_curve(
+    sections: list[Section],
+    gains: list[float],
+    total_samples: int,
+    beat_frames: np.ndarray,
+    sr: int,
+    hop_length: int = 512,
+    last_beat: int = 0,
+    target_bpm: float | None = None,
+) -> np.ndarray:
+    """One continuous gain curve: flat per section, cosine-ramped at boundaries.
+
+    ``gains[i]`` is the value held through ``sections[i]``. Each boundary
+    ramps over ``transition_beats`` (capped at 8 and a third of the section)
+    so contiguous sections never step or dip to zero.
+    """
+    curve = np.zeros(total_samples, dtype=np.float32)
+
+    for (start, end), gain in zip(
+        section_sample_bounds(sections, total_samples, beat_frames, sr, hop_length, target_bpm),
+        gains,
+    ):
+        curve[start:end] = gain
+
+    for i in range(1, len(sections)):
+        section = sections[i]
+        section_beats = section.end_beat - section.start_beat
+        trans_beats = min(section.transition_beats, 8, section_beats // 3)
+        if trans_beats <= 0:
+            continue
+
+        # Split: quick out before the boundary, smooth in after
+        before_beats = trans_beats // 2
+        after_beats = trans_beats - before_beats
+        trans_start = beats_to_samples(
+            max(0, section.start_beat - before_beats), beat_frames, sr, hop_length, target_bpm=target_bpm
+        )
+        trans_end = beats_to_samples(
+            min(last_beat, section.start_beat + after_beats), beat_frames, sr, hop_length, target_bpm=target_bpm
+        )
+        trans_start = max(0, min(trans_start, total_samples))
+        trans_end = max(trans_start, min(trans_end, total_samples))
+        trans_len = trans_end - trans_start
+        if trans_len <= 0:
+            continue
+
+        prev_gain = gains[i - 1]
+        curr_gain = gains[i]
+        if abs(prev_gain - curr_gain) < 0.001:
+            continue
+
+        t = np.linspace(0, 1, trans_len, dtype=np.float32)
+        curve[trans_start:trans_end] = prev_gain + (curr_gain - prev_gain) * (1 - np.cos(t * np.pi)) / 2
+
+    return curve
+
+
 def _build_gain_curves(
     sections: list[Section],
     all_stem_names: list[str],
@@ -107,77 +183,15 @@ def _build_gain_curves(
     last_beat: int = 0,
     target_bpm: float | None = None,
 ) -> dict[str, np.ndarray]:
-    """Build continuous per-stem gain curves across the full track.
-
-    For each stem, creates a gain curve that:
-    1. Holds the section's gain value throughout each section's body
-    2. Smoothly interpolates (cosine) between adjacent sections' gains
-       over the transition_beats region at each boundary
-
-    This eliminates the "fade from silence" bug where crossfades between
-    contiguous (non-overlapping) sections caused volume drops to zero.
-
-    Returns:
-        Dict mapping stem name to float32 array of shape (total_samples,).
-    """
-    gain_curves: dict[str, np.ndarray] = {}
-
-    for stem_name in all_stem_names:
-        curve = np.zeros(total_samples, dtype=np.float32)
-
-        # First pass: fill each section with its flat gain
-        for section in sections:
-            start = beats_to_samples(section.start_beat, beat_frames, sr, hop_length, target_bpm=target_bpm)
-            end = beats_to_samples(section.end_beat, beat_frames, sr, hop_length, target_bpm=target_bpm)
-            start = max(0, min(start, total_samples))
-            end = max(start, min(end, total_samples))
-            gain = section.stem_gains.get(stem_name, 0.0)
-            curve[start:end] = gain
-
-        # Second pass: smooth transitions at section boundaries
-        for i in range(1, len(sections)):
-            section = sections[i]
-            prev_section = sections[i - 1]
-
-            # Clamp transition to a short, fixed duration (4 beats)
-            # to prevent transitions from consuming entire short sections.
-            # The arrangement's transition_beats is treated as a hint but
-            # capped here to avoid compounding energy dips.
-            section_beats = section.end_beat - section.start_beat
-            trans_beats = min(section.transition_beats, 8, section_beats // 3)
-            if trans_beats <= 0:
-                continue
-
-            # Split: 1 beat before boundary, rest after (quick out, smooth in)
-            before_beats = trans_beats // 2
-            after_beats = trans_beats - before_beats
-            trans_start = beats_to_samples(
-                max(0, section.start_beat - before_beats), beat_frames, sr, hop_length, target_bpm=target_bpm
-            )
-            trans_end = beats_to_samples(
-                min(last_beat, section.start_beat + after_beats), beat_frames, sr, hop_length, target_bpm=target_bpm
-            )
-            trans_start = max(0, min(trans_start, total_samples))
-            trans_end = max(trans_start, min(trans_end, total_samples))
-            trans_len = trans_end - trans_start
-
-            if trans_len <= 0:
-                continue
-
-            prev_gain = prev_section.stem_gains.get(stem_name, 0.0)
-            curr_gain = section.stem_gains.get(stem_name, 0.0)
-
-            if abs(prev_gain - curr_gain) < 0.001:
-                continue  # No change, skip interpolation
-
-            # Cosine interpolation: smooth S-curve from prev_gain to curr_gain
-            t = np.linspace(0, 1, trans_len, dtype=np.float32)
-            interp = prev_gain + (curr_gain - prev_gain) * (1 - np.cos(t * np.pi)) / 2
-            curve[trans_start:trans_end] = interp
-
-        gain_curves[stem_name] = curve
-
-    return gain_curves
+    """Per-stem gain curves across the full track (see build_section_curve)."""
+    return {
+        stem_name: build_section_curve(
+            sections,
+            [section.stem_gains.get(stem_name, 0.0) for section in sections],
+            total_samples, beat_frames, sr, hop_length, last_beat, target_bpm,
+        )
+        for stem_name in all_stem_names
+    }
 
 
 def render_arrangement(
