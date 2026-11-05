@@ -41,8 +41,9 @@ services:
         max-file: "3"
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # No published ports: the app reaches Redis over the compose network
+    # (REDIS_URL=redis://redis:6379). Publishing 6379 exposed it to the internet
+    # and it was hijacked on 2026-10-29.
     volumes:
       - redis-data:/data
     command: redis-server --save 60 1 --loglevel warning
