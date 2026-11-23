@@ -1,15 +1,13 @@
 """Modal GPU inference for SongFormer song structure detection.
 
-Defines a Modal app that runs SongFormer on a T4 GPU. Called by
-structure_ml.py as the primary inference backend, with local CPU
-as fallback.
+Defines a Modal app that runs SongFormer on an L40S GPU. Called by
+structure_ml.py; on failure the pipeline falls back to heuristics.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from functools import lru_cache
 
 import modal
 
@@ -57,9 +55,8 @@ image = (
 )
 
 
-@lru_cache(maxsize=1)
-def _load_songformer_model():
-    """Load SongFormer once per warm Modal container.
+def _build_songformer_model():
+    """Build SongFormer on CPU (snapshot-safe: must not touch CUDA).
 
     Bypasses both AutoModel (check_imports issue) AND from_pretrained
     (meta tensor issue). Loads the model the same way the official
@@ -69,7 +66,6 @@ def _load_songformer_model():
     import os
     import sys
 
-    import torch
     from safetensors.torch import load_file
 
     if _MODEL_DIR not in sys.path:
@@ -86,62 +82,66 @@ def _load_songformer_model():
         config_dict = json.load(f)
     config = SongFormerConfig(**config_dict)
 
-    # Instantiate model on CPU (avoids meta tensor context)
     model = SongFormerModel(config)
 
     weights_path = os.path.join(_MODEL_DIR, "model.safetensors")
     state_dict = load_file(weights_path)
     model.load_state_dict(state_dict, strict=False)
-
-    model.to(torch.device("cuda:0"))
     model.eval()
 
-    elapsed = time.monotonic() - t0
-    logger.info("SongFormer model loaded in %.1fs", elapsed)
+    logger.info("SongFormer model built in %.1fs", time.monotonic() - t0)
     return model
 
 
-@app.function(image=image, gpu="L4", timeout=300)
-def analyze_structure_remote(audio_bytes: bytes, filename: str = "input.wav") -> list[dict]:
-    """Run SongFormer inference on GPU.
+# CPU snapshot captures the 18s model build; only the CUDA move runs per cold start.
+@app.cls(
+    image=image,
+    gpu="L40S",
+    timeout=300,
+    scaledown_window=120,
+    enable_memory_snapshot=True,
+    secrets=[modal.Secret.from_name("HUGGINGFACE")],
+)
+class SongFormer:
+    @modal.enter(snap=True)
+    def build(self):
+        self.model = _build_songformer_model()
 
-    Accepts audio file bytes (Modal containers can't access the caller's
-    filesystem). Returns a list of segment dicts with keys ``label``,
-    ``start``, and ``end`` (seconds, float).
-    """
-    import logging as _logging
-    import sys
-    import tempfile
-    from pathlib import Path
+    @modal.enter()
+    def to_gpu(self):
+        import torch
 
-    _logger = _logging.getLogger(__name__)
+        self.model.to(torch.device("cuda:0"))
 
-    if _MODEL_DIR not in sys.path:
-        sys.path.insert(0, _MODEL_DIR)
+    @modal.method()
+    def analyze(self, audio_bytes: bytes, filename: str = "input.wav") -> list[dict]:
+        """Run SongFormer inference on GPU.
 
-    model = _load_songformer_model()
+        Accepts audio file bytes (Modal containers can't access the caller's
+        filesystem). Returns a list of segment dicts with keys ``label``,
+        ``start``, and ``end`` (seconds, float).
+        """
+        import tempfile
+        from pathlib import Path
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = Path(tmpdir) / filename
-        input_path.write_bytes(audio_bytes)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / filename
+            input_path.write_bytes(audio_bytes)
 
-        _logger.info("Running SongFormer inference on %s", filename)
-        t0 = time.monotonic()
+            logger.info("Running SongFormer inference on %s", filename)
+            t0 = time.monotonic()
+            raw_segments: list[dict] = self.model(str(input_path))
+            logger.info(
+                "Inference completed in %.1fs (%d segments)",
+                time.monotonic() - t0,
+                len(raw_segments),
+            )
 
-        raw_segments: list[dict] = model(str(input_path))
-
-        elapsed = time.monotonic() - t0
-        _logger.info(
-            "Inference completed in %.1fs (%d segments)",
-            elapsed,
-            len(raw_segments),
-        )
-
-    return [
-        {
-            "label": str(seg["label"]),
-            "start": float(seg["start"]),
-            "end": float(seg["end"]),
-        }
-        for seg in raw_segments
-    ]
+        return [
+            {
+                "label": str(seg["label"]),
+                "start": float(seg["start"]),
+                "end": float(seg["end"]),
+            }
+            for seg in raw_segments
+        ]

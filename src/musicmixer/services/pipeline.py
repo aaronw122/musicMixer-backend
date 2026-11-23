@@ -4,10 +4,12 @@ Runs the remix pipeline in a background thread, emitting SSE progress events.
 Complete 16-step chain: separation -> analysis -> plan -> processing -> render -> export.
 """
 
+import contextlib
 import logging
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +116,19 @@ def progress_ticker(event_queue, session, start, end, step_name, detail, interva
     return stop
 
 
+_STRUCTURE_ML_TIMEOUT_S = 120  # covers Modal cold starts
+
+
+@contextlib.contextmanager
+def _detached_pool(max_workers: int):
+    """Executor whose exit never blocks: a hung Modal call must not outlive its timeout."""
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        yield pool
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 # ---------------------------------------------------------------------------
 # Step functions
 # ---------------------------------------------------------------------------
@@ -214,7 +229,7 @@ def _step_separate_and_analyze(
              lyrics_a_data, lyrics_b_data, ml_segments_a, ml_segments_b,
              song_a_stems_dir, song_b_stems_dir).
     """
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+    from concurrent.futures import TimeoutError as FuturesTimeoutError, as_completed
 
     from musicmixer.config import settings
     from musicmixer.services.lyrics import lookup_lyrics_for_song
@@ -272,8 +287,6 @@ def _step_separate_and_analyze(
     pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 analysis
     if settings.lyrics_lookup_enabled:
         pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 lyrics
-    if structure_ml_enabled:
-        pool_workers += int(_need_fresh_a) + int(_need_fresh_b)  # 0-2 ML structure
 
     structure_future_a = None
     structure_future_b = None
@@ -312,7 +325,10 @@ def _step_separate_and_analyze(
             on_wait=_on_wait,
         )
 
-    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+    with (
+        ThreadPoolExecutor(max_workers=pool_workers) as pool,
+        _detached_pool(max_workers=2) as structure_pool,
+    ):
         # Separation futures: ALWAYS run (even with cached metadata, stems
         # must be separated for the new role). Each goes through the cache-aware
         # wrapper so concurrent sessions/workers dedup separation per (video,role).
@@ -328,9 +344,9 @@ def _step_separate_and_analyze(
         # ML structure futures (skip when cached metadata is available)
         if structure_ml_enabled:
             if _need_fresh_a:
-                structure_future_a = pool.submit(analyze_structure_ml, song_a_path)
+                structure_future_a = structure_pool.submit(analyze_structure_ml, song_a_path)
             if _need_fresh_b:
-                structure_future_b = pool.submit(analyze_structure_ml, song_b_path)
+                structure_future_b = structure_pool.submit(analyze_structure_ml, song_b_path)
 
         # Lyrics futures (skip when cached metadata is available)
         if settings.lyrics_lookup_enabled:
@@ -405,8 +421,8 @@ def _step_separate_and_analyze(
             except Exception:
                 logger.warning("Session %s: Lyrics lookup failed for Song B", session_id, exc_info=True)
 
-        # --- Collect ML structure results (120s timeout for Modal cold starts) ---
-        _STRUCTURE_ML_TIMEOUT_S = 120
+        # --- Collect ML structure results (one budget shared by both songs) ---
+        structure_deadline = time.monotonic() + _STRUCTURE_ML_TIMEOUT_S
         for label, future, target in [
             ("A", structure_future_a, "ml_segments_a"),
             ("B", structure_future_b, "ml_segments_b"),
@@ -414,7 +430,7 @@ def _step_separate_and_analyze(
             if future is None:
                 continue
             try:
-                segments = future.result(timeout=_STRUCTURE_ML_TIMEOUT_S)
+                segments = future.result(timeout=max(0.0, structure_deadline - time.monotonic()))
                 if target == "ml_segments_a":
                     ml_segments_a = segments
                 else:

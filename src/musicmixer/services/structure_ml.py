@@ -92,10 +92,8 @@ def _analyze_modal(audio_path: Path) -> list[dict]:
     t0 = time.monotonic()
 
     audio_bytes = audio_path.read_bytes()
-    analyze_fn = modal.Function.from_name(
-        "musicmixer-songformer", "analyze_structure_remote"
-    )
-    raw_segments: list[dict] = analyze_fn.remote(audio_bytes, audio_path.name)
+    songformer_cls = modal.Cls.from_name("musicmixer-songformer", "SongFormer")
+    raw_segments: list[dict] = songformer_cls().analyze.remote(audio_bytes, audio_path.name)
 
     elapsed = time.monotonic() - t0
     logger.info(
