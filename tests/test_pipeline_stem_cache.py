@@ -500,3 +500,28 @@ class TestPipelineStemCache:
         assert sep_b.calls == 1
         assert (stems_dir / "song_a" / "lead_vocals.wav").is_file()
         assert (stems_dir / "song_b" / "drums.wav").is_file()
+
+
+def test_hung_ml_structure_does_not_block_past_timeout(clean_redis, cache_dir, fast_coord, tmp_path, monkeypatch):
+    import musicmixer.services.pipeline as pipeline
+    import musicmixer.services.structure_ml as structure_ml
+
+    monkeypatch.setattr(settings, "lyrics_lookup_enabled", False)
+    monkeypatch.setattr(settings, "section_detection_backend", "auto")
+    monkeypatch.setattr(pipeline, "_STRUCTURE_ML_TIMEOUT_S", 0.5)
+    release = threading.Event()
+    monkeypatch.setattr(structure_ml, "analyze_structure_ml", lambda _p: release.wait(30))
+
+    try:
+        t0 = time.monotonic()
+        result, _ = _run_step(
+            "s1", tmp_path / "stems" / "s1",
+            video_id_a="test_hung_a", video_id_b="test_hung_b",
+            sep_a=_Separator(_VOCAL_STEMS), sep_b=_Separator(_INSTRUMENTAL_STEMS),
+        )
+        elapsed = time.monotonic() - t0
+    finally:
+        release.set()
+
+    assert elapsed < 10
+    assert result[6] is None and result[7] is None
